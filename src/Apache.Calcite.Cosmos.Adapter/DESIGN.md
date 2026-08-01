@@ -314,14 +314,17 @@ incorrect plan, not a slow one.
 ```
 src/
   Apache.Calcite.Cosmos.Adapter/
-    CosmosConvention.cs               Per-container calling convention
-    CosmosImplementor.cs              Mutable SQL accumulator
+    CosmosConvention.cs               ✔ Per-container calling convention
+    CosmosImplementor.cs              ✔ Mutable SQL accumulator
     CosmosRules.cs                    Rule set for a convention instance
     CosmosSchema.cs                   Calcite Schema over a database
     CosmosSchemaFactory.cs            SchemaFactory for JSON model registration
     CosmosTable.cs                    Calcite Table over a container
+    Metadata/
+      CosmosCompositeIndex.cs         ✔ Composite index and sort-key matching
+      CosmosContainerMetadata.cs      ✔ Declared container facts; sort legality
     Rel/
-      CosmosRel.cs                    Marker + implement contract
+      CosmosRel.cs                    ✔ Implement contract
       CosmosTableScan.cs
       CosmosFilter.cs
       CosmosProject.cs

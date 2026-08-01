@@ -138,6 +138,30 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
         }
 
         /// <summary>
+        /// Renders this path in the form used by container indexing policies, such as
+        /// <c>/inventory/quantity</c>, discarding the root alias.
+        /// </summary>
+        /// <remarks>
+        /// Array subscripts render as the <c>/[]</c> wildcard, since indexing policies address
+        /// array elements collectively rather than by position. Trailing <c>/?</c> and <c>/*</c>
+        /// specifiers are not emitted: composite index paths omit them, and callers comparing
+        /// against included or excluded paths should account for them separately.
+        /// </remarks>
+        /// <returns>The policy-form path, or <c>/</c> for a root path.</returns>
+        public string ToPolicyPath()
+        {
+            if (_segments.Length == 0)
+                return "/";
+
+            var builder = new StringBuilder();
+
+            foreach (var segment in _segments)
+                builder.Append('/').Append(segment.IsIndex ? "[]" : segment.Name);
+
+            return builder.ToString();
+        }
+
+        /// <summary>
         /// Appends the rendered path to <paramref name="builder"/>.
         /// </summary>
         /// <param name="builder">The buffer to append to.</param>
