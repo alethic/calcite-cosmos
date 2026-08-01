@@ -170,9 +170,13 @@ them. `CostMultiplier` (0.8) biases the planner toward pushing work into Cosmos.
 ```csharp
 public interface CosmosRel : RelNode
 {
-    void implement(CosmosImplementor implementor);
+    void Implement(CosmosImplementor implementor);
 }
 ```
+
+Naming follows the house style in the sibling `calcite-dotnet` repository: members overriding
+Java declarations keep their lowercase Java names (`register`, `getInterface`), while new
+.NET-side contracts are PascalCase.
 
 `CosmosImplementor` accumulates:
 
@@ -326,11 +330,17 @@ src/
       CosmosUnnest.cs
       Convert/                        One converter rule per node
     Sql/
-      CosmosSqlWriter.cs              Statement rendering
+      CosmosSql.cs                    ✔ Lexical primitives: identifiers, paths, JSON literals
+      CosmosPath.cs                   ✔ Immutable property path rooted at a FROM alias
+      CosmosParameterList.cs          ✔ @pN binding
+      CosmosQueryBuilder.cs           ✔ Statement assembly and language-constraint enforcement
       CosmosRexTranslator.cs          RexNode → Cosmos scalar expression
-      CosmosParameterList.cs          @pN binding
   Apache.Calcite.Cosmos.Adapter.Tests/
 ```
+
+✔ marks what exists today. The `Sql/` layer is deliberately free of any dependency on the
+convention or on the CLR enumerable conventions being built in `calcite-dotnet`, so it can be
+completed and tested ahead of them.
 
 ---
 
