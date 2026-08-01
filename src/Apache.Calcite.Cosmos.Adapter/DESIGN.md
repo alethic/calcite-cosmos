@@ -429,6 +429,41 @@ completed and tested ahead of them.
 
 ---
 
+## Calcite's JDBC entry points under IKVM
+
+`Frameworks.getPlanner` and `RelBuilder.create` open an internal Calcite JDBC connection. Under
+IKVM that fails:
+
+```
+java.lang.RuntimeException: Error loading factory org.apache.calcite.jdbc.CalciteJdbc41Factory
+ ---> java.lang.ClassNotFoundException: org.apache.calcite.jdbc.CalciteJdbc41Factory
+```
+
+The class is present and loadable — `Class.forName` on it from adapter code succeeds. The cause
+is that **IKVM gives each assembly its own class loader**, where a JVM has one flat classpath.
+Avatica's `UnregisteredDriver` resolves the factory with `Class.forName`, which binds against the
+calling class's loader — `avatica.core`. The factory lives in `calcite.core`, and avatica does
+not reference calcite; the dependency runs the other way. So the lookup fails, the driver's type
+initializer throws, and every entry point that opens a connection fails with it.
+
+The fix is to publish the assembly into the boot class loader, restoring the flat-classpath
+assumption the Java code was written against:
+
+```csharp
+ikvm.runtime.Startup.addBootClassPathAssembly(typeof(org.apache.calcite.jdbc.CalciteFactory).Assembly);
+```
+
+This must run before the driver is first touched, since a type initializer runs once and caches
+its failure. The test assembly does it from a `[ModuleInitializer]`; `[AssemblyInitialize]` is
+not reliably early enough.
+
+The adapter itself does not need any of this: it never opens a connection, and the SQL planning
+in `CosmosSqlPlanningTests` drives `SqlParser`, `SqlValidator` and `SqlToRelConverter` directly,
+none of which require the driver. The note is recorded because any consumer reaching for
+`Frameworks` or `RelBuilder` will hit it.
+
+---
+
 ## Unvalidated assumptions
 
 Recorded so they are not mistaken for tested behaviour.
