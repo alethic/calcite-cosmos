@@ -44,17 +44,34 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
         /// <returns>The array expression, or <c>null</c>.</returns>
         public static RexNode? GetArrayExpression(Correlate correlate)
         {
-            if (correlate.getRight() is not Uncollect uncollect)
+            if (Strip(correlate.getRight()) is not Uncollect uncollect)
                 return null;
 
             // Cosmos has no way to surface an element's position.
             if (uncollect.withOrdinality)
                 return null;
 
-            if (uncollect.getInput() is not Project project || project.getProjects().size() != 1)
+            if (Strip(uncollect.getInput()) is not Project project || project.getProjects().size() != 1)
                 return null;
 
             return (RexNode)project.getProjects().get(0);
+        }
+
+        /// <summary>
+        /// Resolves an input to a concrete node.
+        /// </summary>
+        /// <remarks>
+        /// Once a tree is registered with the Volcano planner, an operator's inputs are equivalence
+        /// sets rather than the nodes themselves, so a rule inspecting more than its own node has
+        /// to see through them. This is why the rule is written against the whole correlate: the
+        /// shape it needs spans three levels, and only the top one is bound directly.
+        /// </remarks>
+        static RelNode? Strip(RelNode? node)
+        {
+            for (var i = 0; node is org.apache.calcite.plan.volcano.RelSubset subset && i < 8; i++)
+                node = subset.getBest() ?? subset.getOriginal();
+
+            return node;
         }
 
         /// <summary>

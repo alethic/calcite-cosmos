@@ -39,6 +39,7 @@ namespace Apache.Calcite.Cosmos.Adapter
     {
 
         readonly CosmosContainerMetadata _container;
+        readonly CosmosConvention _convention;
 
         /// <summary>
         /// Initializes a new instance.
@@ -48,12 +49,24 @@ namespace Apache.Calcite.Cosmos.Adapter
         public CosmosTable(CosmosContainerMetadata container)
         {
             _container = container ?? throw new ArgumentNullException(nameof(container));
+            _convention = CosmosConvention.Create(container);
         }
 
         /// <summary>
         /// Gets the container this table exposes.
         /// </summary>
         public CosmosContainerMetadata Container => _container;
+
+        /// <summary>
+        /// Gets the calling convention for this container.
+        /// </summary>
+        /// <remarks>
+        /// Held for the life of the table rather than created per scan. Conventions are traits and
+        /// compare by identity, so a fresh instance per <see cref="toRel"/> would make two scans of
+        /// the same container look like two different conventions and provoke converters between
+        /// them.
+        /// </remarks>
+        public CosmosConvention Convention => _convention;
 
         /// <summary>
         /// Returns the names of the columns promoted alongside the map column, in order.
@@ -217,7 +230,7 @@ namespace Apache.Calcite.Cosmos.Adapter
         public RelNode toRel(RelOptTable.ToRelContext context, RelOptTable relOptTable)
         {
             var cluster = context.getCluster();
-            return new CosmosTableScan(cluster, cluster.traitSetOf(CosmosConvention.Create(_container)), relOptTable);
+            return new CosmosTableScan(cluster, cluster.traitSetOf(_convention), relOptTable);
         }
 
     }
