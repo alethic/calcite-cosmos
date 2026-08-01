@@ -142,12 +142,16 @@ yet implemented.
 emitted `(NOT IS_DEFINED(v) OR IS_NULL(v))` matches both that and the absent case, as intended.
 Documents missing the sort property are returned by `ORDER BY`, not dropped.
 
-**The emulator does not enforce the composite index requirement.** Multi-key `ORDER BY` was
-accepted on containers with no composite index, cross-partition, with mixed directions, and even
-on a path explicitly excluded from the index. This contradicts the documented service behaviour
-and is understood to be emulator leniency. The composite index guard is retained on the strength
-of the documentation; **the emulator cannot be used to test it**, and it should be re-verified
-against a real account.
+**The emulator does not implement composite indexes at all.** A container created with one
+composite index reports zero on both the create response and a subsequent read, while excluded
+paths in the same policy survive — so the definition is silently discarded rather than rejected.
+Consistently, multi-key `ORDER BY` was accepted on containers with no composite index,
+cross-partition, with mixed directions, and even on a path explicitly excluded from the index.
+
+This contradicts the documented service behaviour. The composite index guard is retained on the
+strength of the documentation; **the emulator can verify neither the guard nor the metadata
+round-trip**, and both should be re-checked against a real account before the adapter is relied
+on.
 
 ---
 
@@ -365,9 +369,12 @@ src/
     CosmosSchema.cs                   ✔ Calcite Schema over a database
     CosmosTable.cs                    ✔ Calcite Table over a container
     CosmosSchemaFactory.cs            SchemaFactory for JSON model registration
+    Client/
+      CosmosQueryExecutor.cs          ✔ Executes a rendered statement via the Cosmos SDK
     Metadata/
       CosmosCompositeIndex.cs         ✔ Composite index and sort-key matching
       CosmosContainerMetadata.cs      ✔ Declared container facts; sort legality
+      CosmosContainerMetadataReader.cs ✔ ContainerProperties → CosmosContainerMetadata
     Rel/
       CosmosRel.cs                    ✔ Implement contract
       CosmosTableScan.cs              ✔
@@ -409,6 +416,9 @@ completed and tested ahead of them.
 - **One container per convention instance.** Cross-container work happens above the convention
   boundary, in Calcite.
 - **No ADO.NET or JDBC dependency.** Execution goes through the Cosmos SDK.
+- **SDK types stay at the edges.** `Microsoft.Azure.Cosmos` appears only in `Client/` and in the
+  metadata reader. Planning, translation, and statement assembly are independent of the service,
+  which is what lets the bulk of the suite run with no client, no emulator, and no network.
 - **Parameterize rather than interpolate.** Literals that could carry user data bind as `@pN`.
 - **Targeting.** The adapter targets .NET 8 (C# 12); tests target .NET 8 and .NET 10.
 

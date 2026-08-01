@@ -15,6 +15,12 @@
     </ItemGroup>
 
     <ItemGroup>
+        <PackageReference Include="Microsoft.Azure.Cosmos" Version="3.62.0" />
+        <!-- Required by Microsoft.Azure.Cosmos, which fails the build without an explicit reference. -->
+        <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    </ItemGroup>
+
+    <ItemGroup>
         <PackageReference Include="IKVM" Version="8.15.0" />
         <PackageReference Include="IKVM.Java.Extensions" Version="8.15.0" />
         <PackageReference Include="IKVM.Maven.Sdk" Version="1.11.0">
