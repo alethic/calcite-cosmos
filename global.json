@@ -1,0 +1,11 @@
+{
+    "sdk": {
+        "version": "10.0.0",
+        "rollForward": "latestMajor"
+    },
+    "msbuild-sdks": {
+        "Microsoft.Build.NoTargets": "3.7.134",
+        "IKVM.Net.Sdk": "8.15.0",
+        "MSTest.Sdk": "3.10.4"
+    }
+}
