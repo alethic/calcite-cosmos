@@ -70,9 +70,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             planner.addRelTraitDef(ConventionTraitDef.INSTANCE);
             var cluster = RelOptCluster.create(planner, new RexBuilder(typeFactory));
 
-#pragma warning disable CS0612 // The Config-taking overload is not exposed through IKVM.
-            var converter = new SqlToRelConverter(null, validator, catalogReader, cluster, StandardConvertletTable.INSTANCE);
-#pragma warning restore CS0612
+            var converter = new SqlToRelConverter(null, validator, catalogReader, cluster, StandardConvertletTable.INSTANCE, SqlToRelConverter.config());
 
             return converter.convertQuery(validated, false, true).rel;
         }
