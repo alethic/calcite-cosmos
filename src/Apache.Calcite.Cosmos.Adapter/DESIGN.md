@@ -334,7 +334,10 @@ src/
       CosmosPath.cs                   ✔ Immutable property path rooted at a FROM alias
       CosmosParameterList.cs          ✔ @pN binding
       CosmosQueryBuilder.cs           ✔ Statement assembly and language-constraint enforcement
-      CosmosRexTranslator.cs          RexNode → Cosmos scalar expression
+      CosmosRexTranslator.cs          ✔ RexNode → Cosmos scalar expression
+      CosmosTranslationException.cs   ✔ Refusal signal
+    Internal/
+      BigDecimalConverter.cs          ✔ Lossless BigDecimal → decimal
   Apache.Calcite.Cosmos.Adapter.Tests/
 ```
 
