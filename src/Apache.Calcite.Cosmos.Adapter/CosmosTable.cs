@@ -113,15 +113,17 @@ namespace Apache.Calcite.Cosmos.Adapter
 
             foreach (var name in GetPromotedColumnNames())
             {
+                // Only the service-generated properties are guaranteed present on every item.
+                // A partition key path is declared, but a document may omit it — such items land
+                // in the "none" logical partition. Declaring it non-nullable would licence the
+                // planner to rewrite COUNT(x) into COUNT(*) and to reason about null placement in
+                // ways the data does not support.
                 var type = name switch
                 {
                     CosmosContainerMetadata.TimestampPropertyName => typeFactory.createSqlType(SqlTypeName.BIGINT),
                     CosmosContainerMetadata.IdPropertyName => varchar,
                     CosmosContainerMetadata.ETagPropertyName => varchar,
-
-                    // A declared path is guaranteed to exist but not to hold any particular type;
-                    // documents in one container may disagree.
-                    _ => any,
+                    _ => typeFactory.createTypeWithNullability(any, true),
                 };
 
                 builder.add(name, type);

@@ -180,7 +180,73 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             Render(best).Should().Be("SELECT VALUE { \"id\": c.id } FROM products c JOIN t0 IN c.tags");
         }
 
+        // ── Aggregation ───────────────────────────────────────────────────────────
+
+        [TestMethod]
+        public void GroupByWithCountIsSelectedByThePlanner()
+        {
+            var best = PlanToCosmos("SELECT c.\"category\", COUNT(*) FROM products AS c GROUP BY c.\"category\"");
+
+            Plan(best).Should().Contain("CosmosAggregate");
+            Render(best).Should().Contain("GROUP BY c.category");
+            Render(best).Should().Contain("COUNT(1)");
+        }
+
+        /// <remarks>
+        /// <c>_ts</c> is service-guaranteed and therefore non-nullable, so Cosmos and SQL agree on
+        /// the aggregate's value.
+        /// </remarks>
+        [TestMethod]
+        public void AggregateOverANonNullableColumnIsSelected()
+        {
+            var best = PlanToCosmos("SELECT c.\"category\", MAX(c.\"_ts\") FROM products AS c GROUP BY c.\"category\"");
+
+            Plan(best).Should().Contain("CosmosAggregate");
+            Render(best).Should().Contain("MAX(c._ts)");
+        }
+
+        [TestMethod]
+        public void GroupByRendersTheWholeStatement()
+        {
+            var sql = Render(PlanToCosmos("SELECT c.\"category\", COUNT(*) AS n FROM products AS c GROUP BY c.\"category\""));
+
+            // Flat rather than an object constructor: Cosmos rejects an aggregate inside one.
+            sql.Should().Be("SELECT c.category AS \"category\", COUNT(1) AS \"n\" FROM products c GROUP BY c.category");
+        }
+
         // ── The planner declines rather than guessing ─────────────────────────────
+
+        /// <remarks>
+        /// Measured on the emulator, Cosmos <c>COUNT(x)</c> counts a JSON null where SQL excludes
+        /// it, so the two disagree on any nullable column.
+        /// </remarks>
+        [TestMethod]
+        public void CountOfANullableColumnIsNotPushedDown()
+        {
+            var act = () => PlanToCosmos("SELECT COUNT(c.\"category\") FROM products AS c");
+
+            act.Should().Throw<Exception>();
+        }
+
+        /// <remarks>
+        /// <c>SUM</c> over a set containing a JSON null returns undefined rather than ignoring it.
+        /// </remarks>
+        [TestMethod]
+        public void SumOfANullableColumnIsNotPushedDown()
+        {
+            var act = () => PlanToCosmos("SELECT SUM(c.\"category\") FROM products AS c");
+
+            act.Should().Throw<Exception>();
+        }
+
+        [TestMethod]
+        public void DistinctAggregateIsNotPushedDown()
+        {
+            var act = () => PlanToCosmos("SELECT COUNT(DISTINCT c.\"id\") FROM products AS c");
+
+            act.Should().Throw<Exception>();
+        }
+
 
         /// <remarks>
         /// UPPER has no Cosmos equivalent, so no rule converts the filter. With only Cosmos rules

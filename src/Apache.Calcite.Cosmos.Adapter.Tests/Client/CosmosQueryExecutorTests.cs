@@ -242,6 +242,38 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
             results.Select(x => x.GetString()).Should().BeEquivalentTo("3", "4");
         }
 
+        [TestMethod]
+        public async Task GroupByRunsAgainstTheService()
+        {
+            var builder = Builder();
+            builder.FlatProjection = true;
+            builder.SelectProperty("category", "c.category");
+            builder.SelectProperty("n", "COUNT(1)");
+            builder.AddGroupBy("c.category");
+
+            var results = await Execute(Query(builder));
+
+            results.Should().HaveCount(2);
+            results.Should().Contain(x => x.GetProperty("category").GetString() == "bikes" && x.GetProperty("n").GetInt32() == 2);
+            results.Should().Contain(x => x.GetProperty("category").GetString() == "shoes" && x.GetProperty("n").GetInt32() == 2);
+        }
+
+        /// <remarks>
+        /// The measurement the aggregate pushdown rules are built on: Cosmos counts a JSON null
+        /// where SQL excludes it, so <c>COUNT(x)</c> over a nullable column disagrees with SQL.
+        /// </remarks>
+        [TestMethod]
+        public async Task CountOfAColumnCountsNullsUnlikeSql()
+        {
+            var builder = Builder();
+            builder.SelectValue("COUNT(c.price)");
+
+            var results = await Execute(Query(builder));
+
+            // Three of the four documents carry a price; the fourth omits it entirely.
+            results.Should().ContainSingle().Which.GetInt32().Should().Be(3);
+        }
+
         // ── Metadata read back from the service ───────────────────────────────────
 
         /// <remarks>

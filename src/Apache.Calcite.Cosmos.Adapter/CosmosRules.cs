@@ -49,6 +49,7 @@ namespace Apache.Calcite.Cosmos.Adapter
             if (convention is null)
                 throw new ArgumentNullException(nameof(convention));
 
+            yield return CosmosAggregateRule.Create(convention);
             yield return CosmosFilterRule.Create(convention);
             yield return CosmosProjectRule.Create(convention);
             yield return CosmosSortRule.Create(convention);

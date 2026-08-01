@@ -89,6 +89,18 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
         public int? Fetch { get; set; }
 
         /// <summary>
+        /// Gets or sets whether the projection is written as a flat select list rather than an
+        /// object constructor.
+        /// </summary>
+        /// <remarks>
+        /// The two are documented as equivalent — a flat list is sugar for the object form — but
+        /// they are not interchangeable in practice. Cosmos rejects an aggregate inside an object
+        /// constructor with <c>"Compositions of aggregates and other expressions are not
+        /// allowed."</c>, so a grouped projection has to be written flat.
+        /// </remarks>
+        public bool FlatProjection { get; set; }
+
+        /// <summary>
         /// Gets whether any projection has been specified.
         /// </summary>
         public bool HasProjection => _valueExpression is not null || _properties.Count > 0;
@@ -149,6 +161,20 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
                 throw new InvalidOperationException("Cannot combine property projections with a VALUE projection.");
 
             _properties.Add((alias, expression));
+        }
+
+        /// <summary>
+        /// Discards any projection set so far.
+        /// </summary>
+        /// <remarks>
+        /// Calcite places a projection below an aggregate to prune columns. Cosmos has one
+        /// <c>SELECT</c> per statement, so the aggregate's projection supersedes it — the pruning
+        /// has no independent effect once the grouping is expressed over the same paths.
+        /// </remarks>
+        public void ClearProjection()
+        {
+            _valueExpression = null;
+            _properties.Clear();
         }
 
         /// <summary>
@@ -248,6 +274,15 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
             if (_valueExpression is not null)
             {
                 builder.Append(" VALUE ").Append(_valueExpression);
+            }
+            else if (_properties.Count > 0 && FlatProjection)
+            {
+                for (var i = 0; i < _properties.Count; i++)
+                {
+                    var (alias, expression) = _properties[i];
+                    builder.Append(i > 0 ? ", " : " ").Append(expression).Append(" AS ");
+                    CosmosSql.WriteStringLiteral(builder, alias);
+                }
             }
             else if (_properties.Count > 0)
             {

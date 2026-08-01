@@ -147,6 +147,38 @@ yet implemented.
 emitted `(NOT IS_DEFINED(v) OR IS_NULL(v))` matches both that and the absent case, as intended.
 Documents missing the sort property are returned by `ORDER BY`, not dropped.
 
+**Aggregates do not share SQL's null handling.** Measured over `{10, 20, null, 5}` with two
+documents lacking the property:
+
+| Expression | Cosmos | SQL |
+| --- | --- | --- |
+| `COUNT(1)` | 6 | 6 |
+| `COUNT(c.v)` | 4 — counts the JSON `null` | 3 |
+| `SUM(c.v)` | `undefined` | 35 |
+| `AVG(c.v)` | `undefined` | 11.67 |
+| `GROUP BY c.g` where `g` is absent | group whose key is omitted from the result | a null group |
+
+So `COUNT(*)` is safe, while the value aggregates agree with SQL only over an input that cannot
+be null — the same reasoning that governs sort null placement. `CosmosAggregate` pushes down
+accordingly and declines otherwise.
+
+**A flat select list and an object constructor are not interchangeable.** The documentation
+presents `SELECT e1 AS p1, e2 AS p2` as sugar for `SELECT VALUE { p1: e1, p2: e2 }`, and for
+ordinary projections they behave identically. But the service rejects an aggregate inside an
+object constructor:
+
+```
+Compositions of aggregates and other expressions are not allowed.
+```
+
+So a grouped projection has to be written flat. `CosmosQueryBuilder.FlatProjection` selects the
+form and `CosmosAggregate` sets it. Nothing in the documentation indicates this; it surfaced only
+by executing generated statements against a live service.
+
+This is also why only `id`, `_ts` and `_etag` are declared non-nullable. A partition key path is
+declared but a document may still omit it, and typing such a column non-nullable licences the
+planner to rewrite `COUNT(x)` into `COUNT(*)` on a guarantee the data does not provide.
+
 **The emulator does not implement composite indexes at all.** A container created with one
 composite index reports zero on both the create response and a subsequent read, while excluded
 paths in the same policy survive — so the definition is silently discarded rather than rejected.
@@ -258,7 +290,7 @@ CQL is likewise SQL-shaped, and Calcite still hand-builds it rather than routing
 | `CosmosProject` | `CosmosProjectRule` | ✔ Renders as an object constructor. Rebinds field ordinals to the projected paths, or clears them when any projection is computed. |
 | `CosmosSort` | `CosmosSortRule` | ✔ Carries `OFFSET`/`LIMIT`. Blocked if aggregation present. Multi-key sorts require a matching composite index; null placement must be honourable. |
 | `CosmosUnnest` | `CosmosUnnestRule` | ✔ From `Correlate` over `Uncollect`, **never** from `Join`. |
-| `CosmosAggregate` | `CosmosAggregateRule` | `COUNT`, `SUM`, `MIN`, `MAX`, `AVG` only. Blocked if a sort is present. |
+| `CosmosAggregate` | `CosmosAggregateRule` | ✔ `COUNT(*)` always; `SUM`/`MIN`/`MAX`/`AVG` only over a non-nullable input. Blocked if a sort is present. Supersedes a path-only pruning projection. |
 
 Deliberately absent, and not to be added later without revisiting this document:
 
@@ -387,7 +419,7 @@ src/
       CosmosProject.cs                ✔
       CosmosSort.cs                   ✔
       CosmosUnnest.cs                 ✔
-      CosmosAggregate.cs
+      CosmosAggregate.cs              ✔
       Convert/                        ✔ One converter rule per node
     Sql/
       CosmosSql.cs                    ✔ Lexical primitives: identifiers, paths, JSON literals
