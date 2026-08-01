@@ -45,7 +45,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
         {
             var fields = CosmosImplementor.BindFields(sort.getInput().getRowType());
 
-            if (CosmosSort.TryResolveSortKeys(sort.getCollation(), fields, out var keys, out _) == false)
+            if (CosmosSort.TryResolveSortKeys(sort.getCollation(), fields, sort.getInput().getRowType(), out var keys, out _) == false)
                 return false;
 
             return convention.Container.IsSortSupported(keys);

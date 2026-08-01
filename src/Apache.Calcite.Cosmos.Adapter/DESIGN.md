@@ -104,6 +104,51 @@ Two of these carry hard consequences:
 The last point is the important one: **whether a `Sort` is pushable is a function of container
 metadata, not of the plan.** `CosmosSortRule` must read the indexing policy.
 
+### Verified against the emulator
+
+The following were established empirically against the Cosmos DB emulator
+(`mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:vnext-preview`) rather than taken from
+documentation.
+
+**Ordering is a total order over JSON types.** Ascending:
+
+```
+undefined  <  null  <  boolean  <  number  <  string  <  array  <  object
+```
+
+`DESC` returns the exact reverse, including the placement of `undefined` and `null`. There is no
+separate null-placement control.
+
+This has a sharp consequence. Cosmos sorts nulls **first ascending and last descending**;
+Calcite's `RelFieldCollation` defaults are the opposite on **both** counts — ascending defaults
+to `NullDirection.LAST`, descending to `FIRST`. A sort on a nullable key therefore cannot
+normally be pushed down, because doing so would return rows in an order the plan did not ask
+for. `CosmosSort` refuses unless the placement matches or the key is non-nullable.
+
+In practice this is what keeps sorting on `id` and the system properties available while
+declining sorts on arbitrary document paths. The principled fix is to declare the collation the
+adapter actually provides as a trait and let the planner insert a corrective sort, which is not
+yet implemented.
+
+**`IS_DEFINED` and `IS_NULL` are independent**, confirming the translation of SQL `IS NULL`:
+
+| document | `IS_DEFINED(v)` | `IS_NULL(v)` |
+| --- | --- | --- |
+| `{"v": 1}` | true | false |
+| `{"v": null}` | true | true |
+| `{}` | false | false |
+
+`WHERE v = null` matches only the explicitly-null document — it is *not* SQL `IS NULL`. The
+emitted `(NOT IS_DEFINED(v) OR IS_NULL(v))` matches both that and the absent case, as intended.
+Documents missing the sort property are returned by `ORDER BY`, not dropped.
+
+**The emulator does not enforce the composite index requirement.** Multi-key `ORDER BY` was
+accepted on containers with no composite index, cross-partition, with mixed directions, and even
+on a path explicitly excluded from the index. This contradicts the documented service behaviour
+and is understood to be emulator leniency. The composite index guard is retained on the strength
+of the documentation; **the emulator cannot be used to test it**, and it should be re-verified
+against a real account.
+
 ---
 
 ## Decision: hand-built SQL, not `RelToSqlConverter`
@@ -317,9 +362,9 @@ src/
     CosmosConvention.cs               ✔ Per-container calling convention
     CosmosImplementor.cs              ✔ Mutable SQL accumulator
     CosmosRules.cs                    ✔ Rule set for a convention instance
-    CosmosSchema.cs                   Calcite Schema over a database
+    CosmosSchema.cs                   ✔ Calcite Schema over a database
+    CosmosTable.cs                    ✔ Calcite Table over a container
     CosmosSchemaFactory.cs            SchemaFactory for JSON model registration
-    CosmosTable.cs                    Calcite Table over a container
     Metadata/
       CosmosCompositeIndex.cs         ✔ Composite index and sort-key matching
       CosmosContainerMetadata.cs      ✔ Declared container facts; sort legality

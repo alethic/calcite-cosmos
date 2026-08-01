@@ -35,16 +35,42 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
         static readonly CosmosPath[] Fields =
         {
             CosmosPath.Root("c"),                                                   // 0 — the map column
-            CosmosPath.Root("c").Property("name"),                                  // 1
-            CosmosPath.Root("c").Property("inventory").Property("quantity"),        // 2
+            CosmosPath.Root("c").Property("name"),                                  // 1 — nullable
+            CosmosPath.Root("c").Property("inventory").Property("quantity"),        // 2 — nullable
+            CosmosPath.Root("c").Property("id"),                                    // 3 — NOT NULL
         };
 
+        org.apache.calcite.rel.type.RelDataType RowType()
+        {
+            org.apache.calcite.rel.type.RelDataType Nullable(SqlTypeName name) =>
+                _types.createTypeWithNullability(_types.createSqlType(name), true);
+
+            return _types.builder()
+                .add("_MAP", Nullable(SqlTypeName.ANY))
+                .add("name", Nullable(SqlTypeName.VARCHAR))
+                .add("quantity", Nullable(SqlTypeName.INTEGER))
+                .add("id", _types.createSqlType(SqlTypeName.VARCHAR))
+                .build();
+        }
+
+        /// <remarks>
+        /// Null placement is stated explicitly as UNSPECIFIED so these cases isolate path
+        /// resolution. Calcite's own defaults conflict with Cosmos in both directions, which is
+        /// covered separately below.
+        /// </remarks>
         static RelCollation Collation(params (int Index, RelFieldCollation.Direction Direction)[] keys)
         {
             var list = new java.util.ArrayList();
             foreach (var (index, direction) in keys)
-                list.add(new RelFieldCollation(index, direction));
+                list.add(new RelFieldCollation(index, direction, RelFieldCollation.NullDirection.UNSPECIFIED));
 
+            return RelCollations.of(list);
+        }
+
+        static RelCollation Collation(int index, RelFieldCollation.Direction direction, RelFieldCollation.NullDirection nulls)
+        {
+            var list = new java.util.ArrayList();
+            list.add(new RelFieldCollation(index, direction, nulls));
             return RelCollations.of(list);
         }
 
@@ -124,6 +150,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             CosmosSort.TryResolveSortKeys(
                 Collation((1, RelFieldCollation.Direction.ASCENDING), (2, RelFieldCollation.Direction.DESCENDING)),
                 Fields,
+                RowType(),
                 out var keys,
                 out var paths).Should().BeTrue();
 
@@ -140,6 +167,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             CosmosSort.TryResolveSortKeys(
                 Collation((1, RelFieldCollation.Direction.STRICTLY_DESCENDING)),
                 Fields,
+                RowType(),
                 out var keys,
                 out _).Should().BeTrue();
 
@@ -155,6 +183,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             CosmosSort.TryResolveSortKeys(
                 Collation((1, RelFieldCollation.Direction.CLUSTERED)),
                 Fields,
+                RowType(),
                 out _,
                 out _).Should().BeFalse();
         }
@@ -165,6 +194,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             CosmosSort.TryResolveSortKeys(
                 Collation((9, RelFieldCollation.Direction.ASCENDING)),
                 Fields,
+                RowType(),
                 out _,
                 out _).Should().BeFalse();
         }
@@ -172,8 +202,86 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
         [TestMethod]
         public void EmptyCollationResolvesToNoKeys()
         {
-            CosmosSort.TryResolveSortKeys(RelCollations.EMPTY, Fields, out var keys, out _).Should().BeTrue();
+            CosmosSort.TryResolveSortKeys(RelCollations.EMPTY, Fields, RowType(), out var keys, out _).Should().BeTrue();
             keys.Should().BeEmpty();
+        }
+
+        // ── Null placement ────────────────────────────────────────────────────────
+        //
+        // Cosmos orders JSON types totally — undefined < null < boolean < number < string <
+        // array < object — and DESC is the exact reverse of ASC. Nulls therefore sort first
+        // ascending and last descending, with no way to ask for anything else. Verified against
+        // the emulator; see DESIGN.md.
+
+        bool Resolves(RelCollation collation) =>
+            CosmosSort.TryResolveSortKeys(collation, Fields, RowType(), out _, out _);
+
+        [TestMethod]
+        public void AscendingWithNullsFirstIsAccepted()
+        {
+            Resolves(Collation(1, RelFieldCollation.Direction.ASCENDING, RelFieldCollation.NullDirection.FIRST)).Should().BeTrue();
+        }
+
+        [TestMethod]
+        public void DescendingWithNullsLastIsAccepted()
+        {
+            Resolves(Collation(1, RelFieldCollation.Direction.DESCENDING, RelFieldCollation.NullDirection.LAST)).Should().BeTrue();
+        }
+
+        [TestMethod]
+        public void UnspecifiedNullPlacementIsAccepted()
+        {
+            Resolves(Collation(1, RelFieldCollation.Direction.ASCENDING, RelFieldCollation.NullDirection.UNSPECIFIED)).Should().BeTrue();
+            Resolves(Collation(1, RelFieldCollation.Direction.DESCENDING, RelFieldCollation.NullDirection.UNSPECIFIED)).Should().BeTrue();
+        }
+
+        /// <remarks>
+        /// Cosmos cannot place nulls last while ascending. Pushing this down would return rows in
+        /// an order the plan did not ask for — a silent wrong answer rather than a failure.
+        /// </remarks>
+        [TestMethod]
+        public void AscendingWithNullsLastIsRefused()
+        {
+            Resolves(Collation(1, RelFieldCollation.Direction.ASCENDING, RelFieldCollation.NullDirection.LAST)).Should().BeFalse();
+        }
+
+        [TestMethod]
+        public void DescendingWithNullsFirstIsRefused()
+        {
+            Resolves(Collation(1, RelFieldCollation.Direction.DESCENDING, RelFieldCollation.NullDirection.FIRST)).Should().BeFalse();
+        }
+
+        /// <remarks>
+        /// Calcite defaults ascending to nulls last and descending to nulls first — the opposite of
+        /// Cosmos on both counts. Sorting a nullable key therefore cannot be pushed down unless the
+        /// plan explicitly asks for Cosmos's own placement.
+        /// </remarks>
+        [TestMethod]
+        public void CalciteDefaultPlacementConflictsOnANullableKey()
+        {
+            var ascending = new java.util.ArrayList();
+            ascending.add(new RelFieldCollation(1, RelFieldCollation.Direction.ASCENDING));
+            Resolves(RelCollations.of(ascending)).Should().BeFalse();
+
+            var descending = new java.util.ArrayList();
+            descending.add(new RelFieldCollation(1, RelFieldCollation.Direction.DESCENDING));
+            Resolves(RelCollations.of(descending)).Should().BeFalse();
+        }
+
+        /// <remarks>
+        /// A key that cannot be null has no null placement to disagree about, so the default
+        /// collation pushes down normally. In practice this is what keeps sorting on <c>id</c> and
+        /// the system properties available.
+        /// </remarks>
+        [TestMethod]
+        public void NonNullableKeyAcceptsAnyPlacement()
+        {
+            var list = new java.util.ArrayList();
+            list.add(new RelFieldCollation(3, RelFieldCollation.Direction.ASCENDING));
+            Resolves(RelCollations.of(list)).Should().BeTrue();
+
+            Resolves(Collation(3, RelFieldCollation.Direction.ASCENDING, RelFieldCollation.NullDirection.LAST)).Should().BeTrue();
+            Resolves(Collation(3, RelFieldCollation.Direction.DESCENDING, RelFieldCollation.NullDirection.FIRST)).Should().BeTrue();
         }
 
     }

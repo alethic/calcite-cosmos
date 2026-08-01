@@ -29,17 +29,19 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
         /// </remarks>
         /// <param name="collation">The requested collation.</param>
         /// <param name="fields">The ordinal-to-path binding of the input.</param>
+        /// <param name="rowType">The input row type, consulted for the nullability of each key.</param>
         /// <param name="keys">On success, the resolved keys in order.</param>
         /// <param name="paths">On success, the resolved paths in order.</param>
         /// <returns><c>true</c> if every key resolved; otherwise <c>false</c>.</returns>
-        public static bool TryResolveSortKeys(RelCollation collation, IReadOnlyList<CosmosPath> fields, out IReadOnlyList<CosmosSortKey> keys, out IReadOnlyList<CosmosPath> paths)
+        public static bool TryResolveSortKeys(RelCollation collation, IReadOnlyList<CosmosPath> fields, org.apache.calcite.rel.type.RelDataType rowType, out IReadOnlyList<CosmosSortKey> keys, out IReadOnlyList<CosmosPath> paths)
         {
             keys = System.Array.Empty<CosmosSortKey>();
             paths = System.Array.Empty<CosmosPath>();
 
-            if (collation is null || fields is null)
+            if (collation is null || fields is null || rowType is null)
                 return false;
 
+            var typeFields = rowType.getFieldList();
             var collations = collation.getFieldCollations();
             var resolvedKeys = new CosmosSortKey[collations.size()];
             var resolvedPaths = new CosmosPath[collations.size()];
@@ -48,10 +50,12 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
             {
                 var field = (RelFieldCollation)collations.get(i);
                 var index = field.getFieldIndex();
-                if (index < 0 || index >= fields.Count)
+                if (index < 0 || index >= fields.Count || index >= typeFields.size())
                     return false;
 
-                if (TryGetDescending(field, out var descending) == false)
+                var nullable = ((org.apache.calcite.rel.type.RelDataTypeField)typeFields.get(index)).getType().isNullable();
+
+                if (TryGetDescending(field, nullable, out var descending) == false)
                     return false;
 
                 resolvedPaths[i] = fields[index];
@@ -64,26 +68,62 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
         }
 
         /// <summary>
-        /// Maps a field collation onto a plain ascending or descending flag.
+        /// Maps a field collation onto a plain ascending or descending flag, refusing any
+        /// collation whose null placement Cosmos cannot honour.
         /// </summary>
         /// <remarks>
-        /// Cosmos <c>ORDER BY</c> offers only <c>ASC</c> and <c>DESC</c>. Clustered collations
-        /// have no equivalent and are refused.
+        /// <para>
+        /// Cosmos <c>ORDER BY</c> offers only <c>ASC</c> and <c>DESC</c>. Clustered collations have
+        /// no equivalent and are refused.
+        /// </para>
+        /// <para>
+        /// Cosmos also offers no control over where nulls sort. Its ordering is a total order over
+        /// JSON types — <c>undefined</c> &lt; <c>null</c> &lt; boolean &lt; number &lt; string &lt;
+        /// array &lt; object — and <c>DESC</c> is the exact reverse of <c>ASC</c>. Missing and null
+        /// properties therefore sort below everything ascending and above everything descending,
+        /// which is precisely nulls-first ascending and nulls-last descending.
+        /// </para>
+        /// <para>
+        /// Calcite's defaults are the opposite on both counts: ascending defaults to nulls last and
+        /// descending to nulls first. The placement is therefore only honourable when the key
+        /// cannot be null at all, or when the plan happens to ask for Cosmos's own order. On a
+        /// nullable key a conflicting placement is refused, because pushing it down would return
+        /// rows in an order the plan did not ask for — a wrong answer rather than a failure.
+        /// </para>
+        /// <para>
+        /// Verified empirically against the Cosmos emulator; see <c>DESIGN.md</c>.
+        /// </para>
         /// </remarks>
-        static bool TryGetDescending(RelFieldCollation field, out bool descending)
+        static bool TryGetDescending(RelFieldCollation field, bool nullable, out bool descending)
         {
             switch ((RelFieldCollation.Direction.__Enum)field.getDirection().ordinal())
             {
                 case RelFieldCollation.Direction.__Enum.ASCENDING:
                 case RelFieldCollation.Direction.__Enum.STRICTLY_ASCENDING:
                     descending = false;
-                    return true;
+                    break;
                 case RelFieldCollation.Direction.__Enum.DESCENDING:
                 case RelFieldCollation.Direction.__Enum.STRICTLY_DESCENDING:
                     descending = true;
-                    return true;
+                    break;
                 default:
                     descending = false;
+                    return false;
+            }
+
+            // A key that cannot be null has no null placement to disagree about.
+            if (nullable == false)
+                return true;
+
+            switch ((RelFieldCollation.NullDirection.__Enum)field.nullDirection.ordinal())
+            {
+                case RelFieldCollation.NullDirection.__Enum.UNSPECIFIED:
+                    return true;
+                case RelFieldCollation.NullDirection.__Enum.FIRST:
+                    return descending == false;
+                case RelFieldCollation.NullDirection.__Enum.LAST:
+                    return descending;
+                default:
                     return false;
             }
         }
@@ -127,7 +167,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
             if (implementor.Query.HasGroupBy)
                 throw new CosmosTranslationException("Cosmos SQL does not support ORDER BY together with GROUP BY.");
 
-            if (TryResolveSortKeys(getCollation(), implementor.Fields, out var keys, out var paths) == false)
+            if (TryResolveSortKeys(getCollation(), implementor.Fields, getInput().getRowType(), out var keys, out var paths) == false)
                 throw new CosmosTranslationException("The sort keys do not resolve to document paths.");
 
             if (implementor.Container.IsSortSupported(keys) == false)

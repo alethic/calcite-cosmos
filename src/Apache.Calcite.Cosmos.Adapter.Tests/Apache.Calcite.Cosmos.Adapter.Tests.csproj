@@ -20,6 +20,8 @@
 
     <ItemGroup>
         <MavenReference Include="org.apache.calcite:calcite-core" Version="1.41.0" />
+        <!-- RelBuilder.create opens an internal Calcite connection, which needs the JDBC driver. -->
+        <MavenReference Include="org.apache.calcite.avatica:avatica-core" Version="1.26.0" />
     </ItemGroup>
 
     <ItemGroup>
