@@ -231,6 +231,24 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
             results.Select(x => x.GetString()).Should().BeEquivalentTo("S-1");
         }
 
+        /// <remarks>
+        /// The executor uses a partition key the predicate pinned without being told to, so a
+        /// query naming its partition key is single-partition automatically.
+        /// </remarks>
+        [TestMethod]
+        public async Task RecoveredPartitionKeyIsAppliedWithoutBeingPassed()
+        {
+            var parameters = new CosmosParameterList();
+            var builder = Builder();
+            builder.SelectValue("c.id");
+            builder.Where = $"c.category = {parameters.Add("shoes")}";
+
+            var query = new CosmosQuery(builder.Build(), parameters.Parameters, new object?[] { "shoes" });
+            var results = await Execute(query);
+
+            results.Select(x => x.GetString()).Should().BeEquivalentTo("3", "4");
+        }
+
         [TestMethod]
         public async Task PartitionKeyRestrictsExecutionToOnePartition()
         {

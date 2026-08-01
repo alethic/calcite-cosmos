@@ -43,6 +43,8 @@ namespace Apache.Calcite.Cosmos.Adapter.Metadata
         readonly string _name;
         readonly string[] _partitionKeyPaths;
         readonly CosmosCompositeIndex[] _compositeIndexes;
+        readonly string[] _includedPaths;
+        readonly string[] _excludedPaths;
 
         /// <summary>
         /// Initializes a new instance.
@@ -50,8 +52,15 @@ namespace Apache.Calcite.Cosmos.Adapter.Metadata
         /// <param name="name">The container name.</param>
         /// <param name="partitionKeyPaths">The partition key paths in policy form, outermost first. Cosmos permits up to three for a hierarchical key.</param>
         /// <param name="compositeIndexes">The composite indexes declared by the indexing policy.</param>
+        /// <param name="includedPaths">The indexing policy's included path patterns.</param>
+        /// <param name="excludedPaths">The indexing policy's excluded path patterns.</param>
         /// <exception cref="ArgumentException"><paramref name="name"/> is <c>null</c> or empty.</exception>
-        public CosmosContainerMetadata(string name, IEnumerable<string>? partitionKeyPaths = null, IEnumerable<CosmosCompositeIndex>? compositeIndexes = null)
+        public CosmosContainerMetadata(
+            string name,
+            IEnumerable<string>? partitionKeyPaths = null,
+            IEnumerable<CosmosCompositeIndex>? compositeIndexes = null,
+            IEnumerable<string>? includedPaths = null,
+            IEnumerable<string>? excludedPaths = null)
         {
             if (string.IsNullOrEmpty(name))
                 throw new ArgumentException($"'{nameof(name)}' cannot be null or empty.", nameof(name));
@@ -59,9 +68,117 @@ namespace Apache.Calcite.Cosmos.Adapter.Metadata
             _name = name;
             _partitionKeyPaths = partitionKeyPaths is null ? Array.Empty<string>() : new List<string>(partitionKeyPaths).ToArray();
             _compositeIndexes = compositeIndexes is null ? Array.Empty<CosmosCompositeIndex>() : new List<CosmosCompositeIndex>(compositeIndexes).ToArray();
+            _includedPaths = includedPaths is null ? Array.Empty<string>() : new List<string>(includedPaths).ToArray();
+            _excludedPaths = excludedPaths is null ? Array.Empty<string>() : new List<string>(excludedPaths).ToArray();
 
             if (_partitionKeyPaths.Length > 3)
                 throw new ArgumentException("A container may declare at most three partition key paths.", nameof(partitionKeyPaths));
+        }
+
+        /// <summary>
+        /// Gets the indexing policy's included path patterns.
+        /// </summary>
+        public IReadOnlyList<string> IncludedPaths => _includedPaths;
+
+        /// <summary>
+        /// Gets the indexing policy's excluded path patterns.
+        /// </summary>
+        public IReadOnlyList<string> ExcludedPaths => _excludedPaths;
+
+        /// <summary>
+        /// Determines whether a path is covered by the container's index.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// This bears on cost, never on legality: a predicate or sort over an unindexed path still
+        /// runs, it just scans. The default policy indexes everything, so a container that declares
+        /// no included or excluded paths reports every path as indexed.
+        /// </para>
+        /// <para>
+        /// Where included and excluded patterns conflict the more precise wins — a deeper path
+        /// beats a shallower one, and <c>/?</c> beats <c>/*</c> at the same depth. <c>id</c> and
+        /// <c>_ts</c> are always indexed and cannot be excluded.
+        /// </para>
+        /// </remarks>
+        /// <param name="policyPath">The path in policy form, such as <c>/inventory/quantity</c>.</param>
+        /// <returns><c>true</c> if the path is indexed; otherwise <c>false</c>.</returns>
+        public bool IsPathIndexed(string policyPath)
+        {
+            if (string.IsNullOrEmpty(policyPath))
+                return false;
+
+            if (string.Equals(policyPath, "/" + IdPropertyName, StringComparison.Ordinal) ||
+                string.Equals(policyPath, "/" + TimestampPropertyName, StringComparison.Ordinal))
+                return true;
+
+            // No declared policy means the default, which indexes every property.
+            if (_includedPaths.Length == 0 && _excludedPaths.Length == 0)
+                return true;
+
+            var included = BestMatch(_includedPaths, policyPath);
+            var excluded = BestMatch(_excludedPaths, policyPath);
+
+            // A tie favours inclusion, as does the absence of any exclusion.
+            return included >= excluded && included >= 0;
+        }
+
+        /// <summary>
+        /// Returns the specificity of the closest matching pattern, or <c>-1</c> when none match.
+        /// </summary>
+        static int BestMatch(IReadOnlyList<string> patterns, string path)
+        {
+            var best = -1;
+
+            foreach (var pattern in patterns)
+            {
+                var score = Specificity(pattern, path);
+                if (score > best)
+                    best = score;
+            }
+
+            return best;
+        }
+
+        /// <summary>
+        /// Scores how precisely a policy pattern matches a path.
+        /// </summary>
+        /// <remarks>
+        /// A <c>/?</c> pattern addresses one scalar and must match exactly; a <c>/*</c> pattern
+        /// addresses a subtree and matches any path beneath it. Depth is the primary ranking, with
+        /// <c>/?</c> outranking <c>/*</c> at equal depth.
+        /// </remarks>
+        static int Specificity(string pattern, string path)
+        {
+            if (string.IsNullOrEmpty(pattern))
+                return -1;
+
+            var exact = pattern.EndsWith("/?", StringComparison.Ordinal);
+            var subtree = pattern.EndsWith("/*", StringComparison.Ordinal);
+
+            var prefix = exact || subtree ? pattern.Substring(0, pattern.Length - 2) : pattern;
+
+            // The root pattern "/*" reduces to an empty prefix and matches everything.
+            if (prefix.Length == 0)
+                return subtree || exact ? 0 : -1;
+
+            if (exact)
+            {
+                if (string.Equals(prefix, path, StringComparison.Ordinal) == false)
+                    return -1;
+            }
+            else if (string.Equals(prefix, path, StringComparison.Ordinal) == false &&
+                     path.StartsWith(prefix + "/", StringComparison.Ordinal) == false)
+            {
+                return -1;
+            }
+
+            var depth = 0;
+            foreach (var c in prefix)
+                if (c == '/')
+                    depth++;
+
+            // Two ranks per level leaves room for /? to outrank /* at the same depth.
+            return (depth * 2) + (exact ? 1 : 0);
         }
 
         /// <summary>

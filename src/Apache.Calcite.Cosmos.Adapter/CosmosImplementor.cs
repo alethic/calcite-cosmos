@@ -16,7 +16,12 @@ namespace Apache.Calcite.Cosmos.Adapter
     /// </summary>
     /// <param name="Sql">The statement text.</param>
     /// <param name="Parameters">The bound parameter values.</param>
-    public readonly record struct CosmosQuery(string Sql, IReadOnlyList<CosmosParameter> Parameters);
+    /// <param name="PartitionKeyValues">
+    /// One value per declared partition key path when the predicate pinned every one of them,
+    /// otherwise <c>null</c>. Supplying it restricts execution to a single physical partition
+    /// instead of fanning out across all of them.
+    /// </param>
+    public readonly record struct CosmosQuery(string Sql, IReadOnlyList<CosmosParameter> Parameters, IReadOnlyList<object?>? PartitionKeyValues = null);
 
     /// <summary>
     /// Accumulates the state contributed by a tree of <see cref="CosmosRel"/> nodes and renders
@@ -148,6 +153,15 @@ namespace Apache.Calcite.Cosmos.Adapter
         }
 
         /// <summary>
+        /// Gets or sets the partition key values a filter pinned, or <c>null</c> if none did.
+        /// </summary>
+        /// <remarks>
+        /// Set by the first filter that pins every declared partition key path. It affects how the
+        /// statement is executed, not what it says.
+        /// </remarks>
+        public IReadOnlyList<object?>? PartitionKeyValues { get; set; }
+
+        /// <summary>
         /// Allocates a fresh alias for an array traversal.
         /// </summary>
         /// <remarks>
@@ -197,7 +211,7 @@ namespace Apache.Calcite.Cosmos.Adapter
         /// </summary>
         /// <returns>The statement text and its bound parameters.</returns>
         /// <exception cref="InvalidOperationException">The accumulated clauses form a statement Cosmos does not accept.</exception>
-        public CosmosQuery Build() => new(_query.Build(), _parameters.Parameters);
+        public CosmosQuery Build() => new(_query.Build(), _parameters.Parameters, PartitionKeyValues);
 
     }
 

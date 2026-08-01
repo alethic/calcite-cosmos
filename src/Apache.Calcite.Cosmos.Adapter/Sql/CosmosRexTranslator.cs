@@ -202,7 +202,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
         /// strings or epoch numbers by application convention, and nothing in the container
         /// declares which. Guessing an encoding would silently return wrong rows.
         /// </remarks>
-        static object? GetLiteralValue(RexLiteral literal)
+        internal static object? GetLiteralValue(RexLiteral literal)
         {
             if (literal.isNull())
                 return null;

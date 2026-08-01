@@ -115,6 +115,43 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
 
         static string Plan(RelNode rel) => RelOptUtil.toString(rel).Trim().Replace("\r\n", "\n");
 
+        /// <summary>
+        /// Renders a planned tree to the full query, including anything recovered about execution.
+        /// </summary>
+        CosmosQuery Query(RelNode rel)
+        {
+            var implementor = new CosmosImplementor(rel.getCluster().getRexBuilder(), Products);
+            implementor.Visit(rel);
+            return implementor.Build();
+        }
+
+        // ── Partition key recovery ────────────────────────────────────────────────
+
+        /// <remarks>
+        /// Naming the partition key confines execution to one physical partition rather than
+        /// fanning out across every one. It changes nothing about the statement itself.
+        /// </remarks>
+        [TestMethod]
+        public void PredicateOnThePartitionKeyIsRecovered()
+        {
+            var query = Query(PlanToCosmos("SELECT * FROM products AS c WHERE c.\"category\" = 'bikes'"));
+
+            query.PartitionKeyValues.Should().Equal("bikes");
+            query.Sql.Should().Contain("WHERE (c.category = @p0)");
+        }
+
+        [TestMethod]
+        public void PredicateOnANonPartitionKeyRecoversNothing()
+        {
+            Query(PlanToCosmos("SELECT * FROM products AS c WHERE c.\"id\" = 'x'")).PartitionKeyValues.Should().BeNull();
+        }
+
+        [TestMethod]
+        public void QueryWithoutAPredicateRecoversNothing()
+        {
+            Query(PlanToCosmos("SELECT * FROM products")).PartitionKeyValues.Should().BeNull();
+        }
+
         // ── The planner selects Cosmos nodes ──────────────────────────────────────
 
         [TestMethod]

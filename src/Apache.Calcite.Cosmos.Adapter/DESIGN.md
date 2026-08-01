@@ -513,6 +513,25 @@ none of which require the driver. The note is recorded because any consumer reac
 
 ---
 
+## Cost
+
+Two properties of a predicate dominate what a Cosmos query costs, and neither is visible in the
+shape of the plan, so `CosmosFilter.computeSelfCost` reflects both:
+
+- **Naming the partition key** confines execution to one physical partition rather than fanning
+  out across every one and merging. `CosmosPartitionKeyExtractor` recovers the value from a
+  conjunction of equalities against constants; a disjunction or a range predicate does not
+  qualify, since either may span partitions. What it recovers also reaches the executor, so such
+  a query becomes single-partition without the caller asking.
+- **Filtering on an unindexed path** forces a scan of it. `CosmosContainerMetadata.IsPathIndexed`
+  applies the documented precedence — deeper beats shallower, `/?` beats `/*` at equal depth —
+  over the container's included and excluded paths. `id` and `_ts` are always indexed.
+
+Index coverage bears on cost only. A predicate or sort over an unindexed path still runs; it is
+the composite index requirement for multi-key sorts that affects legality.
+
+---
+
 ## Unvalidated assumptions
 
 Recorded so they are not mistaken for tested behaviour.

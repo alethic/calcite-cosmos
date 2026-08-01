@@ -66,11 +66,55 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
             return definition;
         }
 
+        /// <summary>
+        /// Builds a partition key from the values a predicate pinned.
+        /// </summary>
+        /// <remarks>
+        /// Cosmos types partition key components, so each value is added by its JSON type. Anything
+        /// else — an array or an object — cannot be a partition key, and yields no key rather than
+        /// a wrong one.
+        /// </remarks>
+        /// <param name="values">One value per declared partition key path, in order.</param>
+        /// <returns>The partition key, or <c>null</c> if the values cannot form one.</returns>
+        public static PartitionKey? CreatePartitionKey(IReadOnlyList<object?>? values)
+        {
+            if (values is null || values.Count == 0)
+                return null;
+
+            var builder = new PartitionKeyBuilder();
+
+            foreach (var value in values)
+            {
+                switch (value)
+                {
+                    case null:
+                        builder.AddNullValue();
+                        break;
+                    case string s:
+                        builder.Add(s);
+                        break;
+                    case bool b:
+                        builder.Add(b);
+                        break;
+                    case sbyte or byte or short or ushort or int or uint or long or ulong or float or double or decimal:
+                        builder.Add(Convert.ToDouble(value, System.Globalization.CultureInfo.InvariantCulture));
+                        break;
+                    default:
+                        return null;
+                }
+            }
+
+            return builder.Build();
+        }
+
         /// <inheritdoc />
         public async IAsyncEnumerable<JsonElement> ExecuteAsync(CosmosQuery query, PartitionKey? partitionKey = null, [EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
+            // An explicit key wins; otherwise use whatever the predicate pinned.
+            var effective = partitionKey ?? CreatePartitionKey(query.PartitionKeyValues);
+
             var options = new QueryRequestOptions();
-            if (partitionKey is PartitionKey key)
+            if (effective is PartitionKey key)
                 options.PartitionKey = key;
 
             // The stream iterator is used rather than the typed one so that results are read with

@@ -49,7 +49,9 @@ namespace Apache.Calcite.Cosmos.Adapter.Metadata
             return new CosmosContainerMetadata(
                 properties.Id,
                 ReadPartitionKeyPaths(properties),
-                ReadCompositeIndexes(properties.IndexingPolicy));
+                ReadCompositeIndexes(properties.IndexingPolicy),
+                ReadPaths(properties.IndexingPolicy?.IncludedPaths, x => x.Path),
+                ReadPaths(properties.IndexingPolicy?.ExcludedPaths, x => x.Path));
         }
 
         /// <summary>
@@ -70,6 +72,29 @@ namespace Apache.Calcite.Cosmos.Adapter.Metadata
                         paths.Add(NormalizePath(path));
 
             return paths;
+        }
+
+        /// <summary>
+        /// Reads a collection of indexing policy path patterns.
+        /// </summary>
+        /// <remarks>
+        /// Trailing <c>/?</c> and <c>/*</c> specifiers are preserved here, unlike composite index
+        /// paths: they carry the precedence that decides which of a conflicting pair wins.
+        /// </remarks>
+        static IReadOnlyList<string> ReadPaths<T>(IEnumerable<T>? paths, Func<T, string> selector)
+        {
+            var values = new List<string>();
+            if (paths is null)
+                return values;
+
+            foreach (var path in paths)
+            {
+                var value = selector(path);
+                if (string.IsNullOrEmpty(value) == false)
+                    values.Add(value);
+            }
+
+            return values;
         }
 
         /// <summary>
