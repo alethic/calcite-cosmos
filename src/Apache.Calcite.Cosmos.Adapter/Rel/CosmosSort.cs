@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 
 using Apache.Calcite.Cosmos.Adapter.Metadata;
@@ -30,15 +31,16 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
         /// <param name="collation">The requested collation.</param>
         /// <param name="fields">The ordinal-to-path binding of the input.</param>
         /// <param name="rowType">The input row type, consulted for the nullability of each key.</param>
+        /// <param name="rootAlias">The alias bound to the container.</param>
         /// <param name="keys">On success, the resolved keys in order.</param>
         /// <param name="paths">On success, the resolved paths in order.</param>
         /// <returns><c>true</c> if every key resolved; otherwise <c>false</c>.</returns>
-        public static bool TryResolveSortKeys(RelCollation collation, IReadOnlyList<CosmosPath> fields, org.apache.calcite.rel.type.RelDataType rowType, out IReadOnlyList<CosmosSortKey> keys, out IReadOnlyList<CosmosPath> paths)
+        public static bool TryResolveSortKeys(RelCollation collation, IReadOnlyList<CosmosPath> fields, org.apache.calcite.rel.type.RelDataType rowType, string rootAlias, out IReadOnlyList<CosmosSortKey> keys, out IReadOnlyList<CosmosPath> paths)
         {
             keys = System.Array.Empty<CosmosSortKey>();
             paths = System.Array.Empty<CosmosPath>();
 
-            if (collation is null || fields is null || rowType is null)
+            if (collation is null || fields is null || rowType is null || string.IsNullOrEmpty(rootAlias))
                 return false;
 
             var typeFields = rowType.getFieldList();
@@ -58,8 +60,17 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
                 if (TryGetDescending(field, nullable, out var descending) == false)
                     return false;
 
-                resolvedPaths[i] = fields[index];
-                resolvedKeys[i] = new CosmosSortKey(fields[index].ToPolicyPath(), descending);
+                var path = fields[index];
+
+                // A path rooted at an array-traversal alias is relative to the element, not the
+                // container, so its policy form is not comparable with the container's index
+                // paths. Sorting on one is still legal with a single key, which needs no index;
+                // with more than one it cannot be checked and so is refused.
+                if (string.Equals(path.Alias, rootAlias, StringComparison.Ordinal) == false && collations.size() > 1)
+                    return false;
+
+                resolvedPaths[i] = path;
+                resolvedKeys[i] = new CosmosSortKey(path.ToPolicyPath(), descending);
             }
 
             keys = resolvedKeys;
@@ -167,7 +178,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
             if (implementor.Query.HasGroupBy)
                 throw new CosmosTranslationException("Cosmos SQL does not support ORDER BY together with GROUP BY.");
 
-            if (TryResolveSortKeys(getCollation(), implementor.Fields, getInput().getRowType(), out var keys, out var paths) == false)
+            if (TryResolveSortKeys(getCollation(), implementor.Fields, getInput().getRowType(), implementor.RootAlias, out var keys, out var paths) == false)
                 throw new CosmosTranslationException("The sort keys do not resolve to document paths.");
 
             if (implementor.Container.IsSortSupported(keys) == false)

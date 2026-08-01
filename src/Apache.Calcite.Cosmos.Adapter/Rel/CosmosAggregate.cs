@@ -166,6 +166,11 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
             if (implementor.Query.HasOrderBy)
                 throw new CosmosTranslationException("Cosmos SQL does not support GROUP BY together with ORDER BY.");
 
+            // GROUP BY is applied before OFFSET/LIMIT, so an aggregation above a row restriction
+            // would group the whole set rather than the restricted one.
+            if (implementor.Query.HasRowLimit)
+                throw new CosmosTranslationException("An aggregation cannot be applied above a pushed-down row limit.");
+
             if (getGroupType() != Group.SIMPLE)
                 throw new CosmosTranslationException("Grouping sets have no Cosmos equivalent.");
 

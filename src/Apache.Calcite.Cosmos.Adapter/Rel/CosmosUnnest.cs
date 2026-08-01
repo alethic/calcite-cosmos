@@ -80,6 +80,11 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
             if (implementor.Query.HasProjection)
                 throw new CosmosTranslationException("An array traversal cannot be applied above a pushed-down projection.");
 
+            // A traversal multiplies rows. Folding one above an already-applied restriction would
+            // traverse and then restrict, where the plan asked for the reverse.
+            if (implementor.Query.HasRowLimit || implementor.Query.HasOrderBy || implementor.Query.HasGroupBy)
+                throw new CosmosTranslationException("An array traversal cannot be applied above a sort, grouping, or row limit.");
+
             if (implementor.CreateTranslator().TryResolvePath(_array, out var path) == false)
                 throw new CosmosTranslationException("The traversed array does not resolve to a document path.");
 

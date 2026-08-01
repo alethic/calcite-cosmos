@@ -274,6 +274,88 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
             results.Should().ContainSingle().Which.GetInt32().Should().Be(3);
         }
 
+        // ── Every emitted form must actually run ──────────────────────────────────
+
+        /// <summary>
+        /// Executes one statement of every shape <see cref="CosmosQueryBuilder"/> can produce.
+        /// </summary>
+        /// <remarks>
+        /// The planner tests assert what is generated; only the service can say whether it is
+        /// accepted. The aggregate-in-an-object-constructor rejection was invisible to every other
+        /// layer, so each emitted form is exercised here rather than assumed valid.
+        /// </remarks>
+        [TestMethod]
+        public async Task EveryEmittedFormIsAcceptedByTheService()
+        {
+            var cases = new (string Label, Action<CosmosQueryBuilder> Configure)[]
+            {
+                ("identity", _ => { }),
+                ("value scalar", b => b.SelectValue("c.name")),
+                ("object projection", b => { b.SelectProperty("a", "c.id"); b.SelectProperty("b", "c.name"); }),
+                ("distinct value", b => { b.Distinct = true; b.SelectValue("c.category"); }),
+                ("distinct object", b => { b.Distinct = true; b.SelectProperty("a", "c.category"); }),
+                ("top value", b => { b.Top = 2; b.SelectValue("c.id"); }),
+                ("distinct top value", b => { b.Distinct = true; b.Top = 2; b.SelectValue("c.category"); }),
+                ("where", b => b.Where = "c.category = \"bikes\""),
+                ("order by", b => b.AddOrderBy("c.id", false)),
+                ("order by descending", b => b.AddOrderBy("c.id", true)),
+                ("offset limit with order by", b => { b.AddOrderBy("c.id", false); b.Offset = 1; b.Fetch = 2; }),
+                ("offset limit without order by", b => { b.Offset = 1; b.Fetch = 2; }),
+                ("limit only", b => b.Fetch = 2),
+                ("group by flat", b =>
+                {
+                    b.FlatProjection = true;
+                    b.SelectProperty("category", "c.category");
+                    b.SelectProperty("n", "COUNT(1)");
+                    b.AddGroupBy("c.category");
+                }),
+                ("group by without aggregate", b =>
+                {
+                    b.FlatProjection = true;
+                    b.SelectProperty("category", "c.category");
+                    b.AddGroupBy("c.category");
+                }),
+                ("unnest", b => { b.AddUnnest("t0", "c.tags"); b.SelectValue("t0"); }),
+                ("unnest with filter", b => { b.AddUnnest("t0", "c.tags"); b.SelectValue("t0"); b.Where = "t0 = \"steel\""; }),
+                ("unnest ordered by element", b => { b.AddUnnest("t0", "c.tags"); b.SelectValue("t0"); b.AddOrderBy("t0", false); }),
+                ("unnest ordered by root", b => { b.AddUnnest("t0", "c.tags"); b.SelectValue("t0"); b.AddOrderBy("c.id", false); }),
+                ("nested path projection", b => b.SelectValue("c.metadata.sku")),
+                ("bracketed property", b => b.SelectValue("c[\"name\"]")),
+                ("is-null predicate", b => b.Where = "(NOT IS_DEFINED(c.price) OR IS_NULL(c.price))"),
+            };
+
+            var failures = new List<string>();
+
+            foreach (var (label, configure) in cases)
+            {
+                var builder = Builder();
+                configure(builder);
+
+                var sql = builder.Build();
+
+                try
+                {
+                    using var iterator = Container().GetItemQueryStreamIterator(new QueryDefinition(sql));
+                    while (iterator.HasMoreResults)
+                    {
+                        using var response = await iterator.ReadNextAsync();
+                        if (response.IsSuccessStatusCode == false)
+                        {
+                            using var reader = new StreamReader(response.Content);
+                            failures.Add($"{label}: [{sql}] -> {(await reader.ReadToEndAsync()).Replace("\r", " ").Replace("\n", " ")}");
+                            break;
+                        }
+                    }
+                }
+                catch (CosmosException e)
+                {
+                    failures.Add($"{label}: [{sql}] -> {e.Message.Split('\n')[0]}");
+                }
+            }
+
+            failures.Should().BeEmpty();
+        }
+
         // ── Metadata read back from the service ───────────────────────────────────
 
         /// <remarks>

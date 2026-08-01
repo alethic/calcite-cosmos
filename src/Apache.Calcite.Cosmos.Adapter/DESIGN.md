@@ -308,6 +308,23 @@ Anything that cannot be pushed down falls back to Calcite's enumerable runtime. 
 must **never** emit a statement it is unsure of — an untranslatable operator is a signal to
 decline conversion, not to guess.
 
+### Plan order is not clause order
+
+A statement has one of each clause, and Cosmos evaluates them in a fixed order. An operator the
+plan places *above* another may therefore be written into a clause that runs *before* it, which
+silently changes the result rather than producing an error. Every node guards against the cases
+that matter:
+
+| Node | Refuses above | Because |
+| --- | --- | --- |
+| `CosmosFilter` | a projection | `WHERE` is evaluated against the source document, before `SELECT` |
+| `CosmosFilter` | a row limit | `WHERE` runs before `OFFSET`/`LIMIT`, so it would filter the whole set and then restrict |
+| `CosmosAggregate` | a row limit | `GROUP BY` runs before the restriction |
+| `CosmosUnnest` | a sort, grouping, or row limit | a traversal multiplies rows, so it must precede all three |
+| `CosmosSort` | another sort, or a grouping | one `ORDER BY` per statement; Cosmos rejects it alongside `GROUP BY` |
+
+A sort *without* a restriction commutes with a filter, so that pairing stays available.
+
 ### Expression translation
 
 A `RexVisitor` emits Cosmos scalar expressions directly, with no `SqlNode` round-trip. It is

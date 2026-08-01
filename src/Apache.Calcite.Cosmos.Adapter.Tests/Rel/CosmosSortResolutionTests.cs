@@ -151,6 +151,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
                 Collation((1, RelFieldCollation.Direction.ASCENDING), (2, RelFieldCollation.Direction.DESCENDING)),
                 Fields,
                 RowType(),
+                "c",
                 out var keys,
                 out var paths).Should().BeTrue();
 
@@ -168,6 +169,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
                 Collation((1, RelFieldCollation.Direction.STRICTLY_DESCENDING)),
                 Fields,
                 RowType(),
+                "c",
                 out var keys,
                 out _).Should().BeTrue();
 
@@ -184,6 +186,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
                 Collation((1, RelFieldCollation.Direction.CLUSTERED)),
                 Fields,
                 RowType(),
+                "c",
                 out _,
                 out _).Should().BeFalse();
         }
@@ -195,6 +198,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
                 Collation((9, RelFieldCollation.Direction.ASCENDING)),
                 Fields,
                 RowType(),
+                "c",
                 out _,
                 out _).Should().BeFalse();
         }
@@ -202,7 +206,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
         [TestMethod]
         public void EmptyCollationResolvesToNoKeys()
         {
-            CosmosSort.TryResolveSortKeys(RelCollations.EMPTY, Fields, RowType(), out var keys, out _).Should().BeTrue();
+            CosmosSort.TryResolveSortKeys(RelCollations.EMPTY, Fields, RowType(), "c", out var keys, out _).Should().BeTrue();
             keys.Should().BeEmpty();
         }
 
@@ -214,7 +218,55 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
         // the emulator; see DESIGN.md.
 
         bool Resolves(RelCollation collation) =>
-            CosmosSort.TryResolveSortKeys(collation, Fields, RowType(), out _, out _);
+            CosmosSort.TryResolveSortKeys(collation, Fields, RowType(), "c", out _, out _);
+
+        // ── Keys rooted at an array-traversal alias ───────────────────────────────
+        //
+        // A path rooted at an unnest alias is relative to the array element, so its policy form
+        // ("/key" from "t0.key") is not comparable with the container's index paths ("/tags/[]/key").
+        // Comparing them could match a composite index that does not in fact serve the sort.
+
+        static readonly CosmosPath[] UnnestFields =
+        {
+            CosmosPath.Root("c"),                            // 0
+            CosmosPath.Root("c").Property("id"),             // 1
+            CosmosPath.Root("t0").Property("key"),           // 2 — element-relative
+        };
+
+        org.apache.calcite.rel.type.RelDataType UnnestRowType() => _types.builder()
+            .add("_MAP", _types.createTypeWithNullability(_types.createSqlType(SqlTypeName.ANY), true))
+            .add("id", _types.createSqlType(SqlTypeName.VARCHAR))
+            .add("element", _types.createSqlType(SqlTypeName.VARCHAR))
+            .build();
+
+        [TestMethod]
+        public void SingleKeyOnAnUnnestAliasIsAllowed()
+        {
+            CosmosSort.TryResolveSortKeys(
+                Collation((2, RelFieldCollation.Direction.ASCENDING)),
+                UnnestFields,
+                UnnestRowType(),
+                "c",
+                out _,
+                out var paths).Should().BeTrue();
+
+            paths[0].ToString().Should().Be("t0.key");
+        }
+
+        /// <remarks>
+        /// Its index-addressability cannot be established, so the sort must not be pushed down.
+        /// </remarks>
+        [TestMethod]
+        public void MultiKeyInvolvingAnUnnestAliasIsRefused()
+        {
+            CosmosSort.TryResolveSortKeys(
+                Collation((1, RelFieldCollation.Direction.ASCENDING), (2, RelFieldCollation.Direction.ASCENDING)),
+                UnnestFields,
+                UnnestRowType(),
+                "c",
+                out _,
+                out _).Should().BeFalse();
+        }
 
         [TestMethod]
         public void AscendingWithNullsFirstIsAccepted()

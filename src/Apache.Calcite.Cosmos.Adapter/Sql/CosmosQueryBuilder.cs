@@ -111,6 +111,18 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
         public bool HasGroupBy => _groupBy.Count > 0;
 
         /// <summary>
+        /// Gets whether the statement already restricts how many rows it returns.
+        /// </summary>
+        /// <remarks>
+        /// Cosmos applies <c>OFFSET</c>/<c>LIMIT</c> and <c>TOP</c> last, after filtering,
+        /// traversal and grouping. An operator that appears above one of those in the plan but
+        /// would be written into an earlier clause therefore cannot be folded into the same
+        /// statement — doing so would apply it before the restriction rather than after, and
+        /// return different rows.
+        /// </remarks>
+        public bool HasRowLimit => Offset is not null || Fetch is not null || Top is not null;
+
+        /// <summary>
         /// Gets whether the statement carries an <c>ORDER BY</c> clause.
         /// </summary>
         public bool HasOrderBy => _orderBy.Count > 0;

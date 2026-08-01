@@ -45,6 +45,12 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
             if (implementor.Query.HasProjection)
                 throw new CosmosTranslationException("A filter cannot be applied above a pushed-down projection.");
 
+            // WHERE is evaluated before OFFSET/LIMIT, so folding a filter that the plan places
+            // above a row restriction would filter the whole set and then restrict it, rather
+            // than restricting first.
+            if (implementor.Query.HasRowLimit)
+                throw new CosmosTranslationException("A filter cannot be applied above a pushed-down row limit.");
+
             var condition = implementor.Translate(getCondition());
 
             // Stacked filters are normally merged by the planner, but conjoin defensively rather
