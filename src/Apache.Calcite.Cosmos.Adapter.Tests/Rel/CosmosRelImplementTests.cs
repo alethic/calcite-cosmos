@@ -187,7 +187,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
         public void UntranslatableFilterIsRefused()
         {
             var filter = new CosmosFilter(_cluster, Traits(), Scan(),
-                _rex.makeCall(SqlStdOperatorTable.IS_NOT_NULL, _rex.makeCall(SqlStdOperatorTable.UPPER, Ref(1))));
+                _rex.makeCall(SqlStdOperatorTable.IS_NOT_NULL, _rex.makeCall(SqlStdOperatorTable.INITCAP, Ref(1))));
 
             var act = () => Sql(filter, Implementor());
             act.Should().Throw<CosmosTranslationException>();

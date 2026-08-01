@@ -139,7 +139,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests
             var implementor = Implementor();
             implementor.Fields = new[] { CosmosPath.Root("c").Property("name") };
 
-            var node = _rex.makeCall(SqlStdOperatorTable.UPPER, Ref(0, SqlTypeName.VARCHAR));
+            var node = _rex.makeCall(SqlStdOperatorTable.INITCAP, Ref(0, SqlTypeName.VARCHAR));
             implementor.CreateTranslator().TryTranslate(node, out _).Should().BeFalse();
         }
 

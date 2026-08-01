@@ -239,14 +239,14 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Sql
         [TestMethod]
         public void UnsupportedFunctionIsDeclined()
         {
-            CanTranslate(Translator(), Call(SqlStdOperatorTable.UPPER, Ref(0, SqlTypeName.VARCHAR))).Should().BeFalse();
+            CanTranslate(Translator(), Call(SqlStdOperatorTable.INITCAP, Ref(0, SqlTypeName.VARCHAR))).Should().BeFalse();
         }
 
         [TestMethod]
         public void DecliningLeavesNoPartialExpression()
         {
             var t = Translator();
-            t.TryTranslate(Call(SqlStdOperatorTable.UPPER, Ref(0, SqlTypeName.VARCHAR)), out var expression).Should().BeFalse();
+            t.TryTranslate(Call(SqlStdOperatorTable.INITCAP, Ref(0, SqlTypeName.VARCHAR)), out var expression).Should().BeFalse();
             expression.Should().BeNull();
         }
 

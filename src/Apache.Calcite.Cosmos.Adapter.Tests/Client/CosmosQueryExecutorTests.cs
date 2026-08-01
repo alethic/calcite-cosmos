@@ -322,6 +322,23 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
                 ("nested path projection", b => b.SelectValue("c.metadata.sku")),
                 ("bracketed property", b => b.SelectValue("c[\"name\"]")),
                 ("is-null predicate", b => b.Where = "(NOT IS_DEFINED(c.price) OR IS_NULL(c.price))"),
+
+                // Scalar functions, in the exact forms the translator emits.
+                ("upper", b => b.SelectValue("UPPER(c.name)")),
+                ("length", b => b.SelectValue("LENGTH(c.name)")),
+                ("concat", b => b.SelectValue("CONCAT(c.name, c.category)")),
+                ("replace", b => b.SelectValue("REPLACE(c.name, \"a\", \"b\")")),
+                ("substring shifted", b => b.SelectValue("SUBSTRING(c.name, (1 - 1), 3)")),
+                ("position via index_of", b => b.SelectValue("(INDEX_OF(c.name, \"a\") + 1)")),
+                ("ceiling", b => b.SelectValue("CEILING(c.price)")),
+                ("floor", b => b.SelectValue("FLOOR(c.price)")),
+                ("natural log", b => b.SelectValue("LOG(c.price)")),
+                ("log10", b => b.SelectValue("LOG10(c.price)")),
+                ("power", b => b.SelectValue("POWER(c.price, 2)")),
+                ("sign and abs", b => b.SelectValue("SIGN(ABS(c.price))")),
+                ("round", b => b.SelectValue("ROUND(c.price)")),
+                ("sqrt", b => b.SelectValue("SQRT(c.price)")),
+                ("function in predicate", b => b.Where = "UPPER(c.category) = \"BIKES\""),
             };
 
             var failures = new List<string>();

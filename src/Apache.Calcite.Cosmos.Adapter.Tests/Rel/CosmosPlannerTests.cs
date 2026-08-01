@@ -256,7 +256,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
         [TestMethod]
         public void UntranslatableFilterIsNotPushedDown()
         {
-            var act = () => PlanToCosmos("SELECT * FROM products AS c WHERE UPPER(c.\"id\") = 'X'");
+            var act = () => PlanToCosmos("SELECT * FROM products AS c WHERE INITCAP(c.\"id\") = 'X'");
 
             act.Should().Throw<Exception>();
         }

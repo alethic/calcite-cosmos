@@ -316,8 +316,21 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
                 case SqlKind.__Enum.CASE:
                     WriteCase(builder, call);
                     break;
+                case SqlKind.__Enum.FLOOR:
+                    RequireOperandCount(call, 1);
+                    WriteFunctionCall(builder, call, "FLOOR");
+                    break;
+                case SqlKind.__Enum.CEIL:
+                    // Cosmos spells it CEILING; CEIL is rejected.
+                    RequireOperandCount(call, 1);
+                    WriteFunctionCall(builder, call, "CEILING");
+                    break;
                 default:
-                    throw new CosmosTranslationException($"Unsupported operator '{call.getOperator().getName()}' ({call.getKind().name()}).");
+                    // Most scalar functions are OTHER_FUNCTION, but several carry a dedicated kind
+                    // — CHAR_LENGTH and POSITION among them — so dispatch on the name for anything
+                    // whose structure does not need special handling.
+                    WriteNamedFunction(builder, call);
+                    break;
             }
         }
 
@@ -474,6 +487,125 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
 
             Write(builder, (RexNode)operands.get(operands.size() - 1));
             builder.Append(')', depth);
+        }
+
+        /// <summary>
+        /// Scalar functions whose Cosmos counterpart takes the same arguments in the same order
+        /// and means the same thing, mapped from the SQL name to the Cosmos name.
+        /// </summary>
+        /// <remarks>
+        /// Verified against the service. Functions needing an argument adjustment are handled
+        /// separately below; anything absent from both is declined.
+        /// </remarks>
+        static readonly Dictionary<string, (string Name, int MinArgs, int MaxArgs)> DirectFunctions = new(StringComparer.Ordinal)
+        {
+            ["UPPER"] = ("UPPER", 1, 1),
+            ["LOWER"] = ("LOWER", 1, 1),
+            ["LENGTH"] = ("LENGTH", 1, 1),
+            ["CHAR_LENGTH"] = ("LENGTH", 1, 1),
+            ["CHARACTER_LENGTH"] = ("LENGTH", 1, 1),
+            ["REPLACE"] = ("REPLACE", 3, 3),
+            ["CONCAT"] = ("CONCAT", 2, int.MaxValue),
+            ["||"] = ("CONCAT", 2, int.MaxValue),
+            ["ABS"] = ("ABS", 1, 1),
+            ["EXP"] = ("EXP", 1, 1),
+            ["LN"] = ("LOG", 1, 1),
+            ["LOG10"] = ("LOG10", 1, 1),
+            ["POWER"] = ("POWER", 2, 2),
+            ["SQRT"] = ("SQRT", 1, 1),
+            ["SIGN"] = ("SIGN", 1, 1),
+            ["ROUND"] = ("ROUND", 1, 1),
+        };
+
+        /// <summary>
+        /// Writes a function whose Cosmos form differs from SQL's only in name.
+        /// </summary>
+        void WriteNamedFunction(StringBuilder builder, RexCall call)
+        {
+            var name = call.getOperator().getName();
+
+            switch (name)
+            {
+                case "SUBSTRING":
+                    WriteSubstring(builder, call);
+                    return;
+                case "POSITION":
+                    WritePosition(builder, call);
+                    return;
+            }
+
+            if (DirectFunctions.TryGetValue(name, out var mapping) == false)
+                throw new CosmosTranslationException($"Unsupported function '{name}'.");
+
+            var count = call.getOperands().size();
+            if (count < mapping.MinArgs || count > mapping.MaxArgs)
+                throw new CosmosTranslationException($"Function '{name}' with {count} argument(s) has no Cosmos equivalent.");
+
+            WriteFunctionCall(builder, call, mapping.Name);
+        }
+
+        /// <summary>
+        /// Writes a call as <c>NAME(arg, …)</c> over all of its operands.
+        /// </summary>
+        void WriteFunctionCall(StringBuilder builder, RexCall call, string name)
+        {
+            builder.Append(name).Append('(');
+
+            for (var i = 0; i < call.getOperands().size(); i++)
+            {
+                if (i > 0)
+                    builder.Append(", ");
+
+                Write(builder, Operand(call, i));
+            }
+
+            builder.Append(')');
+        }
+
+        /// <summary>
+        /// Writes <c>SUBSTRING</c>, adjusting for the differing origin.
+        /// </summary>
+        /// <remarks>
+        /// SQL positions are one-based and Cosmos's are zero-based: over <c>"Hello World"</c>,
+        /// <c>SUBSTRING(s, 0, 5)</c> yields <c>"Hello"</c> where SQL's <c>FROM 1</c> does. The
+        /// start is therefore emitted as <c>start - 1</c>.
+        /// <para>
+        /// Cosmos requires a length, so the two-argument SQL form — take the rest of the string —
+        /// is declined rather than approximated with an over-long length.
+        /// </para>
+        /// </remarks>
+        void WriteSubstring(StringBuilder builder, RexCall call)
+        {
+            if (call.getOperands().size() != 3)
+                throw new CosmosTranslationException("SUBSTRING without an explicit length has no Cosmos equivalent.");
+
+            builder.Append("SUBSTRING(");
+            Write(builder, Operand(call, 0));
+            builder.Append(", (");
+            Write(builder, Operand(call, 1));
+            builder.Append(" - 1), ");
+            Write(builder, Operand(call, 2));
+            builder.Append(')');
+        }
+
+        /// <summary>
+        /// Writes <c>POSITION</c> in terms of <c>INDEX_OF</c>.
+        /// </summary>
+        /// <remarks>
+        /// <c>INDEX_OF</c> is zero-based and yields <c>-1</c> when absent, so adding one reproduces
+        /// SQL exactly on both counts: a match at SQL position 7 and zero for no match.
+        /// </remarks>
+        void WritePosition(StringBuilder builder, RexCall call)
+        {
+            if (call.getOperands().size() != 2)
+                throw new CosmosTranslationException("POSITION with a start offset has no Cosmos equivalent.");
+
+            // SQL is POSITION(substring IN string); INDEX_OF takes the string first.
+            builder.Append("(INDEX_OF(");
+            Write(builder, Operand(call, 1));
+            builder.Append(", ");
+            Write(builder, Operand(call, 0));
+            builder.Append(") + 1)");
         }
 
         /// <summary>
