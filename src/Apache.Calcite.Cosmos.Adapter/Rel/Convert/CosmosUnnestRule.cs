@@ -34,7 +34,15 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
         /// Extracts the array expression from the right side of a correlate, or returns <c>null</c>
         /// when the node is not a lateral array traversal this rule can express.
         /// </summary>
-        static RexNode? GetArrayExpression(Correlate correlate)
+        /// <remarks>
+        /// Public so that the shape this rule depends on can be asserted against real planner
+        /// output rather than assumed. Planning <c>… FROM products AS c, UNNEST(c."_MAP"['tags'])</c>
+        /// yields a correlate over <c>Uncollect(Project(ITEM($cor0._MAP, 'tags')))</c>, which is
+        /// what this recognises.
+        /// </remarks>
+        /// <param name="correlate">The correlate to inspect.</param>
+        /// <returns>The array expression, or <c>null</c>.</returns>
+        public static RexNode? GetArrayExpression(Correlate correlate)
         {
             if (correlate.getRight() is not Uncollect uncollect)
                 return null;

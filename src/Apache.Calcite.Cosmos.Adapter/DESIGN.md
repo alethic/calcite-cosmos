@@ -12,10 +12,9 @@ structure that follows from it.
 > and tested. Aggregation and the converter that hands results to a CLR enumerable convention are
 > not. Items marked ✔ below exist; the rest are specification.
 >
-> Two claims rest on documentation rather than observation, and both need a real Cosmos account
-> to settle: that a multi-key `ORDER BY` requires a matching composite index, and that
-> `CosmosUnnestRule` matches the tree Calcite actually produces for `UNNEST`. See
-> *Verified against the emulator* and *Unvalidated assumptions*.
+> One claim still rests on documentation rather than observation and needs a real Cosmos account
+> to settle: that a multi-key `ORDER BY` requires a matching composite index. See *Verified
+> against the emulator* and *Unvalidated assumptions*.
 
 ---
 
@@ -438,13 +437,6 @@ Recorded so they are not mistaken for tested behaviour.
 multi-key `ORDER BY` without a matching composite index. The rule is documented, but the
 emulator implements composite indexes not at all, so nothing exercises it end to end. If the
 real service is more permissive, the guard silently costs pushdown on every multi-key sort.
-
-**The shape `CosmosUnnestRule` matches.** The rule expects a `Correlate` whose right input is an
-`Uncollect` over a single-expression `Project` over a `Values` — the lowering Calcite is
-understood to produce for `UNNEST`. `CosmosUnnest` itself is tested by construction, but the
-rule's matching has not been driven from real planner output, which needs full SQL planning.
-If the shape differs, the rule silently never fires; it cannot produce a wrong query, because
-the array expression must still resolve to a path before anything is emitted.
 
 **Null placement on non-nullable keys.** Sorting a non-nullable key is accepted regardless of
 requested placement, on the grounds that a key which cannot be null has no null ordering to
