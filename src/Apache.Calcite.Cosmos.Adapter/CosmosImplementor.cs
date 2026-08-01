@@ -42,6 +42,48 @@ namespace Apache.Calcite.Cosmos.Adapter
         /// </summary>
         public const string DefaultRootAlias = "c";
 
+        /// <summary>
+        /// The name of the column carrying the whole document in the map row model.
+        /// </summary>
+        public const string MapColumnName = "_MAP";
+
+        /// <summary>
+        /// Derives the ordinal-to-path binding for a row type.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// The map column binds to the document root; every other field is a promoted column and
+        /// binds to the property of the same name. Nested promoted paths are not expressible this
+        /// way and are not currently produced.
+        /// </para>
+        /// <para>
+        /// This is deliberately a pure function of the row type, so that conversion rules can
+        /// compute the binding before a node exists and decide whether an expression is
+        /// translatable — the alternative being to convert optimistically and fail later.
+        /// </para>
+        /// </remarks>
+        /// <param name="rowType">The row type to bind.</param>
+        /// <param name="rootAlias">The alias bound to the container.</param>
+        /// <returns>The binding, indexed by field ordinal.</returns>
+        /// <exception cref="ArgumentNullException"><paramref name="rowType"/> is <c>null</c>.</exception>
+        public static IReadOnlyList<CosmosPath> BindFields(org.apache.calcite.rel.type.RelDataType rowType, string? rootAlias = null)
+        {
+            if (rowType is null)
+                throw new ArgumentNullException(nameof(rowType));
+
+            var root = CosmosPath.Root(string.IsNullOrEmpty(rootAlias) ? DefaultRootAlias : rootAlias);
+            var fields = rowType.getFieldList();
+            var paths = new CosmosPath[fields.size()];
+
+            for (var i = 0; i < paths.Length; i++)
+            {
+                var name = ((org.apache.calcite.rel.type.RelDataTypeField)fields.get(i)).getName();
+                paths[i] = string.Equals(name, MapColumnName, StringComparison.Ordinal) ? root : root.Property(name);
+            }
+
+            return paths;
+        }
+
         readonly RexBuilder _rexBuilder;
         readonly CosmosContainerMetadata _container;
         readonly CosmosParameterList _parameters = new();

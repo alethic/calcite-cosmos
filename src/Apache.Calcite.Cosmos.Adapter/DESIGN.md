@@ -316,7 +316,7 @@ src/
   Apache.Calcite.Cosmos.Adapter/
     CosmosConvention.cs               ✔ Per-container calling convention
     CosmosImplementor.cs              ✔ Mutable SQL accumulator
-    CosmosRules.cs                    Rule set for a convention instance
+    CosmosRules.cs                    ✔ Rule set for a convention instance
     CosmosSchema.cs                   Calcite Schema over a database
     CosmosSchemaFactory.cs            SchemaFactory for JSON model registration
     CosmosTable.cs                    Calcite Table over a container
@@ -325,13 +325,13 @@ src/
       CosmosContainerMetadata.cs      ✔ Declared container facts; sort legality
     Rel/
       CosmosRel.cs                    ✔ Implement contract
-      CosmosTableScan.cs
-      CosmosFilter.cs
+      CosmosTableScan.cs              ✔
+      CosmosFilter.cs                 ✔
+      CosmosSort.cs                   ✔
       CosmosProject.cs
-      CosmosSort.cs
       CosmosAggregate.cs
       CosmosUnnest.cs
-      Convert/                        One converter rule per node
+      Convert/                        ✔ One converter rule per node
     Sql/
       CosmosSql.cs                    ✔ Lexical primitives: identifiers, paths, JSON literals
       CosmosPath.cs                   ✔ Immutable property path rooted at a FROM alias

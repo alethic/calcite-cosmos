@@ -81,6 +81,58 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
         }
 
         /// <summary>
+        /// Determines whether an expression denotes a document path, and if so what that path is.
+        /// </summary>
+        /// <remarks>
+        /// Some clauses require a path rather than an arbitrary expression — <c>ORDER BY</c> keys
+        /// must be resolvable against the container's indexes, for instance. Only a field
+        /// reference or a chain of constant <c>ITEM</c> accessors over one qualifies.
+        /// </remarks>
+        /// <param name="node">The expression to inspect.</param>
+        /// <param name="path">On success, the resolved path.</param>
+        /// <returns><c>true</c> if the expression denotes a path; otherwise <c>false</c>.</returns>
+        public bool TryResolvePath(RexNode node, out CosmosPath? path)
+        {
+            switch (node)
+            {
+                case RexInputRef inputRef when inputRef.getIndex() >= 0 && inputRef.getIndex() < _fields.Count:
+                    path = _fields[inputRef.getIndex()];
+                    return true;
+
+                case RexCall call when KindOf(call) == SqlKind.__Enum.ITEM && call.getOperands().size() == 2:
+                    if (TryResolvePath(Operand(call, 0), out var basePath) == false || Operand(call, 1) is not RexLiteral accessor)
+                        break;
+
+                    object? value;
+                    try
+                    {
+                        value = GetLiteralValue(accessor);
+                    }
+                    catch (CosmosTranslationException)
+                    {
+                        break;
+                    }
+
+                    if (value is string name)
+                    {
+                        path = basePath!.Property(name);
+                        return true;
+                    }
+
+                    if (TryGetArrayIndex(value, out var index))
+                    {
+                        path = basePath!.Index(index);
+                        return true;
+                    }
+
+                    break;
+            }
+
+            path = null;
+            return false;
+        }
+
+        /// <summary>
         /// Translates <paramref name="node"/>.
         /// </summary>
         /// <param name="node">The expression to translate.</param>
