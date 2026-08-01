@@ -321,6 +321,198 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             act.Should().Throw<CosmosTranslationException>().WithMessage("*GROUP BY*");
         }
 
+        // ── Project ───────────────────────────────────────────────────────────────
+
+        RexNode Num(int value) => _rex.makeExactLiteral(new java.math.BigDecimal(value));
+
+        CosmosProject ProjectOver(RelNode input, (string Name, RexNode Expression)[] projections)
+        {
+            var projects = new java.util.ArrayList();
+            var builder = _cluster.getTypeFactory().builder();
+
+            foreach (var (name, expression) in projections)
+            {
+                projects.add(expression);
+                builder.add(name, expression.getType());
+            }
+
+            return new CosmosProject(_cluster, Traits(), input, projects, builder.build());
+        }
+
+        [TestMethod]
+        public void ProjectRendersAnObjectConstructor()
+        {
+            var project = ProjectOver(Scan(), new[] { ("theId", Ref(1)), ("stamp", Ref(2)) });
+
+            Sql(project, Implementor()).Should().Be("SELECT VALUE { \"theId\": c.id, \"stamp\": c._ts } FROM products c");
+        }
+
+        [TestMethod]
+        public void ProjectOfAMapPropertyRendersAPath()
+        {
+            var project = ProjectOver(Scan(), new[] { ("city", _rex.makeCall(SqlStdOperatorTable.ITEM, Ref(0), Str("city"))) });
+
+            Sql(project, Implementor()).Should().Be("SELECT VALUE { \"city\": c.city } FROM products c");
+        }
+
+        /// <remarks>
+        /// Cosmos ORDER BY addresses the source document, not the projected object, so a sort above
+        /// a projection must reference the underlying path. That only works because the projection
+        /// rebinds the field ordinals to the paths it projected.
+        /// </remarks>
+        [TestMethod]
+        public void SortAboveAPathProjectionUsesTheUnderlyingPath()
+        {
+            var project = ProjectOver(Scan(), new[] { ("theId", Ref(1)) });
+            var sort = SortOver(project, Collation((0, RelFieldCollation.Direction.ASCENDING)));
+
+            Sql(sort, Implementor()).Should().Be("SELECT VALUE { \"theId\": c.id } FROM products c ORDER BY c.id ASC");
+        }
+
+        /// <remarks>
+        /// A computed projection has no path to rebind to, so downstream operators that need one
+        /// must decline rather than address the wrong value.
+        /// </remarks>
+        [TestMethod]
+        public void SortAboveAComputedProjectionIsRefused()
+        {
+            var computed = _rex.makeCall(SqlStdOperatorTable.PLUS, Ref(2), Num(1));
+            var project = ProjectOver(Scan(), new[] { ("adjusted", computed) });
+            var sort = SortOver(project, Collation((0, RelFieldCollation.Direction.ASCENDING)));
+
+            var act = () => Sql(sort, Implementor());
+            act.Should().Throw<CosmosTranslationException>();
+        }
+
+        [TestMethod]
+        public void ComputedProjectionStillRenders()
+        {
+            var computed = _rex.makeCall(SqlStdOperatorTable.PLUS, Ref(2), Num(1));
+            var project = ProjectOver(Scan(), new[] { ("adjusted", computed) });
+
+            Sql(project, Implementor()).Should().Be("SELECT VALUE { \"adjusted\": (c._ts + @p0) } FROM products c");
+        }
+
+        /// <remarks>
+        /// Cosmos evaluates WHERE against the source document, before SELECT.
+        /// </remarks>
+        [TestMethod]
+        public void FilterAboveAProjectionIsRefused()
+        {
+            var project = ProjectOver(Scan(), new[] { ("theId", Ref(1)) });
+            var filter = new CosmosFilter(_cluster, Traits(), project,
+                _rex.makeCall(SqlStdOperatorTable.EQUALS, Ref(0), Str("abc")));
+
+            var act = () => Sql(filter, Implementor());
+            act.Should().Throw<CosmosTranslationException>().WithMessage("*projection*");
+        }
+
+        [TestMethod]
+        public void StackedProjectionsAreRefused()
+        {
+            var inner = ProjectOver(Scan(), new[] { ("theId", Ref(1)) });
+            var outer = ProjectOver(inner, new[] { ("again", Ref(0)) });
+
+            var act = () => Sql(outer, Implementor());
+            act.Should().Throw<CosmosTranslationException>();
+        }
+
+        [TestMethod]
+        public void ProjectionOverFilterCombinesBothClauses()
+        {
+            var filter = new CosmosFilter(_cluster, Traits(), Scan(),
+                _rex.makeCall(SqlStdOperatorTable.EQUALS, Ref(4), Str("bikes")));
+            var project = ProjectOver(filter, new[] { ("theId", Ref(1)) });
+
+            Sql(project, Implementor()).Should().Be("SELECT VALUE { \"theId\": c.id } FROM products c WHERE (c.category = @p0)");
+        }
+
+        // ── Unnest ────────────────────────────────────────────────────────────────
+
+        org.apache.calcite.rel.type.RelDataType UnnestRowType(RelNode input, string name)
+        {
+            var builder = _cluster.getTypeFactory().builder();
+            builder.addAll(input.getRowType().getFieldList());
+            builder.add(name, _cluster.getTypeFactory().createSqlType(SqlTypeName.ANY));
+            return builder.build();
+        }
+
+        CosmosUnnest UnnestOver(RelNode input, RexNode array, string name = "t")
+            => new(_cluster, Traits(), input, array, UnnestRowType(input, name));
+
+        RexNode MapItem(string property) => _rex.makeCall(SqlStdOperatorTable.ITEM, Ref(0), Str(property));
+
+        [TestMethod]
+        public void UnnestRendersJoinIn()
+        {
+            var unnest = UnnestOver(Scan(), MapItem("tags"));
+
+            Sql(unnest, Implementor()).Should().Be("SELECT VALUE c FROM products c JOIN t0 IN c.tags");
+        }
+
+        [TestMethod]
+        public void UnnestBindsTheElementToItsAlias()
+        {
+            var implementor = Implementor();
+            UnnestOver(Scan(), MapItem("tags")).Implement(implementor);
+
+            implementor.Fields.Should().HaveCount(6);
+            implementor.Fields[5].ToString().Should().Be("t0");
+        }
+
+        [TestMethod]
+        public void StackedUnnestsGetDistinctAliases()
+        {
+            var inner = UnnestOver(Scan(), MapItem("tags"));
+            var outer = UnnestOver(inner, MapItem("sizes"), "s");
+
+            Sql(outer, Implementor()).Should().Be("SELECT VALUE c FROM products c JOIN t0 IN c.tags JOIN t1 IN c.sizes");
+        }
+
+        [TestMethod]
+        public void FilterAboveUnnestAddressesTheElement()
+        {
+            var unnest = UnnestOver(Scan(), MapItem("tags"));
+            var filter = new CosmosFilter(_cluster, Traits(), unnest,
+                _rex.makeCall(SqlStdOperatorTable.EQUALS, Ref(5), Str("outdoor")));
+
+            Sql(filter, Implementor()).Should().Be("SELECT VALUE c FROM products c JOIN t0 IN c.tags WHERE (t0 = @p0)");
+        }
+
+        /// <remarks>
+        /// The array expression of a lateral unnest addresses a correlation variable rather than
+        /// the input directly, so it must resolve through the same bindings.
+        /// </remarks>
+        [TestMethod]
+        public void CorrelationVariableResolvesToTheInputBinding()
+        {
+            var correlationId = _cluster.createCorrel();
+            var correlated = _rex.makeCorrel(_table.getRowType(), correlationId);
+            var array = _rex.makeCall(SqlStdOperatorTable.ITEM, _rex.makeFieldAccess(correlated, 0), Str("tags"));
+
+            Sql(UnnestOver(Scan(), array), Implementor()).Should().Be("SELECT VALUE c FROM products c JOIN t0 IN c.tags");
+        }
+
+        [TestMethod]
+        public void UnnestAboveAProjectionIsRefused()
+        {
+            var project = ProjectOver(Scan(), new[] { ("theId", Ref(1)) });
+            var unnest = UnnestOver(project, MapItem("tags"));
+
+            var act = () => Sql(unnest, Implementor());
+            act.Should().Throw<CosmosTranslationException>().WithMessage("*projection*");
+        }
+
+        [TestMethod]
+        public void UnnestOfANonPathIsRefused()
+        {
+            var computed = _rex.makeCall(SqlStdOperatorTable.PLUS, Ref(2), Num(1));
+            var unnest = UnnestOver(Scan(), computed);
+
+            var act = () => Sql(unnest, Implementor());
+            act.Should().Throw<CosmosTranslationException>().WithMessage("*path*");
+        }
+
         // ── Convention boundary ───────────────────────────────────────────────────
 
         [TestMethod]

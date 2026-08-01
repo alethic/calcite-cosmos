@@ -99,6 +99,14 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
                     path = _fields[inputRef.getIndex()];
                     return true;
 
+                // A field of a correlation variable addresses the correlated input's row type,
+                // so it resolves against the same bindings as a plain field reference. This is how
+                // the array expression of a lateral unnest arrives.
+                case RexFieldAccess access when access.getReferenceExpr() is RexCorrelVariable
+                    && access.getField().getIndex() >= 0 && access.getField().getIndex() < _fields.Count:
+                    path = _fields[access.getField().getIndex()];
+                    return true;
+
                 case RexCall call when KindOf(call) == SqlKind.__Enum.ITEM && call.getOperands().size() == 2:
                     if (TryResolvePath(Operand(call, 0), out var basePath) == false || Operand(call, 1) is not RexLiteral accessor)
                         break;

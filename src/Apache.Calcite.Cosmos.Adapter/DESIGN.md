@@ -7,9 +7,15 @@ generating **Cosmos SQL**. Calcite's planner runs in-process via IKVM.
 This document records the shape of the target language, the resulting design decision, and the
 structure that follows from it.
 
-> **Status.** Early development. `CosmosConvention` and `CosmosRel` exist. Everything described
-> under *Planned structure* is not yet built. This document is the specification those pieces
-> are being built against.
+> **Status.** Under development. Statement generation, container metadata, the schema and table
+> layer, and the scan/filter/project/sort/unnest nodes with their conversion rules are in place
+> and tested. Aggregation and the converter that hands results to a CLR enumerable convention are
+> not. Items marked ✔ below exist; the rest are specification.
+>
+> Two claims rest on documentation rather than observation, and both need a real Cosmos account
+> to settle: that a multi-key `ORDER BY` requires a matching composite index, and that
+> `CosmosUnnestRule` matches the tree Calcite actually produces for `UNNEST`. See
+> *Verified against the emulator* and *Unvalidated assumptions*.
 
 ---
 
@@ -248,12 +254,12 @@ CQL is likewise SQL-shaped, and Calcite still hand-builds it rather than routing
 
 | Node | Rule | Notes |
 | --- | --- | --- |
-| `CosmosTableScan` | — | Terminal. One per container; nothing composes beneath it. |
-| `CosmosFilter` | `CosmosFilterRule` | Only when every `RexNode` is translatable. |
-| `CosmosProject` | `CosmosProjectRule` | Renders as an object constructor. |
-| `CosmosSort` | `CosmosSortRule` | Carries `OFFSET`/`LIMIT`. Blocked if aggregation present. Multi-key sorts require a matching composite index. |
+| `CosmosTableScan` | — | ✔ Terminal. One per container; nothing composes beneath it. |
+| `CosmosFilter` | `CosmosFilterRule` | ✔ Only when every `RexNode` is translatable. Refused above a projection, since `WHERE` precedes `SELECT`. |
+| `CosmosProject` | `CosmosProjectRule` | ✔ Renders as an object constructor. Rebinds field ordinals to the projected paths, or clears them when any projection is computed. |
+| `CosmosSort` | `CosmosSortRule` | ✔ Carries `OFFSET`/`LIMIT`. Blocked if aggregation present. Multi-key sorts require a matching composite index; null placement must be honourable. |
+| `CosmosUnnest` | `CosmosUnnestRule` | ✔ From `Correlate` over `Uncollect`, **never** from `Join`. |
 | `CosmosAggregate` | `CosmosAggregateRule` | `COUNT`, `SUM`, `MIN`, `MAX`, `AVG` only. Blocked if a sort is present. |
-| `CosmosUnnest` | `CosmosUnnestRule` | From `Uncollect`/`Correlate`, **not** from `Join`. |
 
 Deliberately absent, and not to be added later without revisiting this document:
 
@@ -367,8 +373,8 @@ src/
     CosmosImplementor.cs              ✔ Mutable SQL accumulator
     CosmosRules.cs                    ✔ Rule set for a convention instance
     CosmosSchema.cs                   ✔ Calcite Schema over a database
-    CosmosTable.cs                    ✔ Calcite Table over a container
-    CosmosSchemaFactory.cs            SchemaFactory for JSON model registration
+    CosmosTable.cs                    ✔ Calcite Table over a container; Statistic
+    CosmosSchemaFactory.cs            ✔ SchemaFactory for JSON model registration
     Client/
       CosmosQueryExecutor.cs          ✔ Executes a rendered statement via the Cosmos SDK
     Metadata/
@@ -379,10 +385,10 @@ src/
       CosmosRel.cs                    ✔ Implement contract
       CosmosTableScan.cs              ✔
       CosmosFilter.cs                 ✔
+      CosmosProject.cs                ✔
       CosmosSort.cs                   ✔
-      CosmosProject.cs
+      CosmosUnnest.cs                 ✔
       CosmosAggregate.cs
-      CosmosUnnest.cs
       Convert/                        ✔ One converter rule per node
     Sql/
       CosmosSql.cs                    ✔ Lexical primitives: identifiers, paths, JSON literals
@@ -421,6 +427,29 @@ completed and tested ahead of them.
   which is what lets the bulk of the suite run with no client, no emulator, and no network.
 - **Parameterize rather than interpolate.** Literals that could carry user data bind as `@pN`.
 - **Targeting.** The adapter targets .NET 8 (C# 12); tests target .NET 8 and .NET 10.
+
+---
+
+## Unvalidated assumptions
+
+Recorded so they are not mistaken for tested behaviour.
+
+**The composite index requirement.** `CosmosContainerMetadata.IsSortSupported` refuses a
+multi-key `ORDER BY` without a matching composite index. The rule is documented, but the
+emulator implements composite indexes not at all, so nothing exercises it end to end. If the
+real service is more permissive, the guard silently costs pushdown on every multi-key sort.
+
+**The shape `CosmosUnnestRule` matches.** The rule expects a `Correlate` whose right input is an
+`Uncollect` over a single-expression `Project` over a `Values` — the lowering Calcite is
+understood to produce for `UNNEST`. `CosmosUnnest` itself is tested by construction, but the
+rule's matching has not been driven from real planner output, which needs full SQL planning.
+If the shape differs, the rule silently never fires; it cannot produce a wrong query, because
+the array expression must still resolve to a path before anything is emitted.
+
+**Null placement on non-nullable keys.** Sorting a non-nullable key is accepted regardless of
+requested placement, on the grounds that a key which cannot be null has no null ordering to
+disagree about. This is sound provided the declared nullability is accurate — which for the map
+row model means `id` and the system properties, whose presence the service guarantees.
 
 ---
 

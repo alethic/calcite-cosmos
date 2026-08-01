@@ -4,12 +4,15 @@ using System.Collections.Generic;
 using Apache.Calcite.Cosmos.Adapter.Metadata;
 using Apache.Calcite.Cosmos.Adapter.Rel;
 
+using com.google.common.collect;
+
 using org.apache.calcite.plan;
 using org.apache.calcite.rel;
 using org.apache.calcite.rel.type;
 using org.apache.calcite.schema;
 using org.apache.calcite.schema.impl;
 using org.apache.calcite.sql.type;
+using org.apache.calcite.util;
 
 namespace Apache.Calcite.Cosmos.Adapter
 {
@@ -112,6 +115,102 @@ namespace Apache.Calcite.Cosmos.Adapter
             }
 
             return builder.build();
+        }
+
+        /// <summary>
+        /// Returns the ordinal of a promoted column, or <c>-1</c> if the path is not promoted.
+        /// </summary>
+        /// <remarks>
+        /// The map column occupies ordinal zero, so promoted columns begin at one.
+        /// </remarks>
+        /// <param name="policyPath">A path in policy form, such as <c>/category</c>.</param>
+        /// <returns>The field ordinal, or <c>-1</c>.</returns>
+        public int GetColumnOrdinal(string policyPath)
+        {
+            if (string.IsNullOrEmpty(policyPath))
+                return -1;
+
+            var name = policyPath.TrimStart('/');
+            if (name.Length == 0 || name.Contains('/'))
+                return -1;
+
+            var promoted = GetPromotedColumnNames();
+            for (var i = 0; i < promoted.Count; i++)
+                if (string.Equals(promoted[i], name, StringComparison.Ordinal))
+                    return i + 1;
+
+            return -1;
+        }
+
+        /// <inheritdoc />
+        /// <remarks>
+        /// <para>
+        /// Derived entirely from declared facts. <c>id</c> is unique within a logical partition, so
+        /// the partition key together with <c>id</c> is unique across the container — but only when
+        /// every partition key path is promoted to a column, since a key is expressed over field
+        /// ordinals. A nested partition key path yields no key at all rather than a wrong one.
+        /// </para>
+        /// <para>
+        /// Row count is left unknown; nothing here samples the container.
+        /// </para>
+        /// </remarks>
+        public override Statistic getStatistic()
+        {
+            var keys = new java.util.ArrayList();
+            var collations = new java.util.ArrayList();
+
+            var partitionOrdinals = new java.util.ArrayList();
+            var partitionPromoted = _container.PartitionKeyPaths.Count > 0;
+
+            foreach (var path in _container.PartitionKeyPaths)
+            {
+                var ordinal = GetColumnOrdinal(path);
+                if (ordinal < 0)
+                {
+                    partitionPromoted = false;
+                    break;
+                }
+
+                partitionOrdinals.add(java.lang.Integer.valueOf(ordinal));
+            }
+
+            if (partitionPromoted)
+            {
+                var idOrdinal = GetColumnOrdinal("/" + CosmosContainerMetadata.IdPropertyName);
+                if (idOrdinal >= 0)
+                {
+                    var bits = new java.util.ArrayList(partitionOrdinals);
+                    bits.add(java.lang.Integer.valueOf(idOrdinal));
+                    keys.add(ImmutableBitSet.builder().addAll(bits).build());
+                }
+            }
+
+            // A composite index guarantees an ordering only when every one of its paths is a
+            // column the planner can name.
+            foreach (var index in _container.CompositeIndexes)
+            {
+                var fields = new java.util.ArrayList();
+                var usable = true;
+
+                foreach (var path in index.Paths)
+                {
+                    var ordinal = GetColumnOrdinal(path.Path);
+                    if (ordinal < 0)
+                    {
+                        usable = false;
+                        break;
+                    }
+
+                    fields.add(new RelFieldCollation(
+                        ordinal,
+                        path.Descending ? RelFieldCollation.Direction.DESCENDING : RelFieldCollation.Direction.ASCENDING));
+                }
+
+                if (usable)
+                    collations.add(RelCollations.of(fields));
+            }
+
+            return Statistics.of(null, keys, java.util.Collections.emptyList(), collations);
         }
 
         /// <inheritdoc />

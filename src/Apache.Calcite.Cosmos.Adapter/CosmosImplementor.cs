@@ -90,6 +90,7 @@ namespace Apache.Calcite.Cosmos.Adapter
         readonly CosmosQueryBuilder _query;
 
         IReadOnlyList<CosmosPath> _fields;
+        int _unnestAliases;
 
         /// <summary>
         /// Initializes a new instance.
@@ -145,6 +146,16 @@ namespace Apache.Calcite.Cosmos.Adapter
             get => _fields;
             set => _fields = value ?? throw new ArgumentNullException(nameof(value));
         }
+
+        /// <summary>
+        /// Allocates a fresh alias for an array traversal.
+        /// </summary>
+        /// <remarks>
+        /// Cosmos requires every alias in a <c>FROM</c> clause to be unique, and a query may
+        /// traverse several arrays.
+        /// </remarks>
+        /// <returns>The alias.</returns>
+        public string CreateUnnestAlias() => "t" + (_unnestAliases++).ToString(System.Globalization.CultureInfo.InvariantCulture);
 
         /// <summary>
         /// Creates a translator bound to the current field bindings and parameter list.

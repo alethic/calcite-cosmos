@@ -50,7 +50,9 @@ namespace Apache.Calcite.Cosmos.Adapter
                 throw new ArgumentNullException(nameof(convention));
 
             yield return CosmosFilterRule.Create(convention);
+            yield return CosmosProjectRule.Create(convention);
             yield return CosmosSortRule.Create(convention);
+            yield return CosmosUnnestRule.Create(convention);
         }
 
     }

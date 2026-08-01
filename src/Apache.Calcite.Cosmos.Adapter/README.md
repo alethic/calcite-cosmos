@@ -6,10 +6,12 @@ Rather than going through ADO.NET or JDBC, the adapter translates the relational
 
 ## How it works
 
-1. A Cosmos container is registered with Calcite as a schema.
+1. A Cosmos database is registered with Calcite as a schema, one table per container.
 2. Calcite's planner converts as much of the plan as possible into the Cosmos calling convention (`CosmosConvention`).
 3. Nodes in that convention are rendered to Cosmos SQL and executed by the Cosmos query engine.
 4. Anything Cosmos cannot express is executed in-process by Calcite's enumerable runtime.
+
+A container has no row schema, so a table is modelled as one map column carrying the whole document, plus promoted scalar columns for paths the service guarantees or the container declares — `id`, `_ts`, `_etag`, and the partition key. Nothing is inferred from sampling documents.
 
 ## Install
 
@@ -17,9 +19,38 @@ Rather than going through ADO.NET or JDBC, the adapter translates the relational
 dotnet add package Apache.Calcite.Cosmos.Adapter
 ```
 
+## Register a database
+
+```json
+{
+  "name": "COSMOS",
+  "type": "custom",
+  "factory": "Apache.Calcite.Cosmos.Adapter.CosmosSchemaFactory",
+  "operand": {
+    "endpoint": "https://account.documents.azure.com:443/",
+    "key": "…",
+    "database": "inventory",
+    "containers": [ "products", "orders" ]
+  }
+}
+```
+
+Omit `containers` to expose every container in the database.
+
+## Pushdown
+
+| Operator | Rendered as |
+|---|---|
+| Filter | `WHERE` |
+| Project | `SELECT VALUE { … }` |
+| Sort | `ORDER BY`, `OFFSET`/`LIMIT` |
+| Array traversal | `JOIN alias IN path` |
+
+Relational joins, `UNION`/`INTERSECT`/`EXCEPT`, and `HAVING` have no Cosmos equivalent and are evaluated in-process by Calcite. Multi-property `ORDER BY` is pushed down only when the container declares a matching composite index, since the service rejects it otherwise.
+
 ## Status
 
-Early development. The convention and relational node contracts are in place; SQL generation and the schema/table implementations are being built out.
+Under development. Statement generation, container metadata, the schema and table layer, and the scan/filter/project/sort/unnest nodes are in place and tested. Aggregation and result execution inside a Calcite plan are not yet wired up. See [DESIGN.md](DESIGN.md), including its record of assumptions that still need verifying against a real account.
 
 ## Further reading
 

@@ -266,6 +266,57 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
             metadata.PartitionKeyPaths.Should().Equal("/category");
         }
 
+        // ── Schema factory ────────────────────────────────────────────────────────
+
+        static java.util.Map Operand(bool listContainers)
+        {
+            var operand = new java.util.HashMap();
+            operand.put("endpoint", EmulatorEndpoint);
+            operand.put("key", EmulatorKey);
+            operand.put("database", "calcite_cosmos_tests");
+            operand.put("connectionMode", "gateway");
+
+            if (listContainers)
+            {
+                var containers = new java.util.ArrayList();
+                containers.add("products");
+                operand.put("containers", containers);
+            }
+
+            return operand;
+        }
+
+        static CosmosTable? Products(bool listContainers)
+        {
+            var schema = new CosmosSchemaFactory().create(null!, "cosmos", Operand(listContainers));
+            return schema.tables().get("products") as CosmosTable;
+        }
+
+        [TestMethod]
+        public void SchemaFactoryBuildsASchemaFromNamedContainers()
+        {
+            Container();
+            Products(listContainers: true).Should().NotBeNull();
+        }
+
+        [TestMethod]
+        public void SchemaFactoryDiscoversContainersWhenNoneAreNamed()
+        {
+            Container();
+            Products(listContainers: false).Should().NotBeNull();
+        }
+
+        [TestMethod]
+        public void SchemaFactoryTableCarriesTheContainerMetadata()
+        {
+            Container();
+
+            var table = Products(listContainers: true)!;
+
+            table.Container.Name.Should().Be("products");
+            table.Container.PartitionKeyPaths.Should().Equal("/category");
+        }
+
     }
 
 }
