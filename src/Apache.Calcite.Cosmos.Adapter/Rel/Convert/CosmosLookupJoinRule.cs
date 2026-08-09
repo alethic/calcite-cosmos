@@ -137,13 +137,35 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
         }
 
         /// <summary>
-        /// Creates a rule instance bound to the specified convention.
+        /// Creates a rule instance.
         /// </summary>
-        /// <param name="convention">The Cosmos convention whose container is on the probe side.</param>
+        /// <remarks>
+        /// <para>
+        /// <b>Not bound to a convention</b>, for the reason
+        /// <see cref="CosmosTableModifyRule.Create"/> is not: a <see cref="ConverterRule"/>'s
+        /// description is derived from the traits it converts between, and this one converts
+        /// <c>NONE</c> to <c>CLR_ASYNC_ENUMERABLE</c> — neither of which names a container. One
+        /// instance per container therefore gives several rules carrying the same description, and
+        /// which of them a planner matches with is then not something the adapter decides.
+        /// </para>
+        /// <para>
+        /// It decided wrongly, measured on a join across three containers: one of the two joins fetched
+        /// by key and the other read its container whole. Two containers never showed it, for a reason
+        /// that is worth knowing and not worth relying on —
+        /// <c>CosmosLookupJoinPlannerTests.EveryContainerInAQueryCanBeOnTheProbeSide</c> records both.
+        /// </para>
+        /// <para>
+        /// The binding had nothing to do anyway. The container is named by the probe side, which
+        /// <see cref="FindTable"/> must locate regardless in order to establish that the subtree is a
+        /// container's at all, so the rule reads the convention from there rather than being told it.
+        /// One instance serves every container, and registering it once per convention is then merely
+        /// redundant rather than wrong.
+        /// </para>
+        /// </remarks>
         /// <returns>A configured rule.</returns>
-        public static CosmosLookupJoinRule Create(CosmosConvention convention)
+        public static CosmosLookupJoinRule Create()
         {
-            bool IsTranslatable(Join join)
+            static bool IsTranslatable(Join join)
             {
                 if (join.getJoinType() != JoinRelType.INNER)
                     return false;
@@ -153,9 +175,10 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
 
                 var right = join.getRight();
 
-                // This rule instance converts into one container's convention, so a join against a
-                // different one is another instance's to match.
-                if (FindTable(right) is not CosmosTable table || ReferenceEquals(table.Convention, convention) == false)
+                // The probe side must bottom out at a container's scan — both because there is
+                // otherwise nothing to fetch from, and because the convention this converts that side
+                // into is the container's own.
+                if (FindTable(right) is null)
                     return false;
 
                 if (IsRestrictable(right) == false)
@@ -178,21 +201,18 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
 
             return (CosmosLookupJoinRule)Config.INSTANCE
                 .withConversion(typeof(Join), new DelegatePredicate<Join>(IsTranslatable), Convention.NONE, ClrAsyncEnumerableConvention.Instance, "CosmosLookupJoinRule")
-                .withRuleFactory(new DelegateFunction<Config, CosmosLookupJoinRule>(c => new CosmosLookupJoinRule(c, convention)))
+                .withRuleFactory(new DelegateFunction<Config, CosmosLookupJoinRule>(c => new CosmosLookupJoinRule(c)))
                 .toRule(typeof(CosmosLookupJoinRule));
         }
-
-        readonly CosmosConvention _convention;
 
         /// <summary>
         /// Initializes a new instance using the supplied rule configuration.
         /// </summary>
         /// <param name="config">The rule configuration produced by <see cref="Create"/>.</param>
-        /// <param name="convention">The Cosmos convention the probe side is converted into.</param>
-        public CosmosLookupJoinRule(Config config, CosmosConvention convention) :
+        public CosmosLookupJoinRule(Config config) :
             base(config)
         {
-            _convention = convention;
+
         }
 
         /// <inheritdoc />
@@ -206,11 +226,14 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
             var left = join.getLeft();
             var right = join.getRight();
 
+            if (FindTable(right) is not CosmosTable table)
+                return null;
+
             return new CosmosLookupJoin(
                 join.getCluster(),
                 join.getTraitSet().replace(ClrAsyncEnumerableConvention.Instance),
                 convert(left, left.getTraitSet().replace(ClrAsyncEnumerableConvention.Instance)),
-                convert(right, right.getTraitSet().replace(_convention)),
+                convert(right, right.getTraitSet().replace(table.Convention)),
                 join.getCondition(),
                 build,
                 probe);

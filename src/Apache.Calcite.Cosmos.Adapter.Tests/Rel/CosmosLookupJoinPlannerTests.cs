@@ -1,4 +1,5 @@
-﻿using System.Linq;
+﻿using System.Collections.Generic;
+using System.Linq;
 
 using Apache.Calcite.Cosmos.Adapter.Metadata;
 using Apache.Calcite.Cosmos.Adapter.Rel;
@@ -40,15 +41,18 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
 
         static readonly CosmosContainerMetadata Products = new("products", new[] { "/category" });
         static readonly CosmosContainerMetadata Orders = new("orders", new[] { "/customer" });
+        static readonly CosmosContainerMetadata Archive = new("archive", new[] { "/category" });
 
         CosmosTable _products = null!;
         CosmosTable _orders = null!;
+        CosmosTable _archive = null!;
 
         [TestInitialize]
         public void Initialize()
         {
             _products = new CosmosTable(Products);
             _orders = new CosmosTable(Orders);
+            _archive = new CosmosTable(Archive);
         }
 
         RelNode PlanLogical(string sql)
@@ -58,6 +62,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             var rootSchema = CalciteSchema.createRootSchema(false);
             rootSchema.add("products", _products);
             rootSchema.add("orders", _orders);
+            rootSchema.add("archive", _archive);
 
             var properties = new java.util.Properties();
             properties.setProperty("caseSensitive", "true");
@@ -91,8 +96,13 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
         }
 
         /// <summary>
-        /// Plans for the asynchronous convention, with both containers' rules and the CLR ones.
+        /// Plans for the asynchronous convention, with every container's rules and the CLR ones.
         /// </summary>
+        /// <remarks>
+        /// All three containers are registered for every query, whether or not the query names them,
+        /// because a rule that is only correct when its container's rules were registered last is not
+        /// correct. See <see cref="EveryContainerInAQueryCanBeOnTheProbeSide"/>.
+        /// </remarks>
         RelNode Plan(string sql)
         {
             var logical = PlanLogical(sql);
@@ -102,6 +112,9 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
                 planner.addRule(rule);
 
             foreach (var rule in CosmosRules.GetRules(_orders.Convention))
+                planner.addRule(rule);
+
+            foreach (var rule in CosmosRules.GetRules(_archive.Convention))
                 planner.addRule(rule);
 
             foreach (var rule in ClrAsyncEnumerableRules.Rules())
@@ -130,6 +143,24 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             return null;
         }
 
+        static List<T> FindAll<T>(RelNode rel) where T : class
+        {
+            var found = new List<T>();
+
+            void Walk(RelNode node)
+            {
+                if (node is T match)
+                    found.Add(match);
+
+                var inputs = node.getInputs();
+                for (var i = 0; i < inputs.size(); i++)
+                    Walk((RelNode)inputs.get(i));
+            }
+
+            Walk(rel);
+            return found;
+        }
+
         // ── Chosen ────────────────────────────────────────────────────────────────
 
         /// <remarks>
@@ -147,6 +178,54 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             // The probe side is the container, and the build side is not — a lookup whose sides were
             // the other way round would plan, run, and read the container whole.
             lookup!.getRight().getConvention().Should().BeSameAs(_products.Convention);
+        }
+
+        /// <summary>
+        /// Which container is on the probe side must not decide whether the lookup happens.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// The rule was originally created once per convention, and checked that the probe side's
+        /// container was the one its instance had been given. That check cannot work, and the reason is
+        /// the one <see cref="Apache.Calcite.Cosmos.Adapter.Rel.Convert.CosmosTableModifyRule"/> carries:
+        /// a converter rule's description is derived from the traits it converts between, this one
+        /// converts <c>NONE</c> to <c>CLR_ASYNC_ENUMERABLE</c>, and neither names a container — so every
+        /// instance is <c>CosmosLookupJoinRule(in:NONE,out:CLR_ASYNC_ENUMERABLE)</c> and a planner cannot
+        /// tell them apart.
+        /// </para>
+        /// <para>
+        /// Two containers did not show it, which is why this test is a join of three. Measured: the
+        /// instance a planner ends up matching with is the last one <em>created</em>, not the one
+        /// <c>addRule</c> accepted — and because <see cref="CosmosConvention.register"/> creates a fresh
+        /// rule set as each new convention is registered, and Calcite registers a join's inputs left
+        /// before right, the probe side's instance was normally the last one created. Two containers
+        /// therefore worked in either orientation, by an accident of registration order that a third
+        /// container ends: with <c>archive</c> registered after <c>orders</c>, the <c>orders</c> instance
+        /// was live when the <c>archive</c> join was matched, declined it, and the plan read the whole of
+        /// <c>archive</c> through a hash join.
+        /// </para>
+        /// <para>
+        /// So both halves are asserted — the orientations that always passed, and the third container
+        /// that did not.
+        /// </para>
+        /// </remarks>
+        [TestMethod]
+        public void EveryContainerInAQueryCanBeOnTheProbeSide()
+        {
+            var onProducts = Find<CosmosLookupJoin>(Plan("SELECT * FROM orders o JOIN products p ON o.id = p.id"));
+            onProducts.Should().NotBeNull();
+            onProducts!.getRight().getConvention().Should().BeSameAs(_products.Convention);
+
+            var onOrders = Find<CosmosLookupJoin>(Plan("SELECT * FROM products p JOIN orders o ON p.id = o.id"));
+            onOrders.Should().NotBeNull();
+            onOrders!.getRight().getConvention().Should().BeSameAs(_orders.Convention);
+
+            var plan = Plan("SELECT * FROM products p JOIN orders o ON p.id = o.id JOIN archive a ON p.id = a.id");
+            var lookups = FindAll<CosmosLookupJoin>(plan);
+
+            lookups.Should().HaveCount(2, "each join has a container on its probe side:\n" + Text(plan));
+            lookups.Should().Contain(j => ReferenceEquals(j.getRight().getConvention(), _orders.Convention));
+            lookups.Should().Contain(j => ReferenceEquals(j.getRight().getConvention(), _archive.Convention));
         }
 
         // ── Not chosen, and each for a reason ─────────────────────────────────────
