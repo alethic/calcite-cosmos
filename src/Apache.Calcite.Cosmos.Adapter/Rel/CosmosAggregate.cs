@@ -45,7 +45,9 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
     /// <para>
     /// The divergence disappears when the aggregated value cannot be null, which is the same
     /// reasoning applied to sort null placement. So <c>COUNT(*)</c> is always safe, and the value
-    /// aggregates are pushed down only over a non-nullable input.
+    /// aggregates are pushed down only over a non-nullable input. <c>COUNT(x)</c> needs no
+    /// non-nullable case of its own: Calcite rewrites it to <c>COUNT(*)</c> there before any rule
+    /// sees it.
     /// </para>
     /// </remarks>
     public class CosmosAggregate : Aggregate, CosmosRel
@@ -79,7 +81,9 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
             {
                 case SqlKind.__Enum.COUNT:
                     // COUNT(*) counts rows and agrees with SQL. COUNT(x) does not: Cosmos counts
-                    // the JSON null where SQL excludes it.
+                    // the JSON null where SQL excludes it. Admitting COUNT(x) over a non-nullable
+                    // column — the value aggregates' reasoning — was probed and is dead code:
+                    // Calcite rewrites that COUNT(x) to COUNT(*) before any rule sees it.
                     return arguments.size() == 0;
 
                 case SqlKind.__Enum.SUM:

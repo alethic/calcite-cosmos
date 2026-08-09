@@ -475,10 +475,17 @@ the actual bail-outs in `CosmosAggregate`, the idea splits into four pieces of v
   way — the divergence cannot reach the count. That reasoning is *reasoned, not measured*; the inner
   form it relies on (`GROUP BY` over a possibly-absent property) is one the acceptance suite already
   executes.
-- **`ROLLUP`/`CUBE`/grouping sets — *medium*.** Blocked today by the `Group.SIMPLE` check. Push the
-  finest-grained simple grouping, roll up above. Needs genuinely splittable calls — `COUNT`
-  re-aggregates as `SUM0`, `SUM`/`MIN`/`MAX` as themselves, `AVG` decomposed into `SUM`+`COUNT` first
-  by `AggregateReduceFunctionsRule` — which is what `SqlSplittableAggFunction` encodes.
+- **`ROLLUP`/`CUBE`/grouping sets — *done*.** `CosmosAggregateSplitRule` pushes the finest-grained
+  simple grouping and leaves a rollup of the partials behind, so one row per group crosses the wire
+  instead of one per document. Sound because every grouping set coarsens the finest one and each
+  source row lands in exactly one finest group. `COUNT` finishes as `$SUM0` — summed, not recounted,
+  and zero for an empty grand total as `COUNT` is — and `SUM`/`MIN`/`MAX` as themselves. `AVG`
+  declines the split, and `AGGREGATE_REDUCE_FUNCTIONS` resolves it: measured, a grouping-set `AVG`
+  cannot be implemented by the asynchronous convention at all unreduced, so the reduce rule is
+  registered for planability and the decomposed `SUM`+`COUNT` partials push where `AVG`'s own
+  pushdown condition held. Probed on the way and found dead: a non-nullable `COUNT(x)` case in
+  `CanImplement` — Calcite rewrites that to `COUNT(*)` before any rule sees it, and a planner test
+  pins the reason.
 - **What a split does *not* fix: the null-semantics refusals**, which are the biggest source of
   declined aggregates. A partial `SUM(c.v)` over a nullable column is `undefined` at the service —
   wrong before it is combined, so no combine repairs it. Fixing those means rewriting the rendered
@@ -504,9 +511,12 @@ recovery included. Taking it surfaced that `CosmosFilter` refused every filter a
 projection, which contradicted the per-ordinal binding `CosmosProject` records: the refusal is now
 per-reference — a predicate over plain paths renders, one reading a computed column is declined by
 the translation — and the `WHERE` + `GROUP BY` combination joined the acceptance forms the emulator
-executes. `AGGREGATE_REDUCE_FUNCTIONS` does not qualify yet, because decomposing `AVG` buys nothing
-(native) and decomposing `STDDEV`/`VAR` needs a computed projection below the aggregate, which is
-declined.
+executes. `AGGREGATE_REDUCE_FUNCTIONS` qualified after all, on evidence the earlier assessment
+lacked: a grouping-set `AVG` cannot be implemented by the asynchronous convention unreduced, so the
+rewrite is a matter of planability in a bare host, not preference — and the native `AVG` form
+survives as an equivalence alternative, so a simple `AVG` still pushes as `AVG`. `STDDEV`/`VAR`
+remain unpushable either way — their reduction needs a computed projection below the aggregate,
+which is declined — but they now at least reduce to something implementable.
 
 ### Smaller rules
 
@@ -660,7 +670,7 @@ the mappings point at something that exists rather than at something that sounds
 | `SupportsFilterPushDown` | **done** — and note the API shape: it returns *accepted* and *remaining* filters, so partial pushdown is a first-class contract rather than an afterthought. `CosmosFilterSplitRule` reaches the same place by rule. |
 | `SupportsProjectionPushDown` | **done**, including nested paths, which Cosmos addresses natively. |
 | `SupportsLimitPushDown` | **done** — `OFFSET`/`LIMIT`, plus `MaxItemCount` as the page size. |
-| `SupportsAggregatePushDown` | **mostly done.** Flink pushes the *local* aggregate and combines above it. `COUNT(DISTINCT)` now plans that way; grouping sets remain, and cross-partition combining was never the adapter's to do — see *Partial aggregates, finished above* in section 5. |
+| `SupportsAggregatePushDown` | **done.** Flink pushes the *local* aggregate and combines above it. `COUNT(DISTINCT)` and grouping sets both plan that way now; cross-partition combining was never the adapter's to do — see *Partial aggregates, finished above* in section 5. |
 | `SupportsStatisticReport` | **done** — this is FLIP-231, already the model for reading statistics lazily at optimisation. |
 | `SupportsPartitionPushDown` | **worth taking.** Hands the planner the list of partitions. `GetFeedRangesAsync` gives the physical ones; see *parallel scan by feed range*. |
 | `SupportsDynamicFiltering` | **worth taking** — FLIP-248 dynamic partition pruning. The other half of sideways information passing: instead of fetching by key, the build side's values *prune partitions* on the probe side at run time. Complements the lookup join rather than competing with it, and for Cosmos the unit pruned is a physical partition. |

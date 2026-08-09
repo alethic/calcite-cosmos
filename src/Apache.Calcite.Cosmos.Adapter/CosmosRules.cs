@@ -73,6 +73,22 @@ namespace Apache.Calcite.Cosmos.Adapter
             // A static instance, so registering it once per convention registers it once.
             yield return org.apache.calcite.rel.rules.CoreRules.AGGREGATE_EXPAND_DISTINCT_AGGREGATES;
 
+            // Partial pushdown for the grouping the service cannot express: ROLLUP and CUBE group
+            // several ways at once and Cosmos groups one way per statement, so the finest grouping
+            // is pushed as a plain GROUP BY and the plan rolls its partials up. AVG declines the
+            // split — an average of averages weights every group equally — which is what the next
+            // rule resolves.
+            yield return CosmosAggregateSplitRule.Create(convention);
+
+            // Registered for planability before pushdown: a grouping-set AVG cannot be implemented
+            // by the asynchronous convention at all — measured; the conversion declines it — and
+            // hosts on Calcite's default rule set never see that because this rewrite is in it.
+            // Decomposed into SUM and COUNT the rollup above both plans and splits, the partials
+            // being pushable where AVG's argument is non-nullable, which is AVG's own pushdown
+            // condition. The native AVG form survives as an alternative — a transformation adds an
+            // equivalence rather than replacing — so a simple AVG still pushes as AVG.
+            yield return org.apache.calcite.rel.rules.CoreRules.AGGREGATE_REDUCE_FUNCTIONS;
+
             // The same reasoning: a HAVING on a grouping key is a filter above the aggregate, which
             // the filter rule cannot bind — aggregate output has no document paths. Transposed
             // below, it is an ordinary WHERE the service applies before grouping. A condition on an
