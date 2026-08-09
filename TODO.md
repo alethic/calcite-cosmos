@@ -6,10 +6,48 @@ rather than a list.
 **Sizes.** *Small* is a translator case and a test. *Medium* is a node, a rule, or an SDK surface.
 *Large* needs a design decision recorded in `DESIGN.md` before any code.
 
+**On testing a change.** Before believing a test covers what it claims, check that it *fails without
+the change*. This caught two things in one session: a filter-split test that genuinely depended on
+its fix, and a guard added to `CosmosSortRule` that turned out to be dead code — the case it guarded
+was already unreachable, and removing it changed nothing. Same probe, opposite conclusions, and
+neither was visible from a green suite.
+
 **On evidence.** Where a claim about the service is unverified it says so. The emulator has disagreed
 with Azure in both directions — accepting an `ORDER BY` over an unnest alias that Azure rejects, and
 rejecting the full text search Azure runs — so "the reference says" is not a measurement. Point
 `COSMOS_TEST_ENDPOINT` and `COSMOS_TEST_KEY` at a real account and the suite runs against one.
+
+---
+
+## 0. Where this stands, and the one thing a host must do
+
+408 passing, 5 skipped, on net8.0 and net10.0. Every emitted statement form is executed against a
+live service; the suite runs against a real account when `COSMOS_TEST_ENDPOINT` and `COSMOS_TEST_KEY`
+name one, and reports inconclusive rather than passing where the emulator cannot answer.
+
+**A host must run the calc rules as a pass after the planner.** This is the one integration
+requirement the adapter adds, and it is easy to miss because the failure names nothing useful — a
+plan that cannot be implemented, with no indication of what is missing:
+
+```csharp
+var program = new HepProgramBuilder();
+foreach (var rule in ClrAsyncEnumerableRules.CalcRules())
+    program.addRuleInstance(rule);
+```
+
+It is Calcite's `Programs.CALC_PROGRAM` and it is a *pass*, not rules for the planner — given to
+Volcano it does nothing, because `ClrAsyncEnumerableProject` is the cheaper node and also the one that
+throws when implemented. Without the pass, a projection above a join has nothing to implement it. It
+does not arise without a join, because every other projection is pushed into the container. See
+section 11.
+
+**Do not start the disjunction weakening without measuring first.** The analysis is done (section 4),
+but two facts about the service decide *soundness* rather than speed: how it evaluates `NOT undefined`,
+and whether `= null` is a comparison or a definedness test. The failure mode is a strengthened
+predicate — rows lost, a smaller answer returned as though it were the answer.
+
+**Nothing else is half-finished.** The lookup join, the diagnostics surface, and the statistics work
+are complete and covered; what remains below is not started rather than in progress.
 
 ---
 
