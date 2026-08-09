@@ -153,6 +153,18 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             query.Sql.Should().Contain("WHERE (c.category = @p0)");
         }
 
+        /// <remarks>
+        /// A single trailing wildcard is a prefix match, which the index serves as
+        /// <c>STARTSWITH</c> where <c>LIKE</c> is a scan.
+        /// </remarks>
+        [TestMethod]
+        public void PrefixLikeIsPushedAsStartsWith()
+        {
+            var query = Query(PlanToCosmos("SELECT * FROM products AS c WHERE c.\"category\" LIKE 'bi%'"));
+
+            query.Sql.Should().Contain("STARTSWITH(c.category, @p0)");
+        }
+
         [TestMethod]
         public void PredicateOnANonPartitionKeyRecoversNothing()
         {
