@@ -175,11 +175,15 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
         {
             implementor.Visit(getInput());
 
-            // Cosmos evaluates WHERE against the source document, before SELECT. A filter sitting
-            // above a pushed-down projection therefore cannot be expressed without inlining the
-            // projection's expressions into the predicate, which is not attempted.
-            if (implementor.Query.HasProjection)
-                throw new CosmosTranslationException("A filter cannot be applied above a pushed-down projection.");
+            // Cosmos evaluates WHERE against the source document, before SELECT — which is not a
+            // reason to refuse a filter above a pushed-down projection, because the translation
+            // below renders the predicate against document paths rather than projected names, and
+            // filtering before or after a path-only projection admits the same documents. What
+            // cannot be expressed is a predicate reading a computed column, which has no path for
+            // WHERE to name; the translation refuses that reference itself. Filters above a
+            // projection were once refused wholesale here, which contradicted the per-ordinal
+            // binding CosmosProject records, and cost the WHERE that FILTER_AGGREGATE_TRANSPOSE
+            // recovers from a HAVING on a grouping key.
 
             // WHERE is evaluated before OFFSET/LIMIT, so folding a filter that the plan places
             // above a row restriction would filter the whole set and then restrict it, rather

@@ -63,6 +63,23 @@ namespace Apache.Calcite.Cosmos.Adapter
                 throw new ArgumentNullException(nameof(convention));
 
             yield return CosmosAggregateRule.Create(convention);
+
+            // Not a conversion, and not Cosmos's: Calcite's own rewrite of COUNT(DISTINCT x) into an
+            // aggregate over an aggregate, registered because a bare Volcano planner has no logical
+            // rewrites at all. Its inner half is a plain GROUP BY the rule above can push, so the
+            // dedup happens at the service and one row per distinct value crosses the wire; the
+            // count finishes wherever the outer aggregate is implemented, which is never here — the
+            // aggregate rule declines an input it cannot bind, and aggregate output binds nothing.
+            // A static instance, so registering it once per convention registers it once.
+            yield return org.apache.calcite.rel.rules.CoreRules.AGGREGATE_EXPAND_DISTINCT_AGGREGATES;
+
+            // The same reasoning: a HAVING on a grouping key is a filter above the aggregate, which
+            // the filter rule cannot bind — aggregate output has no document paths. Transposed
+            // below, it is an ordinary WHERE the service applies before grouping. A condition on an
+            // aggregated value does not transpose and stays outside, which is correct: Cosmos has
+            // no HAVING.
+            yield return org.apache.calcite.rel.rules.CoreRules.FILTER_AGGREGATE_TRANSPOSE;
+
             yield return CosmosFilterRule.Create(convention);
 
             // Partial pushdown: where only some of a predicate renders, the service still evaluates

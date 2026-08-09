@@ -21,19 +21,79 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
         /// <summary>
         /// Determines whether an aggregate can be pushed down in full.
         /// </summary>
+        /// <remarks>
+        /// Bound the way implementation will bind, so the answer here is final — the same reasoning
+        /// as <see cref="CosmosSortRule"/>. An input whose output is not addressable as document
+        /// paths — another aggregate, a computed projection, an unnested element — cannot carry the
+        /// grouping keys or the aggregate arguments, and firing anyway would only surface as a
+        /// translation failure after the plan is chosen. An aggregate above a pushed aggregate is
+        /// the case that matters: <c>AGGREGATE_EXPAND_DISTINCT_AGGREGATES</c> produces exactly that
+        /// shape, and only the inner half is Cosmos's to take.
+        /// </remarks>
         static bool IsSupported(Aggregate aggregate)
         {
             if (aggregate.getGroupType() != Aggregate.Group.SIMPLE)
                 return false;
 
+            if (CosmosImplementor.TryBindOutput(aggregate.getInput(), out var fields) == false)
+                return false;
+
+            // Binding passes through a sort, but an aggregate cannot: Cosmos rejects GROUP BY with
+            // ORDER BY in one statement, and applies GROUP BY before OFFSET/LIMIT, so grouping above
+            // a pushed row restriction would group the container rather than the restriction. The
+            // same conditions implementation refuses, decided here instead.
+            if (ReadsThroughASort(aggregate.getInput()))
+                return false;
+
+            var groupKeys = aggregate.getGroupSet().asList();
+            for (var i = 0; i < groupKeys.size(); i++)
+                if (Resolves(fields, (java.lang.Integer)groupKeys.get(i)) == false)
+                    return false;
+
             var inputRowType = aggregate.getInput().getRowType();
             var calls = aggregate.getAggCallList();
 
             for (var i = 0; i < calls.size(); i++)
-                if (CosmosAggregate.CanImplement((AggregateCall)calls.get(i), inputRowType) == false)
+            {
+                var call = (AggregateCall)calls.get(i);
+                if (CosmosAggregate.CanImplement(call, inputRowType) == false)
                     return false;
 
+                var arguments = call.getArgList();
+                for (var j = 0; j < arguments.size(); j++)
+                    if (Resolves(fields, (java.lang.Integer)arguments.get(j)) == false)
+                        return false;
+            }
+
             return true;
+        }
+
+        static bool Resolves(System.Collections.Generic.IReadOnlyList<Sql.CosmosPath?> fields, java.lang.Integer ordinal)
+        {
+            var index = ordinal.intValue();
+            return index >= 0 && index < fields.Count && fields[index] is not null;
+        }
+
+        /// <summary>
+        /// Determines whether a sort lies on the path the aggregate's input binds through.
+        /// </summary>
+        /// <remarks>
+        /// The traversal mirrors <see cref="CosmosImplementor.TryBindOutput"/>: the same nodes are
+        /// passed through, so a sort this walk cannot see is a sort binding cannot see either.
+        /// </remarks>
+        static bool ReadsThroughASort(RelNode? node)
+        {
+            if (node is org.apache.calcite.plan.volcano.RelSubset subset)
+                node = subset.getOriginal() ?? subset.getBest();
+
+            return node switch
+            {
+                Sort => true,
+                Filter filter => ReadsThroughASort(filter.getInput()),
+                Project project => ReadsThroughASort(project.getInput()),
+                Correlate correlate => ReadsThroughASort(correlate.getLeft()),
+                _ => false,
+            };
         }
 
         /// <summary>

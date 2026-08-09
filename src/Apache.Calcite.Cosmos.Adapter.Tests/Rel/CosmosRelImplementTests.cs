@@ -394,17 +394,35 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
         }
 
         /// <remarks>
-        /// Cosmos evaluates WHERE against the source document, before SELECT.
+        /// Cosmos evaluates WHERE against the source document, before SELECT — and the predicate is
+        /// rendered against document paths rather than projected names, so filtering before or
+        /// after a path-only projection admits the same documents. Once refused wholesale; what
+        /// stays refused is a predicate that reads a computed column, covered next.
         /// </remarks>
         [TestMethod]
-        public void FilterAboveAProjectionIsRefused()
+        public void FilterAboveAPathOnlyProjectionRendersAsAWhere()
         {
             var project = ProjectOver(Scan(), new[] { ("theId", Ref(1)) });
             var filter = new CosmosFilter(_cluster, Traits(), project,
                 _rex.makeCall(SqlStdOperatorTable.EQUALS, Ref(0), Str("abc")));
 
+            Sql(filter, Implementor()).Should().Be("SELECT VALUE { \"theId\": c.id } FROM products c WHERE (c.id = @p0)");
+        }
+
+        /// <remarks>
+        /// A computed column has no path for WHERE to name — a projection alias is not visible to
+        /// it — so the reference itself is refused.
+        /// </remarks>
+        [TestMethod]
+        public void FilterReadingAComputedProjectionIsRefused()
+        {
+            var computed = _rex.makeCall(SqlStdOperatorTable.PLUS, Ref(2), Num(1));
+            var project = ProjectOver(Scan(), new[] { ("adjusted", computed) });
+            var filter = new CosmosFilter(_cluster, Traits(), project,
+                _rex.makeCall(SqlStdOperatorTable.EQUALS, Ref(0), Num(5)));
+
             var act = () => Sql(filter, Implementor());
-            act.Should().Throw<CosmosTranslationException>().WithMessage("*projection*");
+            act.Should().Throw<CosmosTranslationException>().WithMessage("*computed*");
         }
 
         [TestMethod]

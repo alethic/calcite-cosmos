@@ -264,6 +264,22 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             sql.Should().Be("SELECT c.category AS \"category\", COUNT(1) AS \"n\" FROM products c GROUP BY c.category");
         }
 
+        /// <remarks>
+        /// A <c>HAVING</c> on a grouping key is a filter above the aggregate, which cannot bind —
+        /// aggregate output has no document paths. <c>FILTER_AGGREGATE_TRANSPOSE</c> moves it below,
+        /// where it is an ordinary <c>WHERE</c> the service applies before grouping, and where a
+        /// predicate on the partition key confines execution the way it does anywhere else.
+        /// </remarks>
+        [TestMethod]
+        public void HavingOnAGroupingKeyIsPushedAsAWhere()
+        {
+            var query = Query(PlanToCosmos(
+                "SELECT c.\"category\", COUNT(*) AS n FROM products AS c GROUP BY c.\"category\" HAVING c.\"category\" = 'bikes'"));
+
+            query.Sql.Should().Be("SELECT c.category AS \"category\", COUNT(1) AS \"n\" FROM products c WHERE (c.category = @p0) GROUP BY c.category");
+            query.PartitionKeyValues.Should().Equal("bikes");
+        }
+
         // ── The planner declines rather than guessing ─────────────────────────────
 
         /// <remarks>
@@ -289,8 +305,15 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             act.Should().Throw<Exception>();
         }
 
+        /// <remarks>
+        /// Not pushed <em>whole</em>: the registered expansion rewrites this into an aggregate over
+        /// an aggregate whose inner <c>GROUP BY</c> is pushable, but the finishing count has no
+        /// Cosmos rendering, and a planner asked for a wholly-Cosmos plan cannot produce one. The
+        /// partial form is covered in <see cref="CosmosPartialAggregatePlannerTests"/>, where there
+        /// is somewhere outside the convention for the count to live.
+        /// </remarks>
         [TestMethod]
-        public void DistinctAggregateIsNotPushedDown()
+        public void DistinctAggregateIsNotPushedDownWhole()
         {
             var act = () => PlanToCosmos("SELECT COUNT(DISTINCT c.\"id\") FROM products AS c");
 
