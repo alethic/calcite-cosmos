@@ -41,6 +41,12 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
         readonly IReadOnlyList<CosmosPath?> _fields;
 
         /// <summary>
+        /// The correlation variable whose row is the one <see cref="_fields"/> describes, where the
+        /// caller has one.
+        /// </summary>
+        readonly org.apache.calcite.rel.core.CorrelationId? _ownRow;
+
+        /// <summary>
         /// Whether a scoring function is currently legal, which is only while rendering a rank clause.
         /// </summary>
         bool _scoring;
@@ -53,12 +59,35 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
         /// <param name="rexBuilder">Used to expand <c>SEARCH</c> nodes back into comparison trees.</param>
         /// <param name="fields">Maps input field ordinals onto document paths.</param>
         /// <param name="parameters">Receives bound literal values.</param>
+        /// <param name="ownRow">
+        /// The correlation variable that stands for the very row <paramref name="fields"/> describes,
+        /// where one is in scope. A lateral traversal is correlated on its own input, so its array
+        /// expression addresses this input through such a variable; nothing else does.
+        /// </param>
         /// <exception cref="ArgumentNullException">Any argument is <c>null</c>.</exception>
-        public CosmosRexTranslator(RexBuilder rexBuilder, IReadOnlyList<CosmosPath?> fields, CosmosParameterList parameters)
+        public CosmosRexTranslator(RexBuilder rexBuilder, IReadOnlyList<CosmosPath?> fields, CosmosParameterList parameters, org.apache.calcite.rel.core.CorrelationId? ownRow = null)
         {
             _rexBuilder = rexBuilder ?? throw new ArgumentNullException(nameof(rexBuilder));
             _fields = fields ?? throw new ArgumentNullException(nameof(fields));
             _parameters = parameters ?? throw new ArgumentNullException(nameof(parameters));
+            _ownRow = ownRow;
+        }
+
+        /// <summary>
+        /// Determines whether a correlation variable stands for this input's own row.
+        /// </summary>
+        /// <remarks>
+        /// The distinction matters because the two cases are the same shape of expression and mean
+        /// opposite things. A lateral traversal correlates an input on itself, so
+        /// <c>$cor0._MAP['tags']</c> under one denotes a path of the document being scanned. A join
+        /// correlates it on the <em>other</em> side, and there the identical expression denotes a
+        /// value of a row this statement knows nothing about — which would resolve against these
+        /// bindings to a plausible, wrong document path. Where the caller has not said which variable
+        /// is its own, none is.
+        /// </remarks>
+        bool IsOwnRow(RexCorrelVariable variable)
+        {
+            return _ownRow is not null && _ownRow.equals(variable.id);
         }
 
         /// <summary>
@@ -108,10 +137,11 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
                     path = _fields[inputRef.getIndex()];
                     return path is not null;
 
-                // A field of a correlation variable addresses the correlated input's row type,
-                // so it resolves against the same bindings as a plain field reference. This is how
-                // the array expression of a lateral unnest arrives.
-                case RexFieldAccess access when access.getReferenceExpr() is RexCorrelVariable
+                // A field of a correlation variable standing for this input's own row addresses that
+                // row, so it resolves against the same bindings as a plain field reference. This is
+                // how the array expression of a lateral unnest arrives. A variable standing for
+                // anything else is refused — see IsOwnRow.
+                case RexFieldAccess access when access.getReferenceExpr() is RexCorrelVariable variable && IsOwnRow(variable)
                     && access.getField().getIndex() >= 0 && access.getField().getIndex() < _fields.Count:
                     path = _fields[access.getField().getIndex()];
                     return path is not null;

@@ -94,7 +94,9 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
             if (CosmosImplementor.TryBindOutput(correlate.getLeft(), out var fields) == false)
                 return false;
 
-            var translator = new CosmosRexTranslator(correlate.getCluster().getRexBuilder(), fields, new CosmosParameterList());
+            // The correlate's own id: this is a lateral traversal, so the variable its array
+            // expression is written against stands for the very row being scanned.
+            var translator = new CosmosRexTranslator(correlate.getCluster().getRexBuilder(), fields, new CosmosParameterList(), correlate.getCorrelationId());
 
             return translator.TryResolvePath(array, out _);
         }
@@ -138,7 +140,8 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
                 correlate.getTraitSet().replace(@out),
                 convert(left, left.getTraitSet().replace(@out)),
                 array,
-                correlate.getRowType());
+                correlate.getRowType(),
+                correlate.getCorrelationId());
         }
 
     }
