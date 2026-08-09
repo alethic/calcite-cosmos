@@ -888,9 +888,38 @@ never shows it, its input being a scan, which claims no collation at all.
 `UPDATE` is not implemented. The shape is recorded because the planner already supplies what it needs:
 the node carries `updateColumnList` and `sourceExpressionList`, which is a list of named columns and
 their new values — exactly the input `PatchItemAsync` wants, and far cheaper than the
-read-modify-write a replace would be. The translation from `SET` clauses to patch operations is the
-work, and the interesting part of it is that a patch over promoted columns cannot express what the
-`SET` of a whole map column would mean.
+read-modify-write a replace would be.
+
+**Decided: every `SET` target the current row model can name must be refused, so `UPDATE` waits on
+declared columns rather than on translation work.** The finding is an enumeration, not a judgment
+call. A `SET` target is a table column, and the columns are the map column, `id`, `_ts`, `_etag`,
+and the promoted partition key paths. Walking them:
+
+- `SET "_MAP" = …` replaces the whole document, which a patch has no operation for. A replace
+  standing in would silently cost a read-modify-write per row and behaves differently under
+  concurrent writers — a different statement, not a different spelling.
+- `SET "id" = …` renames a document's identity, which the service forbids patching — a new identity
+  is a new document.
+- `SET` of a partition key path changes the document's *placement*. The service forbids patching a
+  partition key path; honouring it would be a delete and a create, which is neither atomic nor a
+  patch.
+- `_ts` and `_etag` are declared `STORED`, so the validator refuses them before any rule runs.
+
+Every row model column is on that list, so `UPDATE … SET` has no expressible target today — the
+observed plan this section used as its example, `SET category`, sets the partition key. The work
+that unblocks it is *declared columns*: caller-declared, typed document paths promoted to real
+columns (see `TODO.md`). Those are plain document properties, which is exactly what a patch sets.
+The same missing surface blocks the nullable-aggregate argument rewrite and a temporal
+representation, which is what makes it the keystone rather than one feature's prerequisite.
+
+Two decisions recorded now so the eventual implementation inherits them:
+
+- **`SET x = NULL` writes a JSON null** rather than removing the property. An `INSERT` skips null
+  promoted columns because an *unmentioned* column arrives as null; an `UPDATE`'s
+  `updateColumnList` names exactly what the statement wrote, so its null is explicit and is
+  written.
+- **No `If-Match`.** A patch sends no ETag, matching what `DELETE` does: per-property last write
+  wins, and optimistic concurrency is a session-level surface this adapter does not invent.
 
 ---
 

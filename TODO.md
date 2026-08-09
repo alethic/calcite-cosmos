@@ -6,6 +6,11 @@ rather than a list.
 **Sizes.** *Small* is a translator case and a test. *Medium* is a node, a rule, or an SDK surface.
 *Large* needs a design decision recorded in `DESIGN.md` before any code.
 
+**On finishing.** When an item is done, remove it — the entry, its rationale, and any *done* marker
+elsewhere in this file. This file holds only work still to be done; what was decided belongs in
+`DESIGN.md`, what was built is visible in the code and its tests, and history lives in git. A *done*
+paragraph kept here is a second copy of one of those, aging independently.
+
 **On testing a change.** Before believing a test covers what it claims, check that it *fails without
 the change*. This caught two things in one session: a filter-split test that genuinely depended on
 its fix, and a guard added to `CosmosSortRule` that turned out to be dead code — the case it guarded
@@ -110,10 +115,11 @@ nothing exercised the model path.
 Everything small is done. Each of these is larger, and each has a stated prerequisite rather than an
 open question:
 
-1. **`UPDATE` as a patch** (section 3) — the adapter now writes, and this is the hole left in that.
-   The planner already supplies the `SET` list separately from the rows, so the work is the
-   translation and the one decision it turns on: what `SET "_MAP" = …` means, a patch having no
-   operation that replaces a whole document.
+1. **Declared columns** (section 6) — the keystone, found while sizing `UPDATE`: every `SET` target
+   the current row model can name is unpatchable, so `UPDATE` as a patch (section 3), the
+   nullable-aggregate rewrite (section 5) and a temporal basis (section 4) all wait on typed,
+   caller-declared columns existing at all. Design first — the questions are listed in section 6 —
+   then the promotion is mechanical.
 2. **Shuffle the build side by partition key** (section 11) — the biggest remaining win for the lookup
    join, but measure first: routing per key means one request per distinct key, and whether that beats
    one cross-partition query depends on key count against partition count. Grouping by feed range is
@@ -308,27 +314,21 @@ Still open: the whole-partition case. A predicate pinning only the partition key
 `DeleteAllItemsByPartitionKeyStreamAsync`, which is not a query at all — `SupportsDeletePushDown` in
 section 11.
 
-### `UPDATE` — *large, and the next thing here*
+### `UPDATE` — *large, and blocked on declared columns*
 
-Cosmos has patch operations (`PatchItemAsync`) that map onto a targeted `SET`, and replace for the
-rest. A patch is far cheaper than a read-modify-write and expresses a bounded set of operations, so the
-translation from `SET` clauses to patch operations is the interesting part.
+Cosmos has patch operations (`PatchItemAsync`) that map onto a targeted `SET`, and the planner
+already hands over what a patch needs — `updateColumnList` and `sourceExpressionList`, named columns
+and their new values, separately from the rows.
 
-**The planner already hands over what a patch needs**, which is the part worth knowing before
-starting: the node carries `updateColumnList` and `sourceExpressionList` — named columns and their new
-values — separately from the rows. Observed, and pinned by a test:
-
-```
-LogicalTableModify(operation=[UPDATE], updateColumnList=[[category]], sourceExpressionList=[[$5]])
-  LogicalProject(_MAP=[$0], id=[$1], _ts=[$2], _etag=[$3], category=[$4], EXPR$0=['x'])
-```
-
-The question to settle first is what `SET "_MAP" = …` means. A patch expresses a bounded set of
-operations over paths, and setting the whole document is not one of them — so the map column is either
-refused as a patch target or falls back to a replace, and those are different costs rather than
-different spellings. Until then `UPDATE` is declined outright and the plan fails, which is the right
-answer for a statement the adapter cannot carry out: a replace standing in for a patch would work, and
-would silently cost a read-modify-write per row.
+**Sized up, and the question this entry used to pose answered itself by enumeration** — recorded in
+`DESIGN.md` under *Updating*. A `SET` target is a table column, and every column the row model has
+is unpatchable: `_MAP` is the whole document, which a patch has no operation for; `id` is identity
+and the partition key is placement, both of which the service forbids patching; `_ts` and `_etag`
+are validator-refused already. The example plan this entry showed — `SET category` — sets the
+partition key. So there is no translation to write until the row model has plain document columns,
+which is *declared columns* (section 6), and `UPDATE` stays declined outright until then — the right
+answer for a statement the adapter cannot carry out. The null-write and no-`If-Match` decisions are
+recorded in `DESIGN.md` so the eventual implementation inherits them.
 
 ### Transactional batch — *medium*
 
@@ -536,6 +536,19 @@ declined.
 
 ## 6. Row model and types
 
+- **Declared columns — *large, and the keystone*.** A caller-declared, typed document path promoted
+  to a real column: name, path, SQL type, nullability, supplied through the schema operands the way
+  everything else caller-declared arrives. Not inference — the adapter's rule is against *sampling*,
+  and a declaration is the same kind of trusted fact as a partition key path. Three blocked items
+  converge on this, which is what makes it the keystone rather than one feature's prerequisite:
+  every `UPDATE … SET` target the current row model can name is unpatchable (section 3, and the
+  enumeration in `DESIGN.md` under *Updating*), the nullable-aggregate argument rewrite is
+  type-directed and has no typed column to fire on (section 5), and a temporal mapping needs a
+  declared basis for what a column holds (section 4). Design questions to settle in `DESIGN.md`
+  first: the operand shape; what a declared column means to `INSERT` (a strategy, presumably
+  `NULLABLE`); whether a declared path may be nested, which the promoted-column binding currently
+  cannot carry; and what happens when the data disagrees with the declaration, which is the
+  materializer's existing problem but arrives with sharper edges once the type licenses rewrites.
 - **Type coverage** — done and verified against a live account: strings, whole and fractional numbers,
   booleans, nulls, objects, arrays, to arbitrary depth, as declared types and as `ANY`.
 - **Binary** — *small.* `BINARY`/`VARBINARY` read base64 from a JSON string. Unverified against the
