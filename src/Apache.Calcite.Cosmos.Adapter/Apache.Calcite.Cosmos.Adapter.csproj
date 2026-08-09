@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
     <PropertyGroup>
         <TargetFrameworks>net8.0</TargetFrameworks>
@@ -16,6 +16,7 @@
 
     <ItemGroup>
         <PackageReference Include="Microsoft.Azure.Cosmos" Version="3.62.0" />
+        <PackageReference Include="Azure.Identity" Version="1.13.2" />
         <!-- Required by Microsoft.Azure.Cosmos, which fails the build without an explicit reference. -->
         <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
     </ItemGroup>

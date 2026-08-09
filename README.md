@@ -13,6 +13,23 @@ dotnet add package Apache.Calcite.Cosmos.Adapter
 dotnet add package Apache.Calcite.Data
 ```
 
+## Signing in
+
+Give an `endpoint` and a `key` for key authentication, or **give the endpoint alone to authenticate with Microsoft Entra ID**:
+
+```json
+"operand": {
+  "endpoint": "https://account.documents.azure.com:443/",
+  "database": "inventory"
+}
+```
+
+The absence of a key is the request. The adapter then reaches the account as whoever the process is — a managed identity in a cluster, your signed-in tooling on a laptop — so one model file serves both. Add `tenantId` or `clientId` where that identity is ambiguous.
+
+The identity needs a Cosmos DB **data plane** role assignment. A control-plane role that shows the account in the portal does not let it read a document, and the built-in Data Reader role includes the container metadata read this adapter performs on startup.
+
+For anything else — a certificate, a bespoke token cache, a client your application already owns — supply `clientFactory` naming an `ICosmosClientFactory`.
+
 ## Querying a container
 
 `Apache.Calcite.Data` is the ADO.NET provider. Point its `Model` at a JSON model that registers the

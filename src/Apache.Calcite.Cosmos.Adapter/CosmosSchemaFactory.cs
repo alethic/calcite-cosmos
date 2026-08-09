@@ -5,6 +5,9 @@ using System.Threading;
 using Apache.Calcite.Cosmos.Adapter.Client;
 using Apache.Calcite.Cosmos.Adapter.Metadata;
 
+using Azure.Core;
+using Azure.Identity;
+
 using Microsoft.Azure.Cosmos;
 
 using org.apache.calcite.schema;
@@ -45,8 +48,16 @@ namespace Apache.Calcite.Cosmos.Adapter
     /// a caller wants one and nothing else.
     /// </para>
     /// <para>
-    /// Supply <c>clientFactory</c> instead of <c>endpoint</c> and <c>key</c> to reach an account any
-    /// other way — Entra ID, a custom serializer or retry policy, or a client the application owns.
+    /// <b>Omit <c>key</c> to authenticate with Microsoft Entra ID.</b> The endpoint alone means "reach
+    /// this account as whoever I am" — a managed identity in a cluster, the developer's signed-in
+    /// tooling on a laptop — and the same model file serves both. <c>tenantId</c> and <c>clientId</c>
+    /// narrow that where the ambient identity is ambiguous. The identity needs a Cosmos DB data plane
+    /// role; a control-plane role that shows the account in the portal does not let it read a
+    /// document.
+    /// </para>
+    /// <para>
+    /// Supply <c>clientFactory</c> instead to reach an account any other way — a certificate, a
+    /// bespoke token cache, or a client the application already owns.
     /// </para>
     /// </remarks>
     public class CosmosSchemaFactory : SchemaFactory
@@ -55,8 +66,30 @@ namespace Apache.Calcite.Cosmos.Adapter
         /// <summary>The operand naming the account endpoint.</summary>
         public const string EndpointOperand = "endpoint";
 
-        /// <summary>The operand carrying the account key.</summary>
+        /// <summary>
+        /// The operand carrying the account key, or omitted to authenticate with Microsoft Entra ID.
+        /// </summary>
+        /// <remarks>
+        /// Omitting it is the better default where the deployment allows it: a key is a bearer secret
+        /// with full access to the account and no expiry, and it has to live somewhere a model file can
+        /// read it. See <see cref="CreateClient"/>.
+        /// </remarks>
         public const string KeyOperand = "key";
+
+        /// <summary>
+        /// The operand naming the tenant to authenticate against, where the ambient identity does not
+        /// pick the right one.
+        /// </summary>
+        public const string TenantIdOperand = "tenantId";
+
+        /// <summary>
+        /// The operand naming the client id of a user-assigned managed identity.
+        /// </summary>
+        /// <remarks>
+        /// Needed only where more than one identity is assigned, since with one there is nothing to
+        /// choose between.
+        /// </remarks>
+        public const string ClientIdOperand = "clientId";
 
         /// <summary>The operand naming the database.</summary>
         public const string DatabaseOperand = "database";
@@ -145,28 +178,77 @@ namespace Apache.Calcite.Cosmos.Adapter
         }
 
         /// <summary>
-        /// Obtains the client, from a named factory where the model gives one and from an endpoint and
-        /// a key otherwise.
+        /// Obtains the client: from a named factory where the model gives one, and from the endpoint
+        /// otherwise — with a key if one is given, and as the ambient identity if not.
         /// </summary>
         /// <remarks>
-        /// The two are exclusive by construction rather than by check: a factory decides everything
-        /// about the client, so an endpoint alongside one would be a value nothing reads.
+        /// A factory and an endpoint are exclusive by construction rather than by check: a factory
+        /// decides everything about the client, so an endpoint alongside one would be a value nothing
+        /// reads.
         /// </remarks>
-        static CosmosClient CreateClient(java.util.Map operand)
+        public static CosmosClient CreateClient(java.util.Map operand)
         {
+            if (operand is null)
+                throw new ArgumentNullException(nameof(operand));
+
             if (GetString(operand, ClientFactoryOperand) is string factoryName && factoryName.Length > 0)
                 return CreateFromFactory(factoryName, operand);
 
             var endpoint = GetString(operand, EndpointOperand)
                 ?? throw new ArgumentException($"Operand '{EndpointOperand}' is required unless '{ClientFactoryOperand}' is given.");
-            var key = GetString(operand, KeyOperand)
-                ?? throw new ArgumentException($"Operand '{KeyOperand}' is required unless '{ClientFactoryOperand}' is given.");
 
             var options = new CosmosClientOptions();
             if (string.Equals(GetString(operand, ConnectionModeOperand), "gateway", StringComparison.OrdinalIgnoreCase))
                 options.ConnectionMode = ConnectionMode.Gateway;
 
-            return new CosmosClient(endpoint, key, options);
+            // A key where one is given, and an identity where none is. The absence is the request:
+            // there is no sensible reading of "no key and no factory" other than "authenticate as
+            // whoever I am", and requiring a second operand to say so would only be a way to get it
+            // wrong.
+            if (GetString(operand, KeyOperand) is string key && key.Length > 0)
+                return new CosmosClient(endpoint, key, options);
+
+            return new CosmosClient(endpoint, CreateCredential(operand), options);
+        }
+
+        /// <summary>
+        /// Builds the credential used when no key is given.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <see cref="DefaultAzureCredential"/>, which tries the ways an application is normally
+        /// identified in turn — environment variables, a workload or managed identity, the developer's
+        /// signed-in tooling — so the same model file works on a laptop and in a cluster without
+        /// saying which is which.
+        /// </para>
+        /// <para>
+        /// Two things are worth knowing before this works. The identity needs a Cosmos DB **data
+        /// plane** role assignment; the control-plane roles that let it see the account in the portal
+        /// do not grant it the ability to read a document. And the built-in Data Reader role includes
+        /// the metadata read this adapter performs on every container, which a hand-built role can
+        /// easily omit.
+        /// </para>
+        /// <para>
+        /// Anything this cannot express — a certificate, a bespoke token cache, a credential the
+        /// application already holds — is what <see cref="ICosmosClientFactory"/> is for.
+        /// </para>
+        /// </remarks>
+        /// <param name="operand">The model's operand map.</param>
+        /// <returns>The credential.</returns>
+        public static TokenCredential CreateCredential(java.util.Map operand)
+        {
+            if (operand is null)
+                throw new ArgumentNullException(nameof(operand));
+
+            var options = new DefaultAzureCredentialOptions();
+
+            if (GetString(operand, TenantIdOperand) is string tenantId && tenantId.Length > 0)
+                options.TenantId = tenantId;
+
+            if (GetString(operand, ClientIdOperand) is string clientId && clientId.Length > 0)
+                options.ManagedIdentityClientId = clientId;
+
+            return new DefaultAzureCredential(options);
         }
 
         /// <summary>
