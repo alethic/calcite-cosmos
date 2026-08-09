@@ -278,12 +278,42 @@ Still unmeasured: whether `ARRAY_CONTAINS(@keys, c.k)` is served the same way. I
 parameter for a variable-length batch instead of a hundred with padding, which is tidier but buys
 nothing now that the padded form is known to work.
 
-### Weakening a disjunction — *medium*
+### Weakening a disjunction — *medium, and the analysis is done*
 
 Dropping a conjunct weakens; dropping a disjunct strengthens, so an `OR` is pushable only when every
-branch is. It is still pushable when every branch can be *weakened* — `a OR b` with `b`
-untranslatable can push `a OR <something b implies>`, and `IS_DEFINED` of the paths `b` mentions is
-often such a thing.
+branch is. It is still pushable when every branch can be *weakened*: `a OR b` with `b` untranslatable
+can push `a OR w` for any `w` that `b` implies, because `a OR b` then implies `a OR w`, and a
+restriction the plan implies discards nothing the plan would have kept.
+
+So the whole feature is: find a non-trivial `w` with `b ⟹ w`. `w = TRUE` always qualifies and is
+worthless, since `a OR TRUE` restricts nothing.
+
+**`IS_DEFINED` of the paths `b` mentions is the candidate, and it is only sound under positive
+polarity.** Cosmos evaluates a comparison against an undefined property to *undefined*, not to false,
+so a `b` that is a comparison on `c.x` can only be true where `c.x` is defined — hence
+`b ⟹ IS_DEFINED(c.x)`. That reasoning inverts the moment `b` is negated:
+
+| `b` | `b ⟹ IS_DEFINED(c.x)`? |
+|---|---|
+| `c.x > 5`, `UPPER(c.x) = 'A'`, `c.x + 1 = 2` | yes — undefined input, undefined result, never true |
+| `NOT IS_DEFINED(c.x)` | **no** — true exactly when it is not defined |
+| `NOT (c.x > 5)` | **no** — `NOT undefined` is not false in Cosmos's three-valued logic |
+| `c.x = null` | **no** — needs measuring, and null is not undefined here |
+
+So the implementation is a polarity-tracking walk of `b`: collect the paths appearing under an even
+number of `NOT`s, ignore everything under an odd number, and take `IS_DEFINED` of what survives —
+conjoined, since every one of them is implied. A path appearing at both polarities contributes
+nothing. If nothing survives, `b` has no useful weakening and the `OR` stays in Calcite, which is what
+happens today.
+
+Two things to settle by measurement before writing it, because both decide whether a weakening is
+sound rather than how well it performs: how Cosmos evaluates `NOT undefined`, and whether `= null`
+behaves as a comparison or as a definedness test. Neither is safe to take from the documentation —
+this is the same three-valued logic that made the emulator disagree with the service twice.
+
+**Not started deliberately.** The failure mode is a strengthened predicate, which loses rows and
+returns a smaller answer as though it were the answer — the one class of defect this adapter has been
+careful to make impossible rather than unlikely.
 
 ### Smaller rules
 
