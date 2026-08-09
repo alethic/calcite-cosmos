@@ -1,267 +1,339 @@
 # Outstanding work
 
-Sized and reasoned, so that the next session picks up an argument rather than a list. Where a claim
-about the service is unverified it says so — the emulator has twice disagreed with Azure, in both
-directions, so "the docs say" is not a measurement.
+What a complete adapter would have, sized and reasoned, so that the next session picks up an argument
+rather than a list.
 
-**Sizes.** *Small* is a translator case and a test. *Medium* is a node or a rule. *Large* needs a
-design decision recorded in `DESIGN.md` before code.
+**Sizes.** *Small* is a translator case and a test. *Medium* is a node, a rule, or an SDK surface.
+*Large* needs a design decision recorded in `DESIGN.md` before any code.
+
+**On evidence.** Where a claim about the service is unverified it says so. The emulator has disagreed
+with Azure in both directions — accepting an `ORDER BY` over an unnest alias that Azure rejects, and
+rejecting the full text search Azure runs — so "the reference says" is not a measurement. Point
+`COSMOS_TEST_ENDPOINT` and `COSMOS_TEST_KEY` at a real account and the suite runs against one.
 
 ---
 
-## Cost — what the service charges
+## 1. Statistics and the cost model
+
+Today `getStatistic` reports keys and collations derived from declared metadata, no row count, and the
+cost model is pure inference. The service will answer far more than that, and every item here is a
+read of something it already knows.
+
+### Row count and document size — *small*
+
+`ReadContainerAsync().Headers.Get("x-ms-resource-usage")` carries `documentsCount`, `documentsSize`
+and `collectionSize`. A row count is the single most load-bearing number a planner has, and this one
+is free, approximate and lagging — which is exactly what a planner row count is allowed to be.
+Document size feeds the other half: what a row *costs to move*, which for a map row model carrying
+whole documents is the dominant term and is currently not modelled at all.
+
+### Physical partition count — *small*
+
+`GetFeedRangesAsync` returns one feed range per physical partition. That is the fan-out factor: a
+cross-partition query costs roughly that many single-partition queries, and nothing prices it. It is
+also what makes the partition-key discount meaningful rather than a constant — pinning the key on a
+two-partition container saves little, and on a two-hundred-partition container saves nearly
+everything.
+
+### Provisioned throughput — *small*
+
+`ReadThroughputAsync`. Not needed to compare two plans, but it is the denominator that turns an RU
+estimate into a latency estimate, and it distinguishes a container that can absorb a scan from one
+that cannot.
+
+### `RequestCharge` — *medium*
+
+The only real cost signal the service gives, on every response, and currently discarded. Wants
+somewhere to go — see *Observability*, which is the design decision.
+
+### `PopulateIndexMetrics` — *medium*
+
+Reports which indexes a query actually used, and which it recommends. Two uses, the second more
+interesting than the first: it would settle the composite-index question below by measurement, and it
+is the raw material for telling a user *why* a query was expensive.
+
+### Per-partition skew — *not available*
+
+Per-partition storage is an Azure Monitor metric, not data plane. The count is reachable and the
+distribution is not, so a hot-partition estimate would have to come from outside the adapter.
+
+### A cost model in RU — *large*
+
+The above are inputs; this is the model. Cosmos charges in RUs and the current model multiplies
+Calcite's abstract cost by constants. A model in RUs — a point read is 1, a query is 2.3 plus scanned
+size, a cross-partition query is that times the fan-out — would make pushdown decisions comparable
+with in-process alternatives on a real scale rather than a notional one.
+
+---
+
+## 2. Execution paths
+
+Every execution today is `GetItemQueryStreamIterator`. The SDK has cheaper routes and the adapter uses
+none of them.
 
 ### Point lookup by `id` and partition key — *medium, highest value*
 
-A point read is ~1 RU. The same fetch as a query is 2.3 RU minimum and goes through the query engine.
-For key-value access, which is a large share of Cosmos usage, this is the biggest saving available and
-nothing in the adapter does it: every execution is `GetItemQueryStreamIterator`, and no `ReadItem` call
-exists anywhere.
+~1 RU against 2.3 RU minimum for the same fetch as a query, and no query engine. For key-value access,
+a large share of Cosmos usage, this is the biggest saving available.
 
-Half the machinery is already here — `CosmosPartitionKeyExtractor` recovers the partition key values
-and `CosmosQuery` carries them. What is missing is recovering an `id` equality alongside them and
-choosing `ReadItem`.
+Half the machinery exists: `CosmosPartitionKeyExtractor` recovers the partition key values and
+`CosmosQuery` carries them. What is missing is recovering an `id` equality alongside them and calling
+`ReadItem`.
 
 The design work is not the SDK call. **A point read returns the document, not the projected object**,
-and the converter's materializer assumes every row is an object keyed by output field name. Either the
-point-read path carries its own row builder — reading promoted columns out of the document root, the
-shape the map row model started from — or the query path stops projecting. The first is smaller.
+and the materializer assumes every row is an object keyed by output field name. Either the point-read
+path carries its own row builder — reading promoted columns from the document root, the shape the map
+row model started from — or the query path stops projecting. The first is smaller.
 
 ### Batch point reads for `id IN (…)` — *medium, after the above*
 
-`ReadManyItemsAsync` takes a list of (id, partition key) pairs and is charged as point reads. The
-predicate shape is the same recovery one level up: an `IN` over `id` with the partition key pinned.
-Worth nothing until the single point read exists, and nearly free after it.
-
-### Row count from the container — *small*
-
-`getStatistic` returns no row count, so every cost is relative. `ContainerProperties` and the quota
-headers expose a document count. It is approximate and lags, which is exactly what a planner row count
-is allowed to be, and it would let the cost model distinguish a container of a thousand documents from
-one of a billion.
-
-### `RequestCharge` and `PopulateIndexMetrics` — *medium*
-
-The cost model is pure inference from declared metadata. `RequestCharge` is the only real signal the
-service gives, and `PopulateIndexMetrics` reports which indexes a query actually used — which would
-settle the composite index question below by measurement instead of by reading the documentation
-again. Both need somewhere to go: there is no diagnostics surface, and inventing one is the design
-decision.
+`ReadManyItemsAsync` takes (id, partition key) pairs and is charged as point reads. Same recovery one
+level up, nearly free once the single point read exists.
 
 ### `MaxConcurrency` and `MaxBufferedItemCount` — *small*
 
-`MaxItemCount` is set from a pushed-down limit; the other two fan-out knobs are untouched. A query the
-partition key pinned needs no concurrency at all, and a cross-partition one wants it.
+`MaxItemCount` comes from a pushed-down limit; the fan-out knobs are untouched. A query with the
+partition key pinned needs no concurrency; a cross-partition one wants it, and how much depends on the
+partition count above.
 
-### Cross-partition fan-out in the cost model — *medium*
+### Change feed — *large*
 
-`CosmosFilter` discounts a pinned partition key. Nothing costs the opposite case, so a plan that fans
-out across every physical partition is priced as though it did not.
+`GetChangeFeedIterator` is a fundamentally different read: ordered by `_ts` within a partition,
+resumable, and the basis of every incremental pipeline built on Cosmos. It is not a table in the
+relational sense — it has no end — so exposing it means deciding what it *is* to Calcite: a table
+function taking a start time, a streaming source, or something a caller drives and the adapter only
+materializes.
+
+### Continuation tokens — *medium*
+
+A query's continuation token makes a result resumable, and the adapter reads every page eagerly within
+one enumeration. `GROUP BY` and `DISTINCT` results are documented as not resumable, which is a
+constraint on where this can apply rather than a reason not to.
 
 ---
 
-## Query language — what Cosmos can express that we do not emit
+## 3. Writing
 
-### Vector search — *small, and nearly free now*
+**Cosmos SQL has no DML, and this is not a reason the adapter cannot write.** The query language has no
+`INSERT`, `UPDATE` or `DELETE`, but the SDK has item CRUD, and Calcite expresses writes through
+`ModifiableTable` rather than through generated SQL. This is the largest missing *category* — the
+adapter is currently read-only and nothing about Cosmos requires that.
 
-`VectorDistance` is the third scoring function `ORDER BY RANK` accepts, and `CosmosRank` does not care
-which one it renders. An operator definition and a translator case. It composes with `RRF` for hybrid
-search, which already works for two full text scores.
+### `INSERT` — *large*
 
-### Spatial — *medium*
+`ModifiableTable.getModifiableCollection`, or an `EnumerableTableModify` equivalent for the async
+convention, over `CreateItemAsync`/`UpsertItemAsync`. The row model makes it interesting: a document is
+the map column, so an insert of promoted columns alone is an incomplete document, and an insert of the
+map column is the document itself. Which one a caller means has to be decided.
 
-`ST_DISTANCE`, `ST_WITHIN`, `ST_INTERSECTS`, `ST_ISVALID`. Calcite has a spatial operator library to
-map from, so this is a mapping exercise rather than a new operator surface — but the geometry
-representation has to be settled, and a spatial index changes what is cheap.
+### `DELETE` — *medium, after INSERT*
 
-### `EXISTS` over an item-scoped subquery — *large*
+`DeleteItemAsync` given `id` and the partition key — the same recovery the point lookup needs, so it
+falls out of that work. `WHERE` clauses that do not pin both would have to read then delete, which is a
+different cost and should probably be refused rather than done silently.
 
-`EXISTS (SELECT VALUE t FROM t IN c.tags WHERE …)` is a semi-join over a nested array. Today the only
-way to reach a nested array is `Unnest`, which cross-products the document with it and then
-de-duplicates above — for an existence test that is the wrong shape and the wrong cost. Needs a rule
-matching the correlated-semi-join plan and a subquery form in the builder.
+### `UPDATE` — *large*
 
-### Native `IN` and `BETWEEN` — *small*
+Cosmos has patch operations (`PatchItemAsync`) that map onto a targeted `SET`, and replace for the
+rest. A patch is far cheaper than a read-modify-write and expresses a bounded set of operations, so the
+translation from `SET` clauses to patch operations is the interesting part.
 
-`RexUtil.expandSearch` turns both into comparison chains, which is what makes them pushable at all.
-Cosmos has both keywords natively and the reference calls `IN` index-friendly. Whether the OR-chain is
-priced the same is worth measuring before doing this for its own sake.
+### Transactional batch — *medium*
 
-### `SELECT DISTINCT` — *small*
+`TransactionalBatch` is atomic within a single partition key. That is a real transactional guarantee
+Calcite has no way to ask for, so exposing it means a session-level or hint-level surface rather than
+SQL.
 
-`CosmosQueryBuilder.Distinct` is never set. An aggregate with no calls already renders as `GROUP BY`
-over every key, which is a *correct* `DISTINCT`, so this is not a coverage gap. What it would buy is
-the `ORDER BY` combination, since `GROUP BY` and `ORDER BY` cannot coexist — and whether `DISTINCT`
-and `ORDER BY` can is **unverified**.
+### Bulk mode — *small*
 
-### String functions — *small each*
+`CosmosClientOptions.AllowBulkExecution` changes the throughput profile of many small writes
+dramatically. A client factory can already set it; whether the adapter should is a question about who
+owns the client.
 
-`STARTSWITH` / `ENDSWITH` / `CONTAINS` from a `LIKE` whose pattern is a literal with one wildcard at a
-known end; `REGEXMATCH`; `LEFT`, `RIGHT`, `REVERSE`, `REPLICATE`. The `LIKE` rewrite is the valuable
-one — a prefix match is index-friendly where a general `LIKE` is not.
+---
 
-### Currently declined, and could be admitted — *small each*
+## 4. Query language coverage
 
-- `SUBSTRING` without a length. Cosmos requires one; `LENGTH(s)` supplies it.
-- `LIKE` with `ESCAPE`. Refused rather than dropped, which is right; translating the escape is possible.
-- `TRIM` of a character other than a space, and `TRUNCATE` to decimal places. Both need the arity of
-  Cosmos's two-argument forms **verified** first — they were left out for exactly that reason.
-- `IS TRUE` / `IS FALSE` / `IS DISTINCT FROM`. Expressible with the `??` coalesce operator, but the
-  null-versus-undefined semantics need measuring rather than reasoning about.
+### Ranking and search
+
+- **Full text** — `FULLTEXTCONTAINS`, `ALL`, `ANY`, `FULLTEXTSCORE`, `RRF`, `ORDER BY RANK`. *Done.*
+- **Vector** — `VECTORDISTANCE`, rankable and projectable, fusing with `RRF` for hybrid search. *Done.*
+- **Spatial** — *medium.* `ST_DISTANCE`, `ST_WITHIN`, `ST_INTERSECTS`, `ST_ISVALID`. Calcite has a
+  spatial operator library to map from, so the mapping is mechanical; the geometry representation and
+  what a spatial index makes cheap are not.
+
+### Subqueries
+
+- **`EXISTS` over an item-scoped subquery** — *large.* `EXISTS (SELECT VALUE t FROM t IN c.tags WHERE …)`
+  is a semi-join over a nested array. Today the only route to a nested array is `Unnest`, which
+  cross-products the document with it and de-duplicates above — the wrong shape and the wrong cost for
+  an existence test.
+- **Scalar and multi-value subqueries** — *medium.* Item-scoped only; there are no derived tables. The
+  correlated forms are what `ARRAY(SELECT …)` and `IN (SELECT …)` need.
+
+### Scalar functions still to map
+
+- *Small each*: `ARRAY_SLICE`, `ARRAY_CONCAT`, `SETINTERSECT`, `SETUNION`; `LEFT`, `RIGHT`, `REVERSE`,
+  `REPLICATE`, `REGEXMATCH`; the JSON conversions `ToString`, `StringToNumber`, `StringToObject`,
+  `ObjectToArray`.
+- **`LIKE` to `STARTSWITH`** — *small, and the valuable one.* A `LIKE` whose pattern is a literal with
+  a single trailing wildcard is a prefix match, which the index serves; a general `LIKE` is a scan.
+- **Currently declined, admissible with work** — `SUBSTRING` without a length (`LENGTH(s)` supplies
+  it); `LIKE` with `ESCAPE`; `TRIM` of a non-space character and `TRUNCATE` to decimal places, both
+  needing Cosmos's two-argument arity **verified** first; `IS TRUE`/`IS FALSE`/`IS DISTINCT FROM`,
+  expressible with the `??` operator once the null-versus-undefined semantics are measured.
 
 ### Temporal — *large*
 
-Cosmos has `DateTimeAdd`, `DateTimeDiff`, `DateTimePart`, `DateTimeBin` and the tick conversions, and
-Calcite has `EXTRACT`, `TIMESTAMPADD`, `TIMESTAMPDIFF`. The mapping is mechanical; what is not is the
-representation. Cosmos stores a date as an ISO string or an epoch number by application convention,
-and `_ts` is the only value whose encoding the service defines. A row type cannot know which, so
-pushing a temporal function down means deciding what the column is — which is the thing this adapter
-refuses to guess at everywhere else.
+Cosmos has `DateTimeAdd`, `DateTimeDiff`, `DateTimePart`, `DateTimeBin` and tick conversions; Calcite
+has `EXTRACT`, `TIMESTAMPADD`, `TIMESTAMPDIFF`. The mapping is mechanical and the representation is
+not: a date is an ISO string or an epoch number by application convention, and `_ts` is the only value
+whose encoding the service defines. Pushing a temporal function down means deciding what the column
+*is*, which is the thing this adapter refuses to guess everywhere else.
 
-### The JSON conversion family — *small*
+### Clause-level
 
-`ToString`, `StringToNumber`, `StringToObject`, `ObjectToArray`. No Calcite counterpart, so they would
-be adapter operators like the type tests.
-
-### Array functions — *small*
-
-`ARRAY_SLICE`, `ARRAY_CONCAT`, `SETINTERSECT`, `SETUNION`. `ARRAY_LENGTH` and `ARRAY_CONTAINS` are
-done.
-
-### Computed properties — *medium*
-
-A container can declare computed properties: named, queryable, indexable paths. They are declared
-metadata, which is the one kind of thing this adapter is willing to trust, and they would promote to
-real columns with real index awareness rather than living in the map column.
+- **Native `IN` and `BETWEEN`** — *small.* `expandSearch` turns both into comparison chains, which is
+  what makes them pushable. The reference calls `IN` index-friendly; whether the OR-chain is priced
+  the same is worth measuring before doing this for its own sake.
+- **`SELECT DISTINCT`** — *small.* `Query.Distinct` is never set. An aggregate with no calls already
+  renders as `GROUP BY` over every key, which is a correct `DISTINCT`, so this is not a coverage gap;
+  what it buys is the `ORDER BY` combination, since `GROUP BY` and `ORDER BY` cannot coexist. Whether
+  `DISTINCT` and `ORDER BY` can is **unverified**.
+- **`TOP`** — *small.* Emitted for a rank clause and nowhere else; `OFFSET`/`LIMIT` covers the rest.
 
 ---
 
-## Planner
+## 5. Planner
 
-### Filter splitting above a projection — *small*
+### Half a join — *large, highest value after the point lookup*
 
-`CosmosFilterSplitRule` matches `Filter` over `TableScan` only. A filter over a projection is the same
-split and the same soundness argument.
+A relational join is not expressible in Cosmos, so both sides are read whole and joined in process.
+One side can pay for the other: evaluate `other`, collect the distinct values of its key, and push
+`cosmos.k IN (…)` into the Cosmos side. The reference points the same way from the other end — its
+documented workaround for a join is to inline a literal array of reference data.
 
-### Half a join — *large, and the most valuable thing on this page after the point lookup*
-
-A relational join is not expressible in Cosmos, so today it is evaluated entirely in Calcite: both
-sides are read whole and joined in process. But one side can pay for the other. Given
-`cosmos JOIN other ON cosmos.k = other.k`, evaluate `other` first, collect the distinct values of its
-key, and push `cosmos.k IN (…)` into the Cosmos side. The join still happens in Calcite; what changes
-is how many documents cross the wire to reach it.
-
-The reference points the same way from the other end: its documented workaround for a relational join
-is to inline a literal array of reference data into the query. This is that, derived rather than
-hand-written.
-
-**Sound for the same reason partial filter pushdown is.** Every row that survives the join satisfies
+**Sound for the same reason partial filter pushdown is.** Every row surviving the join satisfies
 `k IN (values)`, so the pushed predicate is implied by the join condition and can only discard rows
-that would not have joined. It is a weakening, and the residual join is unchanged.
+that would not have joined.
 
 Three things make it work rather than merely be correct:
 
-- **It is a run-time value, not a plan-time one.** The plan cannot hold the statement, because the
-  values are not known until the build side has been read. Either the statement is parameterised and
-  the parameter list is built per execution, or the statement is rendered at execution. Everything in
-  the adapter currently renders once, at prepare, so this is the design decision the feature turns on.
-- **It needs a cardinality bound.** A build side of ten values is a large win; one of a million is a
-  statement the service will refuse on length alone. Below the bound it fires, above it the join
-  proceeds as it does today, and the bound wants measuring rather than picking.
-- **It wants the partition key.** If the pushed key *is* the partition key, this collapses a
-  cross-partition fan-out into a handful of single-partition reads — and with `id` as well, into the
-  batch point read above.
+- **It is a run-time value.** The plan cannot hold the statement, because the values are not known
+  until the build side is read. Everything renders once at prepare today, so this is the design
+  decision the feature turns on.
+- **It needs a cardinality bound.** Ten values is a large win; a million is a statement the service
+  refuses on length. The bound wants measuring.
+- **It wants the partition key.** If the pushed key *is* the partition key this collapses a fan-out
+  into a handful of single-partition reads, and with `id` too, into the batch point read.
 
-Calcite calls the general shape sideways information passing; the same machinery would serve `IN` over
-a sub-query, which is the same thing wearing different syntax.
+Calcite calls the general shape sideways information passing; the same machinery serves
+`IN (subquery)`.
 
 ### Weakening a disjunction — *medium*
 
 Dropping a conjunct weakens; dropping a disjunct strengthens, so an `OR` is pushable only when every
-branch is. It is still pushable when every branch can be *weakened* — `a OR b` where `b` is
-untranslatable can push `a OR <something implied by b>`, and `IS_DEFINED` of the paths `b` mentions is
-often such a thing. Sound, and worth doing only if a real query shape wants it.
+branch is. It is still pushable when every branch can be *weakened* — `a OR b` with `b`
+untranslatable can push `a OR <something b implies>`, and `IS_DEFINED` of the paths `b` mentions is
+often such a thing.
 
-### Sorting above an aggregate — *small*
+### Smaller rules
 
-`GROUP BY` and `ORDER BY` cannot coexist, so a sorted aggregate declines entirely. The aggregate could
-push and the sort stay in Calcite, over what is by then a small result.
+- **Filter splitting above a projection** — *small.* `CosmosFilterSplitRule` matches `Filter` over
+  `TableScan` only; a filter over a projection is the same split and the same argument.
+- **Sorting above an aggregate** — *small.* `GROUP BY` and `ORDER BY` cannot coexist, so a sorted
+  aggregate declines entirely. The aggregate could push and the sort stay in Calcite, over what is by
+  then a small result.
+- **Unique key policy** — *small.* Declared unique keys are keys `getStatistic` does not report.
+- **Computed properties** — *medium.* A container can declare named, queryable, indexable computed
+  paths. Declared metadata is the one kind this adapter trusts, so they should promote to real columns
+  with real index awareness rather than living in the map column.
 
-### `SELECT VALUE` for a single column — *small, but a recorded decision*
+### Recorded decisions worth revisiting
 
-`DESIGN.md` chose the uniform object form deliberately, "whatever the arity", and the materializer
-depends on it. A single-column projection could be `SELECT VALUE c.id` — bare scalars rather than a
-one-property object per row. Reversing a recorded decision is the work; the code is trivial.
-
-### `SELECT *` sends the promoted columns twice — *small*
-
-`_MAP` is the whole document and every promoted column is a path within it, so `SELECT VALUE { _MAP: c,
-id: c.id, … }` sends `id` twice. Reading the promoted columns out of the map value client-side would
-avoid it. The saving is a few short scalars against a whole document — real, but smaller than it first
-looks.
-
-### Unique key policy — *small*
-
-Declared unique keys are keys the planner could use, and `getStatistic` does not report them.
-
----
-
-## Provider and integration
-
-### Register the operators as schema functions — *small*
-
-The validator resolves a name against the `fun` operator table chained with the catalog reader, and the
-catalog reader resolves the schema's own functions. `CosmosOperators.Instance` is a `SqlOperatorTable`,
-which is not that form, so full text is unreachable from a `CalciteConnection` — a hand-built planner
-only. `CosmosSchema` extends `AbstractSchema`, so `getFunctionMultimap` closes it.
-
-### Supplying the client — *small, and it subsumes several of these*
-
-`CosmosSchemaFactory` builds its own `CosmosClient` from an endpoint and a key, so everything a
-connection string cannot say is out of reach: an account reached with `TokenCredential`, a custom
-serializer or retry policy, preferred regions, a client owned by a dependency injection container and
-shared with the rest of the application rather than created per schema. A key in a model file is also
-a key in a model file.
-
-A `clientFactory` operand naming an `ICosmosClientFactory` closes all of it at once, and is the same
-shape the model already uses to name the schema factory itself. Entra ID then needs no operand of its
-own — a factory does it.
-
-Code-first callers can already supply their own executor through `CosmosSchema`; it is the model path
-that is key-only.
-
-### Connection options as operands — *small*
-
-Consistency level, preferred regions, application name, for callers who want them without writing a
-factory. Connection mode is already an operand.
-
-### The client is never disposed — *small, known*
-
-The schema owns a `CosmosClient` for the life of the process because Calcite offers no disposal hook.
-Worth revisiting against `SchemaPlus` rather than left as a comment.
+- **`SELECT VALUE` for a single column** — `DESIGN.md` chose the uniform object form deliberately,
+  "whatever the arity", and the materializer depends on it. A single-column projection could be bare
+  scalars. Reversing a recorded decision is the work; the code is trivial.
+- **`SELECT *` sends promoted columns twice** — `_MAP` is the whole document and every promoted column
+  is a path within it. Reading them out of the map value client-side would avoid it; the saving is a
+  few short scalars against a whole document, so smaller than it first looks.
 
 ---
 
-## Testing
+## 6. Row model and types
 
-### The acceptance suite does not run in CI — *small, and it is the one that matters*
+- **Type coverage** — done and verified against a live account: strings, whole and fractional numbers,
+  booleans, nulls, objects, arrays, to arbitrary depth, as declared types and as `ANY`.
+- **Binary** — *small.* `BINARY`/`VARBINARY` read base64 from a JSON string. Unverified against the
+  service, because nothing in the test data is binary.
+- **Temporal representation** — see *Temporal* above. The reading side handles ISO strings and epoch
+  numbers; what is missing is any basis for deciding which a column holds.
+- **Hierarchical partition keys** — *small.* `CosmosPartitionKeyExtractor` yields nothing unless every
+  declared path is pinned. Cosmos narrows to a subset of physical partitions on a *prefix*, so pinning
+  the outer key of `/tenant,/user` should still count and currently does not.
 
-The workflow starts no emulator and names no account, so `EveryEmittedFormIsAcceptedByTheService` — the
-test that caught the unnest defect — is inconclusive on every run. Everything else on this page is
-worth less than making this true.
+---
 
-### A real account in CI — *medium*
+## 7. Provider and integration
 
-The emulator accepts statements Azure rejects and rejects features Azure implements. Both were found by
-hand. A nightly job against a real account is what stops the next one being found by a user.
+- **Client factory** — *done.* `clientFactory` names an `ICosmosClientFactory`, which subsumes Entra
+  ID, custom serializers, retry policies, preferred regions and a DI-owned client.
+- **Schema functions** — *medium, mis-sized before.* The validator resolves a name against the `fun`
+  operator table chained with the catalog reader, and the catalog reader resolves the schema's own
+  functions — so `CosmosOperators.Instance` being a `SqlOperatorTable` is why full text is unreachable
+  from a `CalciteConnection`. Registering them means `ScalarFunctionImpl` over real CLR methods, and
+  these functions cannot execute outside Cosmos, so those methods would throw: a non-pushed query
+  becomes a run-time failure rather than a plan-time refusal. That trade is the decision.
+- **Connection options as operands** — *small.* Consistency level, preferred regions, application name,
+  for callers who do not want to write a factory.
+- **Multiple databases** — *small.* One schema is one database; a schema per database is a model
+  concern, but nothing supports a schema spanning several.
+- **Client disposal** — *small.* The schema owns a client for the life of the process because Calcite
+  offers no disposal hook. Worth revisiting against `SchemaPlus` rather than left as a comment.
+- **Server-side functions** — *medium.* Cosmos has stored procedures and JavaScript UDFs. A UDF is
+  nameable in a query, so it could be exposed as a Calcite operator the way the built-ins are.
 
-### Differential testing — *large, and the highest-value test work*
+---
 
-Run the same SQL twice — once with the Cosmos rules registered, once with them withheld so Calcite
-evaluates everything in-process — and require the same rows. Every pushdown is then checked against an
-oracle rather than against an expected string. This is what `ClrEnumerableDifferentialTests` does for
-the CLR conventions in `calcite-dotnet`, and it is where the defects were found there.
+## 8. Observability
 
-### RU regression tracking — *medium, after `RequestCharge`*
+- **A diagnostics surface** — *medium, and it gates two items above.* `RequestCharge`, `IndexMetrics`
+  and `CosmosDiagnostics` all have somewhere to come from and nowhere to go. Calcite's `Hook` is one
+  candidate, an event on the schema another, `ActivitySource` a third. Deciding is the work.
+- **`QUERY_PLAN` hook** — *done.* The converter already runs it with the rendered statement.
+- **RU regression tracking** — *medium, after the charge is surfaced.* Assert that a query shape does
+  not get more expensive.
 
-Assert that a query shape does not get more expensive. Needs the charge surfaced first.
+---
+
+## 9. Testing
+
+- **Acceptance suite in CI** — *done.* Every emitted form executes against an emulator on the Linux
+  leg.
+- **A real account in CI** — *medium.* The emulator accepts statements Azure rejects and rejects
+  features Azure implements; both were found by hand this session. A nightly job against a real
+  account is what stops the next one being found by a user.
+- **Differential testing** — *large, and the highest-value test work.* Run the same SQL twice — once
+  with the Cosmos rules registered, once with them withheld so Calcite evaluates everything in
+  process — and require the same rows. Every pushdown is then checked against an oracle rather than
+  against an expected string. This is what `ClrEnumerableDifferentialTests` does for the CLR
+  conventions in `calcite-dotnet`, and it is where the defects were found there.
+- **Emulator gaps, recorded** — *small.* The emulator silently discards composite indexes and does not
+  implement full text search. Both are known; neither is asserted, so a future emulator that fixes
+  them would go unnoticed.
+
+---
+
+## 10. Unsettled questions
+
+These are not features. They are things believed but not measured, and each one is a defect waiting
+for the right query.
+
+- **The composite index requirement.** A multi-key `ORDER BY` is refused without a matching composite
+  index. Documented, never observed — the emulator implements composite indexes not at all.
+  `PopulateIndexMetrics` against a real account would settle it.
+- **`DISTINCT` with `ORDER BY`.** Assumed incompatible, never tested.
+- **Two-argument `TRIM` and `TRUNCATE`.** Left out for want of a measurement.
+- **Out-of-domain arithmetic.** Measured: `ASIN(2)`, `ACOS(2)`, `SQRT(-1)` and `LOG(0)` each fail the
+  whole query where Calcite yields NaN. Pushed anyway, consistently, and recorded so the consistency
+  is a decision.
