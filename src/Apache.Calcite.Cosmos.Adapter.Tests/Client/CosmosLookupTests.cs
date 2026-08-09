@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.CompilerServices;
@@ -78,7 +78,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
             }
         }
 
-        static Task<List<string>> Join(IAsyncEnumerable<string> build, RecordingExecutor executor, int batchSize = 3, CosmosQuery? query = null)
+        static Task<List<string>> Join(IAsyncEnumerable<string> build, RecordingExecutor executor, int batchSize = 3, CosmosQuery? query = null, int cacheSize = 0)
         {
             return Collect(CosmosLookup.JoinAsync(
                 build,
@@ -89,7 +89,8 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
                 b => b,
                 element => element.GetProperty("category").GetString()!,
                 p => p,
-                (b, p) => b + "/" + p));
+                (b, p) => b + "/" + p,
+                cacheSize));
         }
 
         static async Task<List<string>> Collect(IAsyncEnumerable<string> rows)
@@ -249,6 +250,68 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
             CosmosLookup.Normalize(7d).Should().Be(CosmosLookup.Normalize((decimal)7));
             CosmosLookup.Normalize("7").Should().NotBe(CosmosLookup.Normalize(7));
             CosmosLookup.Normalize(null).Should().BeNull();
+        }
+
+        // ── Remembering ───────────────────────────────────────────────────────────
+
+        /// <remarks>
+        /// Deduplication only reaches within a batch. Reference data is looked up repeatedly across
+        /// them by definition, and this is where the saving is: a thousand build rows over one key
+        /// should ask once, not once per batch.
+        /// </remarks>
+        [TestMethod]
+        public async Task AKeyRepeatedAcrossBatchesIsFetchedOnce()
+        {
+            var executor = new RecordingExecutor("""{"category":"bikes"}""");
+
+            var rows = await Join(Async("bikes", "bikes", "bikes"), executor, batchSize: 1, cacheSize: 16);
+
+            executor.Executed.Should().ContainSingle("the second and third batches should be answered from memory");
+            rows.Should().HaveCount(3, "every build row still joins");
+        }
+
+        /// <remarks>
+        /// The case a cache most needs to hold. Without remembering absence, a key the container has
+        /// nothing for is asked about again in every batch that mentions it, and told nothing again.
+        /// </remarks>
+        [TestMethod]
+        public async Task AKeyWithNoMatchIsRememberedToo()
+        {
+            var executor = new RecordingExecutor();
+
+            var rows = await Join(Async("hats", "hats", "hats"), executor, batchSize: 1, cacheSize: 16);
+
+            executor.Executed.Should().ContainSingle("absence is an answer, and it is worth keeping");
+            rows.Should().BeEmpty();
+        }
+
+        [TestMethod]
+        public async Task WithoutACacheEveryBatchFetches()
+        {
+            var executor = new RecordingExecutor("""{"category":"bikes"}""");
+
+            await Join(Async("bikes", "bikes", "bikes"), executor, batchSize: 1, cacheSize: 0);
+
+            executor.Executed.Should().HaveCount(3);
+        }
+
+        /// <remarks>
+        /// The bound is what stops a large build side from being remembered whole. Filled and then
+        /// left alone rather than evicted — nothing here knows which key is worth keeping, and a wrong
+        /// eviction costs a request.
+        /// </remarks>
+        [TestMethod]
+        public async Task TheCacheStopsGrowingAtItsBound()
+        {
+            var executor = new RecordingExecutor();
+
+            // One key fills the cache; the second is never remembered, so it is asked for every time.
+            await Join(Async("a", "b", "a", "b"), executor, batchSize: 1, cacheSize: 1);
+
+            var asked = executor.Executed.SelectMany(Keys).Distinct().ToList();
+            asked.Should().BeEquivalentTo(new object?[] { "a", "b" });
+
+            executor.Executed.Should().HaveCount(3, "a is remembered after the first batch; b never is");
         }
 
         // ── Binding ───────────────────────────────────────────────────────────────
