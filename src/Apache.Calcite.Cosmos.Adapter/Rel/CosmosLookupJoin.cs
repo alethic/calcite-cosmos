@@ -69,6 +69,22 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
         /// </remarks>
         public const int DefaultBatchSize = 100;
 
+        /// <summary>
+        /// How many keys one execution remembers.
+        /// </summary>
+        /// <remarks>
+        /// Flink's lookup connectors put a cache in front of the same operation for the same reason:
+        /// reference data is looked up repeatedly by definition, and a remembered key costs nothing.
+        /// This one lives for a single execution, so it answers for no staleness the join did not
+        /// already have — the container is read across many requests either way.
+        /// <para>
+        /// Bounded so that a large build side cannot be remembered whole. The bound is generous
+        /// because an entry is a key and its matching rows, and the alternative to holding one is a
+        /// request.
+        /// </para>
+        /// </remarks>
+        public const int DefaultCacheSize = 4096;
+
         readonly int _buildKey;
         readonly int _probeKey;
         readonly int _batchSize;
@@ -172,6 +188,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
                     CosmosConverters.RowBuilder(probePhysType, probe.getRowType()),
                     KeySelector(probePhysType, probeType, _probeKey),
                     ResultSelector(physType, buildResult.PhysType, buildType, probePhysType, probeType),
+                    Expression.Constant(DefaultCacheSize),
                     // As for the converter: Calcite's cancellation is a flag on the DataContext rather
                     // than a token, and a batch in flight would not observe one. Not asking for the next
                     // batch is what stops this.

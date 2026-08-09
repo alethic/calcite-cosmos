@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Runtime.CompilerServices;
@@ -119,6 +119,11 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
         /// <param name="rowBuilder">Builds a container row from the JSON value it arrived as.</param>
         /// <param name="probeKey">Reads the join key from a container row.</param>
         /// <param name="resultSelector">Combines a matching pair.</param>
+        /// <param name="cacheSize">
+        /// How many keys to remember for the length of this join, or zero to remember none. Reference
+        /// data is looked up repeatedly by definition, and a remembered key costs no request units at
+        /// all.
+        /// </param>
         /// <param name="cancellationToken">Cancels the enumeration.</param>
         /// <returns>The joined rows.</returns>
         /// <exception cref="ArgumentNullException">Any required argument is <c>null</c>.</exception>
@@ -132,6 +137,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
             Func<JsonElement, TProbe> rowBuilder,
             Func<TProbe, object?> probeKey,
             Func<TBuild, TProbe, TResult> resultSelector,
+            int cacheSize = 0,
             [EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
             if (build is null)
@@ -151,20 +157,26 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
 
             var batch = new List<TBuild>(batchSize);
 
+            // Held for the length of this join and no longer. A cache that outlived one execution
+            // would have to answer for staleness, and this one cannot be stale in a way the join was
+            // not already: the container is read across many requests either way, and remembering an
+            // answer makes the result more self-consistent rather than less.
+            var cache = cacheSize > 0 ? new Dictionary<object, List<TProbe>>() : null;
+
             await foreach (var row in build.WithCancellation(cancellationToken).ConfigureAwait(false))
             {
                 batch.Add(row);
                 if (batch.Count < batchSize)
                     continue;
 
-                await foreach (var joined in RunAsync(batch, executor, query, prefix, batchSize, buildKey, rowBuilder, probeKey, resultSelector, cancellationToken).ConfigureAwait(false))
+                await foreach (var joined in RunAsync(batch, executor, query, prefix, batchSize, buildKey, rowBuilder, probeKey, resultSelector, cache, cacheSize, cancellationToken).ConfigureAwait(false))
                     yield return joined;
 
                 batch.Clear();
             }
 
             if (batch.Count > 0)
-                await foreach (var joined in RunAsync(batch, executor, query, prefix, batchSize, buildKey, rowBuilder, probeKey, resultSelector, cancellationToken).ConfigureAwait(false))
+                await foreach (var joined in RunAsync(batch, executor, query, prefix, batchSize, buildKey, rowBuilder, probeKey, resultSelector, cache, cacheSize, cancellationToken).ConfigureAwait(false))
                     yield return joined;
         }
 
@@ -186,6 +198,8 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
             Func<JsonElement, TProbe> rowBuilder,
             Func<TProbe, object?> probeKey,
             Func<TBuild, TProbe, TResult> resultSelector,
+            Dictionary<object, List<TProbe>>? cache,
+            int cacheSize,
             [EnumeratorCancellation] CancellationToken cancellationToken)
         {
             // Distinct, because the keys are data here rather than a predicate: a hundred build rows
@@ -193,25 +207,55 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
             var keys = new List<object?>();
             var seen = new HashSet<object>();
 
-            foreach (var row in batch)
-                if (Normalize(buildKey(row)) is object key && seen.Add(key))
-                    keys.Add(key);
-
-            if (keys.Count == 0)
-                yield break;
-
+            // What this batch resolves to, whether remembered or fetched.
             var lookup = new Dictionary<object, List<TProbe>>();
 
-            await foreach (var element in executor.ExecuteAsync(Bind(query, prefix, batchSize, keys), cancellationToken: cancellationToken).ConfigureAwait(false))
+            foreach (var row in batch)
             {
-                var probe = rowBuilder(element);
-                if (Normalize(probeKey(probe)) is not object key)
+                if (Normalize(buildKey(row)) is not object key || seen.Add(key) == false)
                     continue;
 
-                if (lookup.TryGetValue(key, out var rows) == false)
-                    lookup[key] = rows = new List<TProbe>();
+                if (cache is not null && cache.TryGetValue(key, out var remembered))
+                    lookup[key] = remembered;
+                else
+                    keys.Add(key);
+            }
 
-                rows.Add(probe);
+            if (keys.Count > 0)
+            {
+                var fetched = new Dictionary<object, List<TProbe>>();
+
+                await foreach (var element in executor.ExecuteAsync(Bind(query, prefix, batchSize, keys), cancellationToken: cancellationToken).ConfigureAwait(false))
+                {
+                    var probe = rowBuilder(element);
+                    if (Normalize(probeKey(probe)) is not object key)
+                        continue;
+
+                    if (fetched.TryGetValue(key, out var rows) == false)
+                        fetched[key] = rows = new List<TProbe>();
+
+                    rows.Add(probe);
+                }
+
+                foreach (var key in keys)
+                {
+                    if (key is null)
+                        continue;
+
+                    // Absence is remembered too. A key the container has nothing for is the case a
+                    // cache most needs to hold: without it, every batch mentioning that key asks
+                    // again and is told nothing again.
+                    var rows = fetched.TryGetValue(key, out var found) ? found : new List<TProbe>();
+
+                    lookup[key] = rows;
+
+                    // Filled to the bound and then left alone, rather than evicted. Nothing here knows
+                    // which key is worth keeping, and a wrong eviction costs a request — so the simple
+                    // rule is the honest one, and the bound is what stops a large build side from
+                    // being remembered whole.
+                    if (cache is not null && cache.Count < cacheSize)
+                        cache[key] = rows;
+                }
             }
 
             foreach (var row in batch)

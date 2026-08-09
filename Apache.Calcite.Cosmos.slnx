@@ -17,6 +17,9 @@
     <Project Path="src/Apache.Calcite.Cosmos.Adapter/Apache.Calcite.Cosmos.Adapter.csproj" />
     <Project Path="src/Apache.Calcite.Cosmos.Adapter.Tests/Apache.Calcite.Cosmos.Adapter.Tests.csproj" />
   </Folder>
+  <Folder Name="/samples/">
+    <Project Path="samples/Apache.Cosmos.Sample/Apache.Cosmos.Sample.csproj" />
+  </Folder>
   <Folder Name="/src/dist/">
     <Project Path="src/dist-nuget/dist-nuget.csproj" />
     <Project Path="src/dist-tests/dist-tests.csproj" />

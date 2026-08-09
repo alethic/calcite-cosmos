@@ -1155,6 +1155,46 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
                 "an IN over a hundred keys should use the index on the path it restricts: " + metrics);
         }
 
+        // ── Request options ───────────────────────────────────────────────────────
+
+        /// <remarks>
+        /// One logical partition lives on one physical partition, so a query pinned to one has nothing
+        /// for a second worker to read. The SDK otherwise sizes its fan-out for a query that might span
+        /// every partition.
+        /// </remarks>
+        [TestMethod]
+        public void APinnedPartitionKeyNeedsNoConcurrency()
+        {
+            var query = new CosmosQuery("SELECT VALUE c FROM products c", Array.Empty<CosmosParameter>());
+
+            var pinned = CosmosQueryExecutor.CreateRequestOptions(query, new PartitionKey("bikes"));
+            pinned.PartitionKey.Should().Be(new PartitionKey("bikes"));
+            pinned.MaxConcurrency.Should().Be(1);
+        }
+
+        /// <remarks>
+        /// A cross-partition query is left alone. How much concurrency it wants depends on the
+        /// container's spread, which this does not know — and the SDK's own default is a better guess
+        /// than a constant invented here.
+        /// </remarks>
+        [TestMethod]
+        public void ACrossPartitionQueryKeepsTheSdkDefault()
+        {
+            var query = new CosmosQuery("SELECT VALUE c FROM products c", Array.Empty<CosmosParameter>());
+
+            var options = CosmosQueryExecutor.CreateRequestOptions(query, null);
+            options.PartitionKey.Should().BeNull();
+            options.MaxConcurrency.Should().BeNull();
+        }
+
+        [TestMethod]
+        public void APushedLimitBecomesThePageSize()
+        {
+            var query = new CosmosQuery("SELECT VALUE c FROM products c OFFSET 0 LIMIT 5", Array.Empty<CosmosParameter>(), MaxItemCount: 5);
+
+            CosmosQueryExecutor.CreateRequestOptions(query, null).MaxItemCount.Should().Be(5);
+        }
+
         // ── Three-valued logic, which decides what a disjunction may be weakened to ──
 
         /// <summary>Runs a predicate and returns the ids it matched.</summary>

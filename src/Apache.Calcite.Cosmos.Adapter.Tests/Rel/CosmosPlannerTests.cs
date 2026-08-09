@@ -406,6 +406,72 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
         }
 
         /// <summary>
+        /// A disjunction whose branch cannot be rendered is pushed as what that branch implies.
+        /// </summary>
+        /// <remarks>
+        /// Dropping a disjunct strengthens, so an <c>OR</c> with an untranslatable branch used to be
+        /// declined whole and every document crossed the wire. Since a branch can only be true where
+        /// the paths it reads are defined, <c>a OR b</c> pushes <c>a OR IS_DEFINED(…)</c> — implied by
+        /// the original, so it discards nothing the original would have kept — and the original is
+        /// rechecked above it.
+        /// </remarks>
+        [TestMethod]
+        public void ADisjunctionWithAnUntranslatableBranchIsWeakened()
+        {
+            var best = PlanToAsync("SELECT * FROM products AS c WHERE c.\"category\" = 'bikes' OR INITCAP(c.\"_etag\") = 'X'");
+            var plan = Plan(best);
+
+            plan.Should().Contain("CosmosFilter", "something should reach the service: " + plan);
+            plan.Should().Contain("IS_DEFINED", "the untranslatable branch implies its path is defined: " + plan);
+            plan.Should().Contain("INITCAP", "and the original is still rechecked: " + plan);
+        }
+
+        /// <summary>
+        /// A branch that can observe absence implies nothing about definedness, and is not weakened.
+        /// </summary>
+        /// <remarks>
+        /// Measured, and the reason the rule is about absence rather than about polarity:
+        /// <c>NOT IS_DEFINED(c.x)</c> is true exactly where the path is missing, so a branch containing
+        /// it cannot imply the path is there. Weakening it anyway would strengthen the predicate and
+        /// lose rows — the failure this whole design is arranged to make impossible.
+        /// </remarks>
+        [TestMethod]
+        public void ABranchThatObservesAbsenceIsNotWeakened()
+        {
+            var best = PlanToAsync(
+                "SELECT * FROM products AS c " +
+                "WHERE c.\"category\" = 'bikes' OR (NOT IS_DEFINED(c.\"_etag\") AND INITCAP(c.\"_etag\") = 'X')");
+
+            var plan = Plan(best);
+
+            plan.Should().NotContain("CosmosFilter",
+                "nothing about this disjunction is safe to push: " + plan);
+        }
+
+        /// <summary>
+        /// SQL's own null tests observe absence, and a branch using one is not weakened either.
+        /// </summary>
+        /// <remarks>
+        /// <c>x IS NULL</c> renders as <c>(NOT IS_DEFINED(x) OR IS_NULL(x))</c>, so it is true where
+        /// the path is missing — but its Rex operator belongs to the standard table rather than to the
+        /// Cosmos family, so checking only the latter let it through. A branch containing one can be
+        /// true with the path absent, and weakening it to <c>IS_DEFINED</c> would have discarded
+        /// exactly those rows.
+        /// </remarks>
+        [TestMethod]
+        public void ABranchUsingSqlNullTestsIsNotWeakened()
+        {
+            var best = PlanToAsync(
+                "SELECT * FROM products AS c " +
+                "WHERE c.\"id\" = 'x' OR (c.\"category\" IS NULL AND INITCAP(c.\"_etag\") = 'X')");
+
+            var plan = Plan(best);
+
+            plan.Should().NotContain("CosmosFilter",
+                "a branch that can be true with the path absent implies nothing about definedness: " + plan);
+        }
+
+        /// <summary>
         /// A sort above a pushed aggregate stays in Calcite, and the aggregate still pushes.
         /// </summary>
         /// <remarks>

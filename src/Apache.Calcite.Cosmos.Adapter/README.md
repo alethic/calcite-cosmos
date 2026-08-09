@@ -32,7 +32,7 @@ dotnet add package Apache.Calcite.Cosmos.Adapter
 {
   "name": "COSMOS",
   "type": "custom",
-  "factory": "Apache.Calcite.Cosmos.Adapter.CosmosSchemaFactory",
+  "factory": "Apache.Calcite.Cosmos.Adapter.CosmosSchemaFactory, Apache.Calcite.Cosmos.Adapter",
   "operand": {
     "endpoint": "https://account.documents.azure.com:443/",
     "key": "…",
@@ -96,7 +96,7 @@ Under development. Statement generation, container metadata, the schema and tabl
 - [Apache Calcite documentation](https://calcite.apache.org/docs/)
 - [Calcite adapters overview](https://calcite.apache.org/docs/adapter.html)
 - [Cosmos DB SQL query reference](https://learn.microsoft.com/azure/cosmos-db/nosql/query/getting-started)
-- [Source repository](https://github.com/alethic/calcite-cosmos)
+- [Source repository](https://github.com/ikvmnet/calcite-cosmos)
 
 ## License
 
