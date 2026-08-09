@@ -1,4 +1,4 @@
-using Apache.Calcite.Cosmos.Adapter.Sql;
+﻿using Apache.Calcite.Cosmos.Adapter.Sql;
 
 using Apache.Calcite.Extensions.Adapter.AsyncEnumerable;
 
@@ -211,9 +211,9 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
                 join.getTraitSet().replace(ClrAsyncEnumerableConvention.Instance),
                 convert(left, left.getTraitSet().replace(ClrAsyncEnumerableConvention.Instance)),
                 convert(right, right.getTraitSet().replace(_convention)),
+                join.getCondition(),
                 build,
-                probe,
-                join.getRowType());
+                probe);
         }
 
     }

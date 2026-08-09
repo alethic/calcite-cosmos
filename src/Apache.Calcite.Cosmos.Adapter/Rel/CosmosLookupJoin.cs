@@ -11,8 +11,9 @@ using Apache.Calcite.Extensions.Adapter.Enumerable;
 
 using org.apache.calcite.plan;
 using org.apache.calcite.rel;
+using org.apache.calcite.rel.core;
 using org.apache.calcite.rel.metadata;
-using org.apache.calcite.rel.type;
+using org.apache.calcite.rex;
 
 namespace Apache.Calcite.Cosmos.Adapter.Rel
 {
@@ -43,7 +44,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
     /// statement, above it are rows.
     /// </para>
     /// </remarks>
-    public class CosmosLookupJoin : BiRel, ClrAsyncEnumerableRel
+    public class CosmosLookupJoin : Join, ClrAsyncEnumerableRel
     {
 
         static readonly System.Reflection.MethodInfo JoinAsyncMethod = typeof(CosmosLookup).GetMethod(nameof(CosmosLookup.JoinAsync))
@@ -71,7 +72,6 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
         readonly int _buildKey;
         readonly int _probeKey;
         readonly int _batchSize;
-        readonly RelDataType _rowType;
 
         /// <summary>
         /// Initializes a new instance.
@@ -80,16 +80,22 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
         /// <param name="traitSet">The trait set, which must carry the asynchronous convention.</param>
         /// <param name="build">The side whose keys are pushed down, in <see cref="ClrAsyncEnumerableConvention"/>.</param>
         /// <param name="probe">The container subtree being restricted, in <see cref="CosmosConvention"/>.</param>
+        /// <param name="condition">The join condition, which is one equality on the keys below.</param>
         /// <param name="buildKey">The ordinal of the join key in <paramref name="build"/>'s row.</param>
         /// <param name="probeKey">The ordinal of the join key in <paramref name="probe"/>'s row.</param>
-        /// <param name="rowType">The joined row type: the build's fields followed by the probe's.</param>
         /// <param name="batchSize">How many build rows one fetch serves.</param>
-        public CosmosLookupJoin(RelOptCluster cluster, RelTraitSet traitSet, RelNode build, RelNode probe, int buildKey, int probeKey, RelDataType rowType, int batchSize = DefaultBatchSize) :
-            base(cluster, traitSet, build, probe)
+        /// <remarks>
+        /// A <see cref="Join"/> rather than a plain two-input node, and not only for the row type.
+        /// Calcite's metadata dispatches on a node's class, and the operators above this one ask it
+        /// things — predicates, uniqueness, selectivity — while they are being implemented. A node with
+        /// two inputs that is not a join has no handler for those, and the failure is not a wrong answer
+        /// but a plan that cannot be implemented at all.
+        /// </remarks>
+        public CosmosLookupJoin(RelOptCluster cluster, RelTraitSet traitSet, RelNode build, RelNode probe, RexNode condition, int buildKey, int probeKey, int batchSize = DefaultBatchSize) :
+            base(cluster, traitSet, com.google.common.collect.ImmutableList.of(), build, probe, condition, java.util.Collections.emptySet(), JoinRelType.INNER)
         {
             _buildKey = buildKey;
             _probeKey = probeKey;
-            _rowType = rowType ?? throw new ArgumentNullException(nameof(rowType));
             _batchSize = batchSize > 0 ? batchSize : throw new ArgumentOutOfRangeException(nameof(batchSize));
         }
 
@@ -103,15 +109,9 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
         public int BatchSize => _batchSize;
 
         /// <inheritdoc />
-        protected override RelDataType deriveRowType()
+        public override Join copy(RelTraitSet traitSet, RexNode conditionExpr, RelNode left, RelNode right, JoinRelType joinType, bool semiJoinDone)
         {
-            return _rowType;
-        }
-
-        /// <inheritdoc />
-        public override RelNode copy(RelTraitSet traitSet, java.util.List inputs)
-        {
-            return new CosmosLookupJoin(getCluster(), traitSet, (RelNode)inputs.get(0), (RelNode)inputs.get(1), _buildKey, _probeKey, _rowType, _batchSize);
+            return new CosmosLookupJoin(getCluster(), traitSet, left, right, conditionExpr, _buildKey, _probeKey, _batchSize);
         }
 
         /// <inheritdoc />
@@ -213,7 +213,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
             for (var i = 0; i < getRight().getRowType().getFieldCount(); i++)
                 fields.Add(probePhysType.FieldReference(p, i));
 
-            return Expression.Lambda(physType.Record(fields), b, p);
+            return Expression.Lambda(Expression.NewArrayInit(typeof(object), fields.ConvertAll(f => f.Type == typeof(object) ? f : Expression.Convert(f, typeof(object)))), b, p);
         }
 
     }

@@ -446,6 +446,20 @@ obvious one:
 | `SupportsWritingMetadata` | Writing the per-item `ttl`, which is a real Cosmos feature with no column to put it in today. |
 | `SupportsStaging`, `SupportsBucketing` | **Not applicable.** Two-phase commit for `CTAS`, and bucketed file layouts; neither has a Cosmos counterpart. |
 
+### Found while building the lookup join
+
+- **`ClrAsyncEnumerableProject.Implement` throws unconditionally** in `Apache.Calcite.Extensions`. A
+  projection is meant to become a `Calc` first, but Volcano will happily choose the `Project` when the
+  two cost the same, and the plan is then one nothing can implement. It bites any query with a
+  projection that cannot be pushed into a container — which is every projection above a join. The
+  execution tests work around it with `PROJECT_REMOVE` and an identity projection; a caller cannot.
+  Belongs upstream, not here.
+- **A row builder needs the shape the statement projects.** The lookup join'''s execution tests first
+  failed with a null reference inside the join'''s result selector, because the stub returned raw
+  documents rather than the projected object the statement asks for. Real responses carry the
+  projection, so this is a fixture concern rather than a defect — but which access produced the null
+  was not established, and it is worth knowing whether a malformed response fails loudly or quietly.
+
 ### The three worth doing first
 
 1. **Shuffle the build side by partition key** before the lookup (`SupportsLookupCustomShuffle`). It
