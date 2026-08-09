@@ -16,11 +16,12 @@
             <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
         </PackageReference>
         <PackageReference Include="FluentAssertions" Version="8.10.0" />
-        <!-- The workflow runs the suite as `dotnet test <assembly>.dll --logger:trx --filter …`,
-             which is the VSTest command line. MSTest.Sdk 3 referenced this package for every test
-             application, so that worked without saying so; 4 references it only under UseVSTest,
-             and the MSTest runner it enables by default does not answer to those arguments. Named
-             here so the workflow keeps working — dropping it means rewriting how CI invokes tests. -->
+        <!-- The workflow runs the suite by handing `dotnet test` a built assembly together with the
+             trx logger, a runsettings file and a filter, which is the VSTest command line. MSTest.Sdk 3
+             referenced this package for every test application, so that worked without saying so;
+             4 references it only under UseVSTest, and the MSTest runner it enables by default does not
+             answer to those arguments. Named here so the workflow keeps working — dropping it instead
+             means rewriting how CI invokes tests. -->
         <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.4.0" />
     </ItemGroup>
 
