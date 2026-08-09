@@ -350,6 +350,37 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
             results.Should().ContainSingle().Which.GetInt32().Should().Be(3);
         }
 
+        /// <remarks>
+        /// The measurement the <c>LIKE</c> translation is built on: Cosmos reads a bracket in the
+        /// pattern as a character range, where SQL <c>LIKE</c> matches the brackets literally —
+        /// so a pattern containing one must not be pushed.
+        /// </remarks>
+        [TestMethod]
+        public async Task LikeReadsABracketAsACharacterRange()
+        {
+            var builder = Builder();
+            builder.SelectValue("c.name");
+            builder.Where = "c.name LIKE \"[SM]print\"";
+
+            var results = await Execute(Query(builder));
+
+            // "Sprint" matches the range [SM] followed by "print"; a literal reading of the
+            // brackets would match nothing.
+            results.Select(x => x.GetString()).Should().BeEquivalentTo("Sprint");
+        }
+
+        [TestMethod]
+        public async Task StartsWithMatchesThePrefix()
+        {
+            var builder = Builder();
+            builder.SelectValue("c.name");
+            builder.Where = "STARTSWITH(c.name, \"Trail\")";
+
+            var results = await Execute(Query(builder));
+
+            results.Select(x => x.GetString()).Should().BeEquivalentTo("Trail Blazer");
+        }
+
         // ── Every emitted form must actually run ──────────────────────────────────
 
         /// <summary>
@@ -405,6 +436,8 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
                 ("nested path projection", b => b.SelectValue("c.metadata.sku")),
                 ("bracketed property", b => b.SelectValue("c[\"name\"]")),
                 ("is-null predicate", b => b.Where = "(NOT IS_DEFINED(c.price) OR IS_NULL(c.price))"),
+                ("startswith", b => b.Where = "STARTSWITH(c.name, \"Trail\")"),
+                ("like", b => b.Where = "c.name LIKE \"%unner\""),
 
                 // Scalar functions, in the exact forms the translator emits.
                 ("upper", b => b.SelectValue("UPPER(c.name)")),

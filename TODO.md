@@ -368,8 +368,14 @@ owns the client.
 - *Small each*: `ARRAY_SLICE`, `ARRAY_CONCAT`, `SETINTERSECT`, `SETUNION`; `LEFT`, `RIGHT`, `REVERSE`,
   `REPLICATE`, `REGEXMATCH`; the JSON conversions `ToString`, `StringToNumber`, `StringToObject`,
   `ObjectToArray`.
-- **`LIKE` to `STARTSWITH`** — *small, and the valuable one.* A `LIKE` whose pattern is a literal with
-  a single trailing wildcard is a prefix match, which the index serves; a general `LIKE` is a scan.
+- **`LIKE` to `STARTSWITH`** — *done, and it found a correctness hole.* A literal pattern whose only
+  wildcard is a single trailing `%` renders as `STARTSWITH`, which the index serves; a general
+  literal pattern stays `LIKE`, a scan. Found on the way, and **measured on the emulator**: Cosmos
+  `LIKE` reads `[…]` as a character range where SQL matches the brackets literally — `"[SM]print"`
+  matches `Sprint` — so every pushed bracket pattern returned wrong rows. A literal pattern with a
+  bracket is now declined, and so is a computed pattern, which cannot be checked for one; the
+  computed decline is a coverage regression accepted for correctness, and lifting it means a
+  bracket-escaping rewrite nobody has asked for.
 - **Currently declined, admissible with work** — `SUBSTRING` without a length (`LENGTH(s)` supplies
   it); `LIKE` with `ESCAPE`; `TRIM` of a non-space character and `TRUNCATE` to decimal places, both
   needing Cosmos's two-argument arity **verified** first; `IS TRUE`/`IS FALSE`/`IS DISTINCT FROM`,
@@ -489,8 +495,15 @@ the actual bail-outs in `CosmosAggregate`, the idea splits into four pieces of v
 - **What a split does *not* fix: the null-semantics refusals**, which are the biggest source of
   declined aggregates. A partial `SUM(c.v)` over a nullable column is `undefined` at the service —
   wrong before it is combined, so no combine repairs it. Fixing those means rewriting the rendered
-  argument so Cosmos skips a null the way SQL does, which is an expression-level change orthogonal to
-  splitting, and wants the same emulator measurement the current restrictions came from.
+  argument so Cosmos skips a null the way SQL does — Cosmos aggregates skip *undefined*, and
+  arithmetic on a JSON null yields it, so `SUM(c.v * 1)` is the candidate for a numeric column.
+  **Sized up and found blocked, before any measurement:** the rewrite is type-directed — `* 1` over
+  a string silently drops it from `MIN`/`MAX` — and no nullable column in any row type carries a
+  type today. Every promoted user column is deliberately `ANY` (`CosmosTable.getRowType` records
+  why: the adapter refuses to guess what a partition key holds), and the one typed non-system
+  column, `_ts`, is non-nullable and already pushes. So this waits on typed user columns — the
+  *computed properties* item below, or declared column types — and the `* 1` hypothesis with its
+  emulator measurement is recorded here for when one exists.
 
 **The hazard this depended on is closed, and it was a live hole.** `CosmosAggregateRule` inspected
 only the calls, so an aggregate above another aggregate — reachable by plain SQL, no expansion needed

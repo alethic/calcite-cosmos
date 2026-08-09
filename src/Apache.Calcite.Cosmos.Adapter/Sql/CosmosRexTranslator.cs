@@ -438,13 +438,41 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
         /// Writes a <c>LIKE</c> predicate.
         /// </summary>
         /// <remarks>
+        /// <para>
         /// The three-operand form carries an <c>ESCAPE</c> clause, which is refused rather than
         /// dropped: silently ignoring it would change which rows match.
+        /// </para>
+        /// <para>
+        /// The pattern must be a literal, because Cosmos <c>LIKE</c> is not SQL <c>LIKE</c>: Cosmos
+        /// additionally reads <c>[…]</c> as a character range where SQL matches the brackets
+        /// literally. A literal pattern is checked for brackets and declined when it has any; a
+        /// computed pattern cannot be checked and is declined whole, since pushing it would change
+        /// which rows match whenever a value contains one.
+        /// </para>
+        /// <para>
+        /// A literal pattern whose only wildcard is a single trailing <c>%</c> is a prefix match,
+        /// rendered as <c>STARTSWITH</c> — which the index serves, where <c>LIKE</c> is a scan.
+        /// </para>
         /// </remarks>
         void WriteLike(StringBuilder builder, RexCall call)
         {
             if (call.getOperands().size() != 2)
                 throw new CosmosTranslationException("LIKE with an ESCAPE clause is not supported.");
+
+            if (Operand(call, 1) is not RexLiteral patternLiteral || GetLiteralValue(patternLiteral) is not string pattern)
+                throw new CosmosTranslationException("LIKE with a computed pattern is not supported: Cosmos gives '[' a meaning SQL does not, and only a literal pattern can be checked for one.");
+
+            if (pattern.IndexOfAny(new[] { '[', ']' }) >= 0)
+                throw new CosmosTranslationException("LIKE with a bracket in the pattern is not supported: Cosmos reads a character range where SQL reads the brackets literally.");
+
+            if (pattern.EndsWith("%", StringComparison.Ordinal) &&
+                pattern.IndexOfAny(new[] { '%', '_' }) == pattern.Length - 1)
+            {
+                builder.Append("STARTSWITH(");
+                Write(builder, Operand(call, 0));
+                builder.Append(", ").Append(_parameters.Add(pattern.Substring(0, pattern.Length - 1))).Append(')');
+                return;
+            }
 
             WriteBinary(builder, call, "LIKE");
         }

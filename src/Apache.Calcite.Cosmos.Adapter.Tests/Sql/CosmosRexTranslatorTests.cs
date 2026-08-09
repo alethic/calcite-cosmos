@@ -177,6 +177,53 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Sql
                 .Should().Be("(c.name LIKE @p0)");
         }
 
+        /// <remarks>
+        /// A single trailing <c>%</c> is a prefix match, which the index serves as
+        /// <c>STARTSWITH</c> where <c>LIKE</c> is a scan. The bound parameter is the prefix, not
+        /// the pattern.
+        /// </remarks>
+        [TestMethod]
+        public void PrefixLikeRendersAsStartsWith()
+        {
+            var t = Translator();
+            t.Translate(Call(SqlStdOperatorTable.LIKE, Ref(0, SqlTypeName.VARCHAR), Str("bike%")))
+                .Should().Be("STARTSWITH(c.name, @p0)");
+
+            _parameters.Parameters.Should().ContainSingle().Which.Value.Should().Be("bike");
+        }
+
+        [TestMethod]
+        public void LikeWithAnInnerWildcardStaysLike()
+        {
+            Translate(Call(SqlStdOperatorTable.LIKE, Ref(0, SqlTypeName.VARCHAR), Str("bi%ke%")))
+                .Should().Be("(c.name LIKE @p0)");
+
+            Translate(Call(SqlStdOperatorTable.LIKE, Ref(0, SqlTypeName.VARCHAR), Str("bi_e%")))
+                .Should().Be("(c.name LIKE @p0)");
+        }
+
+        /// <remarks>
+        /// Cosmos <c>LIKE</c> reads <c>[…]</c> as a character range; SQL matches the brackets
+        /// literally. Pushing such a pattern would change which rows match, so it is declined.
+        /// </remarks>
+        [TestMethod]
+        public void LikeWithABracketIsDeclined()
+        {
+            CanTranslate(Translator(), Call(SqlStdOperatorTable.LIKE, Ref(0, SqlTypeName.VARCHAR), Str("[b]ike%")))
+                .Should().BeFalse();
+        }
+
+        /// <remarks>
+        /// A computed pattern cannot be checked for the bracket divergence, so it is declined whole
+        /// rather than pushed on the hope that no value contains one.
+        /// </remarks>
+        [TestMethod]
+        public void LikeWithAComputedPatternIsDeclined()
+        {
+            CanTranslate(Translator(), Call(SqlStdOperatorTable.LIKE, Ref(0, SqlTypeName.VARCHAR), Ref(0, SqlTypeName.VARCHAR)))
+                .Should().BeFalse();
+        }
+
         [TestMethod]
         public void CaseBecomesNestedTernary()
         {
