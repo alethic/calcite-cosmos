@@ -150,12 +150,19 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             foreach (var rule in ClrAsyncEnumerableRules.Rules())
                 planner.addRule(rule);
 
-            // A projection that cannot be pushed into a container has to become a Calc: the CLR
-            // convention implements Calc and leaves Project as a placeholder that refuses. Above a join
-            // there is nowhere for a projection to be pushed, so without this the plan is one no
-            // convention can implement -- and the failure looks like the join'''s.
-            planner.addRule(org.apache.calcite.rel.rules.CoreRules.PROJECT_TO_CALC);
-            planner.addRule(org.apache.calcite.rel.rules.CoreRules.FILTER_TO_CALC);
+            // A projection that cannot be pushed into a container has to become a Calc, because the
+            // convention implements Calc and leaves Project throwing. That is Calcite's own
+            // arrangement rather than a gap: EnumerableProject.implement() throws too, with the comment
+            // "EnumerableCalcRel is always better", and EnumerableProjectToCalcRule is what converts it.
+            // Rules() mirrors EnumerableRules.rules() and CalcRules() is the separate list, exactly as
+            // upstream splits them -- so a caller planning joins needs both.
+            foreach (var rule in ClrAsyncEnumerableRules.CalcRules())
+                planner.addRule(rule);
+
+            // And still not enough on its own: with both lists registered the planner goes on choosing
+            // the Project, the two costing the same. Removing an identity projection is what gets these
+            // tests to a plan that implements, which is why the query below selects everything. A
+            // projection above a join that is not an identity has no route here yet -- see TODO.md.
             planner.addRule(org.apache.calcite.rel.rules.CoreRules.PROJECT_REMOVE);
 
             var desired = logical.getTraitSet().replace(ClrAsyncEnumerableConvention.Instance).simplify();
