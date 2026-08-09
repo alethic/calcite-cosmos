@@ -26,9 +26,9 @@ can answer; the suite runs against one when `COSMOS_TEST_ENDPOINT` and `COSMOS_T
 reports inconclusive rather than passing where the emulator cannot. Several facts in this file and in
 `DESIGN.md` were settled that way — an Azure account, used and deleted.
 
-Work is on `claude/cosmos-dml`, branched from `claude/cosmos-disjunction-weakening`, which is open as
-[PR #3](https://github.com/ikvmnet/calcite-cosmos/pull/3) and not yet merged. Everything before that
-merged as PR #2. The repository moved to the `ikvmnet` organization.
+Work is on `cosmos-dml`, branched from `main`. Everything before it merged as
+PR #2 and [PR #3](https://github.com/ikvmnet/calcite-cosmos/pull/3). The repository moved to the
+`ikvmnet` organization.
 
 **Nothing is half-finished.** The lookup join, the disjunction weakening, the diagnostics surface, the
 statistics work, the Entra support and now `INSERT` and `DELETE` are complete and covered. What
