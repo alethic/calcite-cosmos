@@ -448,18 +448,16 @@ obvious one:
 
 ### Found while building the lookup join
 
-- **A projection above a join has no route to an implementable plan yet.** `ClrAsyncEnumerableProject`
-  throws when implemented, which is Calcite's own arrangement rather than a gap:
-  `EnumerableProject.implement()` throws too, with the comment *"EnumerableCalcRel is always better"*,
-  and `EnumerableProjectToCalcRule` is what converts it. calcite-dotnet mirrors that faithfully —
-  `Rules()` is `EnumerableRules.rules()` and `CalcRules()` is the separate list.
-  **Registering both is not enough.** Measured: with `Rules()` and `CalcRules()` both added, Volcano
-  still chooses the `Project` over the `Calc`, the two costing the same, and the plan is one nothing
-  can implement. The execution tests get past it only by selecting everything and letting
-  `PROJECT_REMOVE` drop an identity projection; a caller writing `SELECT a, b FROM x JOIN y` cannot.
-  It goes unnoticed without a join because every projection is pushed into the container instead.
-  Where the fix belongs — a cost that prefers the `Calc`, or a rule that removes the `Project` — is
-  the open question, and it is upstream either way.
+- **A caller planning joins must run the calc rules as a pass after the planner** — *settled, and
+  worth a line in the README.* `ClrAsyncEnumerableProject` throws when implemented, which is
+  upstream's arrangement rather than a gap: `EnumerableProject.implement()` throws too, saying
+  *"EnumerableCalcRel is always better"*, and `EnumerableProjectRule` creates a `Project` there as
+  here. It is also the *cheaper* node — `Calc`'s inherited cost counts a unit per expression and
+  `Project`'s does not — so handed to Volcano the two compete and the throwing one wins. Measured:
+  adding `ClrAsyncEnumerableRules.CalcRules()` to the planner does not help for exactly that reason.
+  Run afterwards, as Calcite's `Programs.CALC_PROGRAM` does, there is no competition and every
+  surviving projection becomes a calc. Invisible until there is a join, because until then every
+  projection is pushed into the container and none survives to be implemented.
 - **A row builder needs the shape the statement projects.** The lookup join'''s execution tests first
   failed with a null reference inside the join'''s result selector, because the stub returned raw
   documents rather than the projected object the statement asks for. Real responses carry the

@@ -150,25 +150,43 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             foreach (var rule in ClrAsyncEnumerableRules.Rules())
                 planner.addRule(rule);
 
-            // A projection that cannot be pushed into a container has to become a Calc, because the
-            // convention implements Calc and leaves Project throwing. That is Calcite's own
-            // arrangement rather than a gap: EnumerableProject.implement() throws too, with the comment
-            // "EnumerableCalcRel is always better", and EnumerableProjectToCalcRule is what converts it.
-            // Rules() mirrors EnumerableRules.rules() and CalcRules() is the separate list, exactly as
-            // upstream splits them -- so a caller planning joins needs both.
-            foreach (var rule in ClrAsyncEnumerableRules.CalcRules())
-                planner.addRule(rule);
-
-            // And still not enough on its own: with both lists registered the planner goes on choosing
-            // the Project, the two costing the same. Removing an identity projection is what gets these
-            // tests to a plan that implements, which is why the query below selects everything. A
-            // projection above a join that is not an identity has no route here yet -- see TODO.md.
-            planner.addRule(org.apache.calcite.rel.rules.CoreRules.PROJECT_REMOVE);
 
             var desired = logical.getTraitSet().replace(ClrAsyncEnumerableConvention.Instance).simplify();
             planner.setRoot(planner.changeTraits(logical, desired));
 
-            return planner.findBestExp();
+            return ToCalc(planner.findBestExp());
+        }
+
+        /// <summary>
+        /// Turns whatever projections and filters survived the cost-based phase into calcs.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// This is Calcite's <c>Programs.CALC_PROGRAM</c>, and it is a pass <em>after</em> the planner
+        /// rather than rules given to it. That distinction is the whole of it:
+        /// <c>ClrAsyncEnumerableProject</c> throws when implemented — as
+        /// <c>EnumerableProject.implement()</c> does upstream, saying "EnumerableCalcRel is always
+        /// better" — and it is also the cheaper node, since <c>Calc</c>'s inherited cost counts one
+        /// unit per expression and <c>Project</c>'s does not. Handed to Volcano, the two compete and
+        /// the throwing one wins on cost. Run afterwards, there is no competition: every projection
+        /// left standing becomes a calc.
+        /// </para>
+        /// <para>
+        /// Invisible until there is a join, because until then every projection is pushed into the
+        /// container and none survives to be implemented.
+        /// </para>
+        /// </remarks>
+        static RelNode ToCalc(RelNode rel)
+        {
+            var program = new org.apache.calcite.plan.hep.HepProgramBuilder();
+
+            foreach (var rule in ClrAsyncEnumerableRules.CalcRules())
+                program.addRuleInstance(rule);
+
+            var hep = new org.apache.calcite.plan.hep.HepPlanner(program.build());
+            hep.setRoot(rel);
+
+            return hep.findBestExp();
         }
 
         async Task<List<object>> Execute(RelNode rel)
@@ -211,7 +229,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
                     """{"_MAP":{"id":"b"},"id":"b","_ts":1,"_etag":"e","category":"shoes"}""",
                 });
 
-            var plan = Plan("SELECT * FROM orders o JOIN products p ON o.id = p.id");
+            var plan = Plan("SELECT o.id, p.category FROM orders o JOIN products p ON o.id = p.id");
 
             var rows = await Execute(plan);
             rows.Should().HaveCount(2);
@@ -246,7 +264,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
                 },
                 products: new[] { """{"_MAP":{"id":"a"},"id":"a","_ts":1,"_etag":"e","category":"bikes"}""" });
 
-            var rows = await Execute(Plan("SELECT * FROM orders o JOIN products p ON o.id = p.id"));
+            var rows = await Execute(Plan("SELECT o.id, p.category FROM orders o JOIN products p ON o.id = p.id"));
 
             rows.Should().ContainSingle();
         }
@@ -260,7 +278,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
         {
             Given(orders: System.Array.Empty<string>(), products: new[] { """{"_MAP":{"id":"a"},"id":"a","_ts":1,"_etag":"e","category":"bikes"}""" });
 
-            var rows = await Execute(Plan("SELECT * FROM orders o JOIN products p ON o.id = p.id"));
+            var rows = await Execute(Plan("SELECT o.id, p.category FROM orders o JOIN products p ON o.id = p.id"));
 
             rows.Should().BeEmpty();
             _productsExecutor.Executed.Should().BeEmpty();
