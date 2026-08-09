@@ -1,4 +1,5 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 
 using Apache.Calcite.Cosmos.Adapter.Sql;
 
@@ -140,7 +141,10 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
             if (CosmosImplementor.TryBindOutput(filter.getInput(), out var fields) == false)
                 return (new List<RexNode>(), new List<RexNode>());
 
-            var translator = new CosmosRexTranslator(filter.getCluster().getRexBuilder(), fields, new CosmosParameterList());
+            var rexBuilder = filter.getCluster().getRexBuilder();
+            var translator = new CosmosRexTranslator(rexBuilder, fields, new CosmosParameterList());
+
+            var below = AlreadyApplied(filter.getInput());
 
             var conjuncts = org.apache.calcite.plan.RelOptUtil.conjunctions(filter.getCondition());
 
@@ -150,10 +154,191 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
             for (var i = 0; i < conjuncts.size(); i++)
             {
                 var conjunct = (RexNode)conjuncts.get(i);
-                (translator.TryTranslate(conjunct, out _) ? pushable : residual).Add(conjunct);
+
+                if (translator.TryTranslate(conjunct, out _))
+                {
+                    pushable.Add(conjunct);
+                    continue;
+                }
+
+                // Kept whatever happens: a weakening is a restriction the service can apply, not a
+                // replacement for the predicate, so the original is still rechecked above.
+                residual.Add(conjunct);
+
+                if (TryWeakenDisjunction(conjunct, translator, rexBuilder, CosmosImplementor.DefaultRootAlias) is RexNode weakened &&
+                    below.Contains(weakened.toString()) == false &&
+                    translator.TryTranslate(weakened, out _))
+                    pushable.Add(weakened);
             }
 
             return (pushable, residual);
+        }
+
+        /// <summary>
+        /// Determines whether an expression can tell an absent property from a present one.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// This is what decides whether a branch implies the paths it reads are defined. Measured
+        /// against a real account: a comparison on an absent property is <em>undefined</em> rather than
+        /// false, and <c>NOT undefined</c> is not true either — so neither <c>c.price &gt; 5</c> nor
+        /// <c>NOT (c.price &gt; 5)</c> matches a document without a <c>price</c>, and both therefore
+        /// imply the path is defined. Polarity does not come into it, which was the guess and was
+        /// wrong.
+        /// </para>
+        /// <para>
+        /// The <c>IS_*</c> family is different: each returns a real boolean for an absent path, so
+        /// <c>NOT IS_DEFINED(c.price)</c> is genuinely true there and implies the opposite of what is
+        /// wanted. Only <c>IS_DEFINED</c> was measured; the rest are refused with it, because they
+        /// answer the same kind of question and a branch using one is rare enough that the caution
+        /// costs nothing.
+        /// </para>
+        /// </remarks>
+        static bool ObservesAbsence(RexNode node)
+        {
+            if (node is not RexCall call)
+                return false;
+
+            if (CosmosOperators.IsAbsenceObserving(call.getOperator()))
+                return true;
+
+            var operands = call.getOperands();
+            for (var i = 0; i < operands.size(); i++)
+                if (ObservesAbsence((RexNode)operands.get(i)))
+                    return true;
+
+            return false;
+        }
+
+        /// <summary>
+        /// Collects the document paths an expression reads.
+        /// </summary>
+        /// <remarks>
+        /// The largest sub-expression that resolves wins, so <c>c.a.b</c> is collected rather than
+        /// <c>c.a</c> — the deeper path being defined is the stronger statement and is the one implied.
+        /// The root is skipped: every document is defined, so <c>IS_DEFINED(c)</c> restricts nothing.
+        /// </remarks>
+        static void CollectPaths(RexNode node, CosmosRexTranslator translator, string rootAlias, List<RexNode> paths)
+        {
+            if (translator.TryResolvePath(node, out var path) && path is not null)
+            {
+                if (path.ToString() != rootAlias)
+                    paths.Add(node);
+
+                return;
+            }
+
+            if (node is not RexCall call)
+                return;
+
+            var operands = call.getOperands();
+            for (var i = 0; i < operands.size(); i++)
+                CollectPaths((RexNode)operands.get(i), translator, rootAlias, paths);
+        }
+
+        /// <summary>
+        /// Returns something <paramref name="node"/> implies and Cosmos can evaluate, or <c>null</c>.
+        /// </summary>
+        static RexNode? TryWeaken(RexNode node, CosmosRexTranslator translator, RexBuilder rexBuilder, string rootAlias)
+        {
+            if (translator.TryTranslate(node, out _))
+                return node;
+
+            if (ObservesAbsence(node))
+                return null;
+
+            var paths = new List<RexNode>();
+            CollectPaths(node, translator, rootAlias, paths);
+
+            if (paths.Count == 0)
+                return null;
+
+            var terms = new java.util.ArrayList();
+            foreach (var path in paths)
+                terms.add(rexBuilder.makeCall(CosmosOperators.IsDefined, new[] { path }));
+
+            return RexUtil.composeConjunction(rexBuilder, terms);
+        }
+
+        /// <summary>
+        /// Weakens a disjunction into something the service can apply, or returns <c>null</c>.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Dropping a disjunct strengthens, so an <c>OR</c> is pushable only when every branch is. It
+        /// is still pushable when every branch can be <em>weakened</em>: each branch implies its own
+        /// weakening, so the disjunction implies the disjunction of them, and a restriction the plan
+        /// implies discards nothing the plan would have kept.
+        /// </para>
+        /// <para>
+        /// One branch with no weakening abandons the whole thing, since a disjunction is only as
+        /// restrictive as its loosest branch.
+        /// </para>
+        /// </remarks>
+        static RexNode? TryWeakenDisjunction(RexNode conjunct, CosmosRexTranslator translator, RexBuilder rexBuilder, string rootAlias)
+        {
+            var branches = org.apache.calcite.plan.RelOptUtil.disjunctions(conjunct);
+            if (branches.size() < 2)
+                return null;
+
+            var weakened = new java.util.ArrayList();
+
+            for (var i = 0; i < branches.size(); i++)
+            {
+                if (TryWeaken((RexNode)branches.get(i), translator, rexBuilder, rootAlias) is not RexNode branch)
+                    return null;
+
+                weakened.add(branch);
+            }
+
+            var result = RexUtil.composeDisjunction(rexBuilder, weakened);
+
+            // Nothing gained where every branch already rendered, since the conjunct was pushable then.
+            return result.toString() == conjunct.toString() ? null : result;
+        }
+
+        /// <summary>
+        /// Returns every conjunct any equivalent form of a subtree already applies.
+        /// </summary>
+        /// <remarks>
+        /// A weakening is derived from a conjunct that stays in the residual, and the residual is what
+        /// the rule matches on next time round — so without this the same weakening would be pushed
+        /// under itself for ever.
+        /// <para>
+        /// Every equivalent form, not the one the set happens to name: a Volcano input is a set of
+        /// equivalent expressions, and which of them <c>getOriginal</c> or <c>getBest</c> returns
+        /// depends on how far the planner has got. Reading the whole set is stable, because once a
+        /// weakening has been pushed the filter carrying it stays in the set.
+        /// </para>
+        /// </remarks>
+        static HashSet<string> AlreadyApplied(RelNode? node)
+        {
+            var applied = new HashSet<string>(StringComparer.Ordinal);
+
+            void Collect(RelNode? candidate)
+            {
+                if (candidate is not Filter filter)
+                    return;
+
+                var conjuncts = org.apache.calcite.plan.RelOptUtil.conjunctions(filter.getCondition());
+                for (var i = 0; i < conjuncts.size(); i++)
+                    applied.Add(((RexNode)conjuncts.get(i)).toString());
+            }
+
+            if (node is org.apache.calcite.plan.volcano.RelSubset subset)
+            {
+                var alternatives = subset.getRelList();
+                for (var i = 0; i < alternatives.size(); i++)
+                    Collect((RelNode)alternatives.get(i));
+
+                Collect(subset.getOriginal());
+            }
+            else
+            {
+                Collect(node);
+            }
+
+            return applied;
         }
 
         static RexNode Compose(RexBuilder rexBuilder, List<RexNode> conjuncts)

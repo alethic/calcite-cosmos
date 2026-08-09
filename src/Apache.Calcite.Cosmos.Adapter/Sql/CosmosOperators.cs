@@ -133,6 +133,37 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
             ]);
 
         /// <summary>
+        /// Determines whether an operator can tell an absent property from a present one.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// The <c>IS_*</c> family answers <em>about</em> a value, absence included, so each returns a
+        /// real boolean where a comparison would return undefined. That distinction is what decides
+        /// whether an expression implies the paths it reads are defined: measured against a real
+        /// account, neither <c>c.price &gt; 5</c> nor <c>NOT (c.price &gt; 5)</c> matches a document
+        /// without a <c>price</c>, while <c>NOT IS_DEFINED(c.price)</c> does.
+        /// </para>
+        /// <para>
+        /// Only <c>IS_DEFINED</c> was measured. The rest of the family is treated the same way because
+        /// they answer the same kind of question, and a predicate that uses one is rare enough that
+        /// the caution costs nothing worth measuring for.
+        /// </para>
+        /// </remarks>
+        /// <param name="op">The operator to classify.</param>
+        /// <returns><c>true</c> where the operator observes absence.</returns>
+        public static bool IsAbsenceObserving(SqlOperator? op)
+        {
+            if (op is null)
+                return false;
+
+            foreach (var candidate in new[] { IsDefined, IsArray, IsBool, IsNull, IsNumber, IsObject, IsPrimitive, IsString })
+                if (ReferenceEquals(op, candidate))
+                    return true;
+
+            return false;
+        }
+
+        /// <summary>
         /// Defines a scoring function, whose value ranks a row rather than describing it.
         /// </summary>
         /// <remarks>
