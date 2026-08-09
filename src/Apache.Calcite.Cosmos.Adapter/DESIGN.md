@@ -289,10 +289,13 @@ binding, and the distinction is worth stating: a projection of `UPPER(c.id)` alo
 the second still sortable, where clearing the whole binding declined every operator above it. An
 operator refuses only when it actually reads an unbound ordinal.
 
-> A rule may still fire where implementation then refuses. `CosmosSortRule` derives its bindings by
-> name from the sort's input row type, so above a projection it names paths that do not exist, finds
-> them resolvable, and converts; the refusal happens in `Implement`. That contradicts the rule
-> contract below and is a known defect, not a design decision.
+**A rule decides on the same binding implementation will use.** `CosmosImplementor.TryBindOutput`
+derives it by walking the input and mirroring each node's `Implement`; a node it does not know returns
+nothing and the rule declines. Deriving it from the input row type instead — which every rule used to
+do — reads a projection's aliases as document properties: `CosmosSortRule` would name `c.u` for a
+column called `u`, find it resolvable, convert, and leave the refusal to `Implement`, contrary to the
+rule contract below. Worse, it checked a multi-key sort against the container's composite indexes
+using those invented paths, so the legality answer was about paths the container does not have.
 
 `CosmosImplementor` accumulates:
 

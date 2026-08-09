@@ -345,27 +345,18 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
         }
 
         /// <remarks>
-        /// <para>
         /// The other half of the same rule: a sort that does read the computed column has nothing to
-        /// order by, Cosmos being unable to address a projection alias, so it is refused.
-        /// </para>
-        /// <para>
-        /// <b>It is refused at implementation, not at the rule</b>, which is a departure from what
-        /// <c>CosmosConverterRule</c> requires of its rules. <c>CosmosSortRule</c> derives
-        /// its bindings by name from the sort's input row type, so above this projection it invents the
-        /// paths <c>c.u</c> and <c>c.i</c> — neither of which exists — finds them resolvable, and fires.
-        /// The plan therefore builds and only rendering declines. The assertion is written against that
-        /// rather than against the intended behaviour, so it records what happens today.
-        /// </para>
+        /// order by, Cosmos being unable to address a projection alias, so it is refused — <b>at the
+        /// rule</b>, which is what <c>CosmosConverterRule</c> requires. The rule derives its binding by
+        /// walking the input rather than reading alias names off the input row type, so it declines here
+        /// for the same reason implementation would, and no plan is produced to render.
         /// </remarks>
         [TestMethod]
         public void SortOnAComputedColumnIsNotPushedDown()
         {
-            var best = PlanToCosmos("SELECT UPPER(c.\"id\") AS \"u\", c.\"id\" AS \"i\" FROM products AS c ORDER BY UPPER(c.\"id\")");
+            var act = () => PlanToCosmos("SELECT UPPER(c.\"id\") AS \"u\", c.\"id\" AS \"i\" FROM products AS c ORDER BY UPPER(c.\"id\")");
 
-            var act = () => Render(best);
-
-            act.Should().Throw<CosmosTranslationException>();
+            act.Should().Throw<Exception>();
         }
 
 

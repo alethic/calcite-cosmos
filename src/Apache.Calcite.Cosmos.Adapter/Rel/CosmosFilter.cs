@@ -66,7 +66,12 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
                 return cost;
 
             var container = convention.Container;
-            var fields = CosmosImplementor.BindFields(getInput().getRowType());
+
+            // Cost only, so an input whose binding cannot be derived costs as the base does rather than
+            // declining anything — but it is the walked binding, so the discount is decided on the paths
+            // the statement will actually address.
+            if (CosmosImplementor.TryBindOutput(getInput(), out var fields) == false)
+                return cost.multiplyBy(CosmosConvention.CostMultiplier);
 
             var multiplier = CosmosConvention.CostMultiplier;
 

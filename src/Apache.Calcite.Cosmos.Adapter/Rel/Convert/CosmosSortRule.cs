@@ -41,9 +41,17 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
         /// <summary>
         /// Determines whether a sort can be pushed into the given container.
         /// </summary>
+        /// <remarks>
+        /// The binding is derived by walking the input, not read off its row type by name. Above a
+        /// projection the names are aliases, and binding them by name invents paths the container does
+        /// not have — which let this rule fire on a sort key that implementation then refused, and, worse,
+        /// checked a multi-key sort against the composite indexes using paths like <c>/u</c>. Deciding on
+        /// the same binding implementation will use is what makes the answer here final.
+        /// </remarks>
         static bool IsSupported(CosmosConvention convention, Sort sort)
         {
-            var fields = CosmosImplementor.BindFields(sort.getInput().getRowType());
+            if (CosmosImplementor.TryBindOutput(sort.getInput(), out var fields) == false)
+                return false;
 
             if (CosmosSort.TryResolveSortKeys(sort.getCollation(), fields, sort.getInput().getRowType(), CosmosImplementor.DefaultRootAlias, out var keys, out _) == false)
                 return false;

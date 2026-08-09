@@ -1,4 +1,4 @@
-using Apache.Calcite.Cosmos.Adapter.Sql;
+﻿using Apache.Calcite.Cosmos.Adapter.Sql;
 
 using java.util.function;
 
@@ -89,7 +89,11 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
             if (correlate.getJoinType() != JoinRelType.INNER)
                 return false;
 
-            var fields = CosmosImplementor.BindFields(correlate.getLeft().getRowType());
+            // Walked rather than read off the left's row type: above a projection those names are
+            // aliases, and the array expression would resolve against paths the container has not got.
+            if (CosmosImplementor.TryBindOutput(correlate.getLeft(), out var fields) == false)
+                return false;
+
             var translator = new CosmosRexTranslator(correlate.getCluster().getRexBuilder(), fields, new CosmosParameterList());
 
             return translator.TryResolvePath(array, out _);

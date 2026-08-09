@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 
 using Apache.Calcite.Cosmos.Adapter.Sql;
 
@@ -111,11 +111,14 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
         /// </summary>
         /// <remarks>
         /// Each conjunct is tested on its own, against the same binding <see cref="CosmosFilterRule"/>
-        /// uses, so a conjunct this puts in the pushable half is one that rule would accept whole.
+        /// uses, so a conjunct this puts in the pushable half is one that rule would accept whole. An
+        /// input whose binding cannot be derived splits into nothing, and the rule does not fire.
         /// </remarks>
         static (List<RexNode> Pushable, List<RexNode> Residual) Split(Filter filter)
         {
-            var fields = CosmosImplementor.BindFields(filter.getInput().getRowType());
+            if (CosmosImplementor.TryBindOutput(filter.getInput(), out var fields) == false)
+                return (new List<RexNode>(), new List<RexNode>());
+
             var translator = new CosmosRexTranslator(filter.getCluster().getRexBuilder(), fields, new CosmosParameterList());
 
             var conjuncts = org.apache.calcite.plan.RelOptUtil.conjunctions(filter.getCondition());

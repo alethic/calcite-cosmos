@@ -6,6 +6,7 @@ using Apache.Calcite.Cosmos.Adapter.Rel;
 using Apache.Calcite.Cosmos.Adapter.Sql;
 
 using org.apache.calcite.rel;
+using org.apache.calcite.rel.core;
 using org.apache.calcite.rex;
 
 namespace Apache.Calcite.Cosmos.Adapter
@@ -95,6 +96,92 @@ namespace Apache.Calcite.Cosmos.Adapter
             }
 
             return paths;
+        }
+
+        /// <summary>
+        /// Derives the binding a node's <em>output</em> carries, by walking the subtree the way
+        /// implementation will.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <see cref="BindFields"/> answers from a row type alone, which is right only where the field
+        /// names are document properties — a scan, or anything above one that preserves the row type. It
+        /// is wrong above a projection, whose names are aliases: it invents <c>c.u</c> for a column
+        /// named <c>u</c>, and a rule deciding on invented paths can fire on a projection it cannot
+        /// render, or check a composite index against paths the container does not have.
+        /// </para>
+        /// <para>
+        /// This walks instead, and mirrors each node's own <c>Implement</c>: a scan binds its row type,
+        /// a filter and a sort pass the binding through, a projection rebinds to the paths its
+        /// expressions resolve to — <c>null</c> where one computes rather than addresses — and an array
+        /// traversal appends an unbound column for the element, which is what makes a sort on it decline
+        /// here exactly as it does there. A node it does not know returns <c>false</c>, and the caller
+        /// declines rather than guessing.
+        /// </para>
+        /// </remarks>
+        /// <param name="node">The node whose output binding is wanted.</param>
+        /// <param name="fields">On success, the binding indexed by field ordinal.</param>
+        /// <returns><c>true</c> if the binding could be derived; otherwise <c>false</c>.</returns>
+        public static bool TryBindOutput(RelNode? node, out IReadOnlyList<CosmosPath?> fields)
+        {
+            fields = Array.Empty<CosmosPath?>();
+
+            // In a Volcano plan an input is a set of equivalent expressions rather than one node. Any
+            // member binds the same way — they are equivalent — so the one the set was built from will
+            // do, and a set with none is not something to guess about.
+            if (node is org.apache.calcite.plan.volcano.RelSubset subset)
+                node = subset.getOriginal() ?? subset.getBest();
+
+            switch (node)
+            {
+                case null:
+                    return false;
+
+                case TableScan scan when scan.getTable()?.unwrap(typeof(CosmosTable)) is CosmosTable:
+                    fields = BindFields(scan.getRowType());
+                    return true;
+
+                // Neither changes the shape of a row, so neither changes what addresses it.
+                case Filter filter:
+                    return TryBindOutput(filter.getInput(), out fields);
+                case Sort sort:
+                    return TryBindOutput(sort.getInput(), out fields);
+
+                case Project project:
+                {
+                    if (TryBindOutput(project.getInput(), out var input) == false)
+                        return false;
+
+                    var translator = new CosmosRexTranslator(project.getCluster().getRexBuilder(), input, new CosmosParameterList());
+                    var projects = project.getProjects();
+                    var paths = new CosmosPath?[projects.size()];
+
+                    for (var i = 0; i < paths.Length; i++)
+                        paths[i] = translator.TryResolvePath((RexNode)projects.get(i), out var path) ? path : null;
+
+                    fields = paths;
+                    return true;
+                }
+
+                // An array traversal is a correlated join whose right side contributes the element. The
+                // element has no container-rooted path, and the service will not order by one, so it is
+                // left unbound rather than named.
+                case Correlate correlate:
+                {
+                    if (TryBindOutput(correlate.getLeft(), out var left) == false)
+                        return false;
+
+                    var paths = new CosmosPath?[correlate.getRowType().getFieldCount()];
+                    for (var i = 0; i < paths.Length; i++)
+                        paths[i] = i < left.Count ? left[i] : null;
+
+                    fields = paths;
+                    return true;
+                }
+
+                default:
+                    return false;
+            }
         }
 
         readonly RexBuilder _rexBuilder;

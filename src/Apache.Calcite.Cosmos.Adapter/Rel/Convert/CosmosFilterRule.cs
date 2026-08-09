@@ -24,13 +24,15 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
         /// Determines whether a filter's condition can be rendered as Cosmos SQL.
         /// </summary>
         /// <remarks>
-        /// Translation is attempted against a throwaway parameter list, using the binding derived
-        /// from the input row type. That binding is a pure function of the row type, so the answer
-        /// here matches what implementation will later produce.
+        /// Translation is attempted against a throwaway parameter list, using the binding derived by
+        /// walking the input. Deriving it from the input row type instead would read alias names as
+        /// document properties above a projection, and answer for paths the container does not have.
         /// </remarks>
         static bool IsTranslatable(Filter filter)
         {
-            var fields = CosmosImplementor.BindFields(filter.getInput().getRowType());
+            if (CosmosImplementor.TryBindOutput(filter.getInput(), out var fields) == false)
+                return false;
+
             var translator = new CosmosRexTranslator(filter.getCluster().getRexBuilder(), fields, new CosmosParameterList());
             return translator.TryTranslate(filter.getCondition(), out _);
         }
