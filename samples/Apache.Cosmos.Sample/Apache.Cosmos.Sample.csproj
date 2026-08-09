@@ -1,0 +1,41 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <TargetFramework>net8.0</TargetFramework>
+        <Nullable>enable</Nullable>
+        <ImplicitUsings>disable</ImplicitUsings>
+        <IsPackable>false</IsPackable>
+        <RootNamespace>Apache.Cosmos.Sample</RootNamespace>
+        <NoWarn>$(NoWarn);CS1591</NoWarn>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\..\src\Apache.Calcite.Cosmos.Adapter\Apache.Calcite.Cosmos.Adapter.csproj" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <!-- The ADO.NET provider: what turns a model into a DbConnection. -->
+        <PackageReference Include="Apache.Calcite.Data" Version="2.0.0-pre.1" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <!-- The second adapter, and the reason this sample is interesting: the join below spans two
+             engines rather than two schemas over one.
+
+             SQL Server through Apache.Calcite.Adapter.AdoNet was the first choice and does not work
+             today — its metadata read calls DbDataReader.GetInt32 on columns SQL Server types as
+             tinyint, so any query against a SQL Server table fails with an InvalidCastException from
+             Byte to Int32. See the README beside this file. -->
+        <PackageReference Include="IKVM" Version="8.15.0" />
+        <PackageReference Include="IKVM.Java.Extensions" Version="8.15.0" />
+        <PackageReference Include="IKVM.Maven.Sdk" Version="1.11.0">
+            <PrivateAssets>all</PrivateAssets>
+            <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+        </PackageReference>
+        <!-- Held at the version the adapter resolves core to, for the reason its own project file
+             gives: core and linq4j are not separable across versions. -->
+        <MavenReference Include="org.apache.calcite:calcite-csv" Version="1.42.0" />
+    </ItemGroup>
+
+</Project>
