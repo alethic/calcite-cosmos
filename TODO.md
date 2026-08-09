@@ -26,28 +26,34 @@ can answer; the suite runs against one when `COSMOS_TEST_ENDPOINT` and `COSMOS_T
 reports inconclusive rather than passing where the emulator cannot. Several facts in this file and in
 `DESIGN.md` were settled that way — an Azure account, used and deleted.
 
-Work is on `cosmos-dml`, branched from `main`. Everything before it merged as
-PR #2 and [PR #3](https://github.com/ikvmnet/calcite-cosmos/pull/3). The repository moved to the
-`ikvmnet` organization.
+Nothing is in flight: PRs #1 through #3, #5 (the DML work), #6 (any container on a lookup join's
+probe side) and #8 (dependencies) have all merged, so `main` is where the work is and a new branch
+starts from it. The repository moved to the `ikvmnet` organization.
 
 **Nothing is half-finished.** The lookup join, the disjunction weakening, the diagnostics surface, the
 statistics work, the Entra support and now `INSERT` and `DELETE` are complete and covered. What
 remains below is not started.
 
-**One thing here has not been built, and the next session should build it first.** The dependency
-update — Apache.Calcite to 2.0.0-pre.2, MSTest.Sdk to 4, Azure.Identity to 1.21.0, Spectre.Console to
-0.57.2, and the `EXPLAIN` rework the first of those allowed — was made in a container with no .NET SDK
-and no route to one, so every claim about it comes from reading package metadata rather than from a
-compile. What was checked that way: the whole public surface of Apache.Calcite pre.1 against pre.2,
-finding two removals and neither of them named here; `Assert.Inconclusive` is the only MSTest assertion
-this suite uses and it survives v4; `TestingPlatformShowTestsFailure` still exists in the testing
-platform v4 pins; `Color` moved to a new `Spectre.Console.Ansi` assembly but arrives transitively; and
-Azure.Identity 1.21.0 is a facade that forwards every type to `Azure.Core`. What that cannot tell
-anyone is whether it compiles and whether the sample now prints a physical plan. Two places to look
-first if something is wrong: the workflow's `dotnet test <dll> --logger:trx`, which is the VSTest
-command line and now needs the `Microsoft.NET.Test.Sdk` reference named in the test project because
-MSTest.Sdk 4 stopped supplying it; and `Explain` in the sample, which returns null on any exception
-and so would go quiet rather than fail loudly.
+**The dependencies are current**, as of [PR #8](https://github.com/ikvmnet/calcite-cosmos/pull/8):
+Apache.Calcite at 2.0.0-pre.2, MSTest.Sdk at 4, Azure.Identity at 1.21.0, Spectre.Console at 0.57.2,
+and the `EXPLAIN` rework the first of those allowed. Green on both frameworks across all five
+platforms, so the parts worth doubting are settled — it compiles, and the suite runs.
+
+Two of those carried a change that is not a version number, and both are worth knowing before
+touching them again:
+
+- **MSTest.Sdk 4 stopped referencing `Microsoft.NET.Test.Sdk` for every test application**, doing it
+  only under `UseVSTest`. The workflow hands `dotnet test` a built assembly with the trx logger and a
+  filter, which is the VSTest command line, so the test project names that reference itself. Removing
+  it means rewriting how CI invokes tests.
+- **Azure.Identity 1.21.0 is a facade.** Every type moved to `Azure.Core` behind `TypeForwardedTo`,
+  which is why the package is 18KB with no code of its own. Nothing here had to change, but a reader
+  wondering where `DefaultAzureCredential` went now knows.
+
+**What no build has checked is the sample**, which nothing in CI runs. `EXPLAIN PLAN FOR` on the
+asynchronous path should now print the physical tree, `CosmosLookupJoin` and all — but `Explain`
+returns null on any exception, so a failure there is silent and shows as a missing plan panel rather
+than as anything louder. Run it against the emulator and look for the tree before believing it.
 
 ### Running the sample
 
