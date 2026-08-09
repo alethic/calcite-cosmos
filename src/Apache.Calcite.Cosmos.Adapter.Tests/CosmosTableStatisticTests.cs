@@ -91,32 +91,45 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests
             table.getStatistic().getKeys().size().Should().Be(0);
         }
 
+        /// <remarks>
+        /// <para>
+        /// A composite index is <b>not</b> a collation, and reporting one was a defect. A statistic's
+        /// collations are the order a scan's rows already arrive in — <c>RelOptTableImpl</c> hands them
+        /// to <c>RelMdCollation</c> as the collation of the scan — so claiming one licences the planner
+        /// to drop a <c>Sort</c> that asked for exactly that order. Cosmos guarantees no order without
+        /// an <c>ORDER BY</c>, whatever is indexed.
+        /// </para>
+        /// <para>
+        /// What a composite index decides is whether a multi-key sort is <em>legal</em>, and that
+        /// question belongs to the rule that pushes the sort — where
+        /// <c>CosmosContainerMetadata.IsSortSupported</c> answers it. Calcite's Cassandra adapter puts
+        /// its clustering order in the rule for the same reason, and that really is the storage order.
+        /// </para>
+        /// </remarks>
         [TestMethod]
-        public void CompositeIndexOverPromotedColumnsBecomesACollation()
+        public void ACompositeIndexIsNotACollation()
         {
-            var table = new CosmosTable(new CosmosContainerMetadata(
+            var container = new CosmosContainerMetadata(
                 "products",
                 new[] { "/category" },
-                new[] { Index(("/id", false), ("/_ts", true)) }));
+                new[] { Index(("/id", false), ("/_ts", true)) });
 
-            var collations = table.getStatistic().getCollations();
-            collations.size().Should().Be(1);
+            new CosmosTable(container).getStatistic().getCollations().size().Should().Be(0);
 
-            var fields = ((RelCollation)collations.get(0)).getFieldCollations();
-            fields.size().Should().Be(2);
-
-            ((RelFieldCollation)fields.get(0)).getFieldIndex().Should().Be(1);
-            ((RelFieldCollation)fields.get(0)).getDirection().Should().Be(RelFieldCollation.Direction.ASCENDING);
-            ((RelFieldCollation)fields.get(1)).getFieldIndex().Should().Be(2);
-            ((RelFieldCollation)fields.get(1)).getDirection().Should().Be(RelFieldCollation.Direction.DESCENDING);
+            // And is still what decides whether such a sort may be pushed.
+            container.IsSortSupported(new[]
+            {
+                new CosmosSortKey("/id", false),
+                new CosmosSortKey("/_ts", true),
+            }).Should().BeTrue();
         }
 
         /// <remarks>
-        /// A composite index over a path inside the map column names nothing the planner can
-        /// address, so it contributes no collation even though it remains valid for the sort guard.
+        /// A composite index over a path inside the map column names nothing the planner can address,
+        /// and remains valid for the sort guard regardless.
         /// </remarks>
         [TestMethod]
-        public void CompositeIndexOverUnpromotedPathsContributesNoCollation()
+        public void CompositeIndexOverUnpromotedPathsIsStillUsableForTheSortGuard()
         {
             var container = new CosmosContainerMetadata(
                 "products",

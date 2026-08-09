@@ -198,7 +198,6 @@ namespace Apache.Calcite.Cosmos.Adapter
         public override Statistic getStatistic()
         {
             var keys = new java.util.ArrayList();
-            var collations = new java.util.ArrayList();
 
             var partitionOrdinals = new java.util.ArrayList();
             var partitionPromoted = _container.PartitionKeyPaths.Count > 0;
@@ -226,30 +225,17 @@ namespace Apache.Calcite.Cosmos.Adapter
                 }
             }
 
-            // A composite index guarantees an ordering only when every one of its paths is a
-            // column the planner can name.
-            foreach (var index in _container.CompositeIndexes)
-            {
-                var fields = new java.util.ArrayList();
-                var usable = true;
-
-                foreach (var path in index.Paths)
-                {
-                    var ordinal = GetColumnOrdinal(path.Path);
-                    if (ordinal < 0)
-                    {
-                        usable = false;
-                        break;
-                    }
-
-                    fields.add(new RelFieldCollation(
-                        ordinal,
-                        path.Descending ? RelFieldCollation.Direction.DESCENDING : RelFieldCollation.Direction.ASCENDING));
-                }
-
-                if (usable)
-                    collations.add(RelCollations.of(fields));
-            }
+            // NO COLLATIONS ARE REPORTED, and a composite index is not one.
+            //
+            // A statistic's collations are the order a scan's rows already arrive in —
+            // RelOptTableImpl.getCollationList returns them and RelMdCollation reports them as the
+            // collation of the scan — so claiming one licences the planner to drop a Sort that asked
+            // for it. Cosmos guarantees no order without an ORDER BY, whatever is indexed: a composite
+            // index makes a multi-key ORDER BY *legal*, it does not sort a query that has none.
+            //
+            // That legality is a question for the rule that decides whether the sort may be pushed, and
+            // CosmosSortRule already asks it through CosmosContainerMetadata.IsSortSupported. Cassandra
+            // does the same with its clustering order, which unlike this really is the storage order.
 
             // A row count where the service gave one. It is approximate and lags, which is what a
             // planner row count is allowed to be; what it must not be is invented, and this is read
@@ -258,7 +244,7 @@ namespace Apache.Calcite.Cosmos.Adapter
                 ? java.lang.Double.valueOf(statistics.DocumentCount)
                 : null;
 
-            return Statistics.of(rowCount, keys, java.util.Collections.emptyList(), collations);
+            return Statistics.of(rowCount, keys, java.util.Collections.emptyList(), java.util.Collections.emptyList());
         }
 
         /// <inheritdoc />

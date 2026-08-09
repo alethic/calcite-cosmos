@@ -751,6 +751,29 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             query.PointReadId.Should().BeNull();
         }
 
+
+        // ── What the table claims about ordering ──────────────────────────────────
+
+        /// <remarks>
+        /// A probe, not a specification. RelOptTableImpl.getCollationList returns the statistic's
+        /// collations, and RelMdCollation reports them as the collation <em>of a scan</em> — that is,
+        /// the order rows already arrive in. Whether the planner is being told that is what this asks.
+        /// </remarks>
+        [TestMethod]
+        public void AScanIsNotClaimedToBeSorted()
+        {
+            var best = PlanToCosmos("SELECT * FROM products");
+            var mq = best.getCluster().getMetadataQuery();
+
+            var collations = mq.collations(best);
+
+            // The container declares a composite index over (/id, /_ts). An index permits an ORDER BY;
+            // it does not order a query that has none, and Cosmos guarantees no order without one. A
+            // scan claiming a collation would licence the planner to drop a Sort that asked for it.
+            collations.Should().NotBeNull();
+            collations.size().Should().Be(0, "a Cosmos scan returns rows in no guaranteed order");
+        }
+
     }
 
 }

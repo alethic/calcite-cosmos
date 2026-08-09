@@ -451,6 +451,24 @@ The scoring functions are in the operator table so a query can name them, and th
 them through `TranslateRank` alone; everywhere else is a place the service rejects them, so a `WHERE`
 or a select list containing one declines.
 
+### What a table tells the planner
+
+`getStatistic` reports **keys** derived from declared facts, and a **row count** where the service was
+asked for one. It reports **no collations**, and that absence is the point.
+
+A statistic's collations are the order a scan's rows *already arrive in* — `RelOptTableImpl`
+hands them to `RelMdCollation` as the collation of the scan. Reporting a composite index there claims
+a Cosmos scan comes back sorted, which licences the planner to drop a `Sort` asking for exactly that
+order. It does not: Cosmos guarantees no order without an `ORDER BY`, whatever is indexed. This was
+reported for a while, and a probe of `mq.collations(scan)` showed the planner being told a bare scan
+was ordered by `(id, _ts)`.
+
+What a composite index decides is whether a multi-key `ORDER BY` is **legal**, and that question
+belongs to the rule that pushes the sort, where `CosmosContainerMetadata.IsSortSupported` answers it.
+Calcite's own adapters agree: Cassandra keeps its clustering order on the table for its rules to read
+and does not implement `getStatistic` at all — and a Cassandra clustering order genuinely *is* the
+storage order, which a Cosmos composite index is not.
+
 ### Reading a value back
 
 A row arrives as one JSON value and `CosmosJson` reads it into the representation Calcite holds that
