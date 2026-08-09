@@ -243,15 +243,26 @@ namespace Apache.Cosmos.Sample
         /// </remarks>
         /// <remarks>
         /// <para>
-        /// Anything touching Cosmos gets the logical plan, and the reason is worth knowing. An
-        /// <c>EXPLAIN</c> never reaches the service, so the provider prepares it in the synchronous
-        /// convention — and a query over a Cosmos table plans only in the asynchronous one, because the
-        /// SDK has no synchronous data-plane API. The physical plan is refused with "not enough rules
-        /// to produce a node with desired properties: convention=CLR_ENUMERABLE".
+        /// Anything touching Cosmos gets the logical plan, and the reason is a corner the provider has
+        /// not got an answer for. The convention a statement is planned into follows the method used to
+        /// run it — <c>ExecuteReader</c> asks for <c>ClrEnumerableConvention</c> and
+        /// <c>ExecuteReaderAsync</c> for <c>ClrAsyncEnumerableConvention</c> — and neither works here:
         /// </para>
+        /// <list type="bullet">
+        /// <item><description>
+        /// Read asynchronously, the <c>EXPLAIN</c> is refused, because its own result is the plan text —
+        /// a constant relation, not an asynchronous node.
+        /// </description></item>
+        /// <item><description>
+        /// Read synchronously, the <em>explained</em> query is planned into the synchronous convention,
+        /// which a Cosmos table has no converter into. "Not enough rules to produce a node with desired
+        /// properties: convention=CLR_ENUMERABLE."
+        /// </description></item>
+        /// </list>
         /// <para>
-        /// So the logical plan shows the shape, and the statement printed after each result shows what
-        /// the physical plan did with it — which for a join is the more telling of the two anyway.
+        /// <c>WITHOUT IMPLEMENTATION</c> asks for no physical plan and so needs no convention, which is
+        /// why it is the fallback rather than the first choice. The statement printed after each result
+        /// is what the physical plan did — for a join, the more telling artefact anyway.
         /// </para>
         /// </remarks>
         static (string Plan, string Kind)? Explain(DbConnection connection, string sql)
@@ -277,10 +288,8 @@ namespace Apache.Cosmos.Sample
                 using var command = connection.CreateCommand();
                 command.CommandText = statement;
 
-                // Read synchronously, and that is not an oversight. A query over a Cosmos table plans
-                // only in the asynchronous convention, because the SDK has no synchronous data-plane
-                // API — but an EXPLAIN never reaches the service. Its rows are the plan itself, so it
-                // is prepared synchronously and asking for it asynchronously is refused.
+                // Synchronously, because an EXPLAIN read asynchronously is refused: its rows are the
+                // plan text rather than anything an asynchronous plan produces.
                 using var reader = command.ExecuteReader();
 
                 var lines = new List<string>();
