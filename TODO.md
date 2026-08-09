@@ -222,46 +222,57 @@ whose encoding the service defines. Pushing a temporal function down means decid
 
 ## 5. Planner
 
-### Half a join — *parked; no adapter in the tree is built this way*
+### Half a join, as a lookup join — *large, highest value after the point lookup*
 
 A relational join is not expressible in Cosmos, so both sides are read whole and joined in process.
-One side could pay for the other: evaluate `other`, collect the distinct values of its key, and push
-`cosmos.k IN (…)` into the Cosmos side. The reference points the same way from the other end — its
-documented workaround for a join is to inline a literal array of reference data.
+One side can pay for the other: take the join keys of the build side and fetch only the documents that
+could match. The reference points the same way from the other end — its documented workaround for a
+join is to inline a literal array of reference data.
 
 **Sound for the same reason partial filter pushdown is.** Every row surviving the join satisfies
-`k IN (values)`, so the pushed predicate is implied by the join condition and can only discard rows
-that would not have joined.
+`k IN (values)`, so the restriction is implied by the join condition and can only discard rows that
+would not have joined.
 
-**But it has no precedent among storage adapters, and that is the finding.** Searching
-`apache/calcite` for `RexCorrelVariable`, the only adapter that handles one is the JDBC adapter, via
-`JdbcImplementor` and `SqlImplementor` — and that is a special case, because it emits SQL to another
-SQL engine and can express a correlated subquery natively. Cassandra, MongoDB, Elasticsearch, Geode
-and Druid do not touch correlation variables at all. `RexFieldAccess` appears in adapter code only in
-`RexToLixTranslator`, which is the in-process code generator rather than a pushdown path. What every
-storage adapter does about a join is nothing: read both sides, let Calcite join them.
+**The precedent is out of tree, and it is Flink's lookup join.** No in-tree storage adapter does
+anything with a join — Cassandra, MongoDB, Elasticsearch, Geode and Druid read both sides and let
+Calcite join them, and the only in-tree adapter that touches `RexCorrelVariable` is JDBC, which can
+express a correlated subquery natively in SQL.
 
-What it would take, recorded so the shape is not re-derived:
+Flink's shape is the one to copy, and the important part is what it does *not* do:
 
-- **The restriction is a run-time value**, so no rule can write it. Calcite's plan-level stand-in for
-  one is a correlation variable, and `EnumerableBatchNestedLoopJoin` — mirrored as
-  `ClrAsyncEnumerableBatchNestedLoopJoin` — already rewrites a join into exactly the right shape,
-  with the batch's values as a disjunction over the right input. The filter it adds is evaluated in
-  process; pushing it into the source is the part nothing does.
-- **Rendering one needs a value at execution.** In the CLR conventions the variable is a linq4j local
-  in generated code, and the bridge to `System.Linq.Expressions` (`LixToClrTranslator`,
-  `IClrRelImplementor`) is internal to `Apache.Calcite.Extensions` — so an out-of-tree adapter cannot
-  read one without an addition there.
-- **The alternative is owning the join**, which no adapter does, and which means owning INNER, LEFT,
-  SEMI and ANTI semantics rather than borrowing them.
+- The correlation variable is a **planner-level device only**. `LogicalCorrelate` is what the rules
+  match, and `LogicalCorrelateToJoinFromTemporalTableRule` rewrites it away — its `decorrelate()`
+  rewrites every `RexCorrelVariable` reference as a `RexInputRef` against the combined row type. No
+  correlation variable survives into a physical node, which is why no adapter ever renders one.
+- The planner tells the source **which** key fields at plan time, as ordinals, through
+  `LookupTableSource.LookupContext.getKeys()`.
+- The runtime hands over **plain values**: `CompletableFuture<Collection<RowData>> asyncLookup(RowData
+  keyRow)`. There is nothing to translate, and nothing reads generated code.
 
-Two things that would have made it worth the weight are also out of reach on the correlated route,
-and are the reason to revisit only with a different design: the values cannot be deduped, and the
-pushed key cannot pin the partition key, which is what would have collapsed a fan-out into a handful
-of single-partition reads.
+So the work here is a rule, a node, and a runtime call of the shape the converter already emits:
 
-Calcite calls the general shape sideways information passing; the same machinery would serve
-`IN (subquery)`.
+- **`CosmosLookupJoinRule`** matches a join whose probe side is a Cosmos subtree and whose condition is
+  a conjunction of equalities between a build-side field and a path Cosmos can address. It records the
+  key ordinals and consumes the join.
+- **`CosmosLookupJoin`** is a `ClrAsyncEnumerableRel` over the build side, holding the Cosmos subtree's
+  statement. Its `Implement` emits one `Expression.Call`, which is what
+  `CosmosToClrAsyncEnumerableConverter` already does.
+- **The runtime** batches build rows, dedupes the keys, and fetches. Async throughout, which
+  `ICosmosQueryExecutor` already is.
+
+Two things this shape reaches that a rendered correlated predicate could not, and they are the reason
+it is worth the weight:
+
+- **Deduping.** The keys are data at that point, not a predicate, so a hundred build rows over ten
+  distinct keys fetch ten.
+- **The partition key.** If the key *is* the partition key, each batch routes to its partitions
+  instead of fanning out; and where the key is `id` together with a complete partition key, this is
+  `ReadManyItemsAsync` — a genuine batch point read, not a query at all. See *batch point reads*.
+
+Open question worth measuring rather than assuming: whether `c.k IN (@b0, …, @bn)` and
+`ARRAY_CONTAINS(@keys, c.k)` are both served by the index. The second takes one parameter for a
+variable-length batch and needs no padding; the first is the form the service documents for index
+usage. `PopulateIndexMetrics` now answers this against a real account.
 
 ### Weakening a disjunction — *medium*
 
