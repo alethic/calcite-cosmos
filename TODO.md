@@ -115,11 +115,10 @@ nothing exercised the model path.
 Everything small is done. Each of these is larger, and each has a stated prerequisite rather than an
 open question:
 
-1. **Declared columns** (section 6) — the keystone, found while sizing `UPDATE`: every `SET` target
-   the current row model can name is unpatchable, so `UPDATE` as a patch (section 3), the
-   nullable-aggregate rewrite (section 5) and a temporal basis (section 4) all wait on typed,
-   caller-declared columns existing at all. Design first — the questions are listed in section 6 —
-   then the promotion is mechanical.
+1. **The declared-columns decision** (section 6) — not work but a call to make, and three items
+   queue behind it: the `UPDATE` patch tier, the nullable-aggregate rewrite, and a temporal basis.
+   The implementation is parked on `declared-columns-parked`; the design is in `DESIGN.md` under
+   *Declared columns* on that branch.
 2. **Shuffle the build side by partition key** (section 11) — the biggest remaining win for the lookup
    join, but measure first: routing per key means one request per distinct key, and whether that beats
    one cross-partition query depends on key count against partition count. Grouping by feed range is
@@ -314,21 +313,19 @@ Still open: the whole-partition case. A predicate pinning only the partition key
 `DeleteAllItemsByPartitionKeyStreamAsync`, which is not a query at all — `SupportsDeletePushDown` in
 section 11.
 
-### `UPDATE` — *large, and blocked on declared columns*
+### `UPDATE` — *replace is done; the patch tier waits on declared columns*
 
-Cosmos has patch operations (`PatchItemAsync`) that map onto a targeted `SET`, and the planner
-already hands over what a patch needs — `updateColumnList` and `sourceExpressionList`, named columns
-and their new values, separately from the rows.
+`SET "_MAP" = …` — whole-document assignment, which is what SQL's whole-value semantics say — now
+executes as a replace: the scan identifies the target, the trailing `SET` value is the new
+document, and a `SET` naming `id` or a partition key column is declined at planning, identity and
+placement not being the statement's to change. The design ladder — replace, patch, static
+decomposition via a mutation operator, and the diff/blind-patch optimizations — is recorded in
+`DESIGN.md` under *Updating*.
 
-**Sized up, and the question this entry used to pose answered itself by enumeration** — recorded in
-`DESIGN.md` under *Updating*. A `SET` target is a table column, and every column the row model has
-is unpatchable: `_MAP` is the whole document, which a patch has no operation for; `id` is identity
-and the partition key is placement, both of which the service forbids patching; `_ts` and `_etag`
-are validator-refused already. The example plan this entry showed — `SET category` — sets the
-partition key. So there is no translation to write until the row model has plain document columns,
-which is *declared columns* (section 6), and `UPDATE` stays declined outright until then — the right
-answer for a statement the adapter cannot carry out. The null-write and no-`If-Match` decisions are
-recorded in `DESIGN.md` so the eventual implementation inherits them.
+What remains is the cheap tier: a targeted `SET` of a plain document property as `PatchItemAsync`.
+Its targets are declared columns, which are designed, built, and **parked on
+`declared-columns-parked` pending the owner's decision** — the patch tier is one rule-and-writer
+step once that lands.
 
 ### Transactional batch — *medium*
 
@@ -536,19 +533,14 @@ declined.
 
 ## 6. Row model and types
 
-- **Declared columns — *large, and the keystone*.** A caller-declared, typed document path promoted
-  to a real column: name, path, SQL type, nullability, supplied through the schema operands the way
-  everything else caller-declared arrives. Not inference — the adapter's rule is against *sampling*,
-  and a declaration is the same kind of trusted fact as a partition key path. Three blocked items
-  converge on this, which is what makes it the keystone rather than one feature's prerequisite:
-  every `UPDATE … SET` target the current row model can name is unpatchable (section 3, and the
-  enumeration in `DESIGN.md` under *Updating*), the nullable-aggregate argument rewrite is
-  type-directed and has no typed column to fire on (section 5), and a temporal mapping needs a
-  declared basis for what a column holds (section 4). Design questions to settle in `DESIGN.md`
-  first: the operand shape; what a declared column means to `INSERT` (a strategy, presumably
-  `NULLABLE`); whether a declared path may be nested, which the promoted-column binding currently
-  cannot carry; and what happens when the data disagrees with the declaration, which is the
-  materializer's existing problem but arrives with sharper edges once the type licenses rewrites.
+- **Declared columns — *built, and parked pending the owner's decision*.** A caller-declared, typed
+  document path promoted to a real column, via a `columns` operand — trusted the way a partition
+  key path is, never inferred. Three items converge on it: the `UPDATE` patch tier (section 3), the
+  nullable-aggregate rewrite (section 5), and a temporal basis (section 4). The implementation —
+  operand, metadata, row typing, the `CAST`-folding the typed columns forced, and tests — sits on
+  the `declared-columns-parked` branch, held there deliberately: it is a new public surface, and
+  whether the adapter should have it, and in this shape, is the owner's call. Take the branch, ask
+  for a different shape, or drop it; nothing else depends on it yet.
 - **Type coverage** — done and verified against a live account: strings, whole and fractional numbers,
   booleans, nulls, objects, arrays, to arbitrary depth, as declared types and as `ANY`.
 - **Binary** — *small.* `BINARY`/`VARBINARY` read base64 from a JSON string. Unverified against the

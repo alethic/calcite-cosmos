@@ -45,6 +45,17 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
         /// <exception cref="CosmosExecutionException">The service refused the request.</exception>
         Task<bool> DeleteItemAsync(string id, PartitionKey partitionKey, CancellationToken cancellationToken = default);
 
+        /// <summary>
+        /// Replaces a document.
+        /// </summary>
+        /// <param name="document">The new document, as UTF-8 JSON.</param>
+        /// <param name="id">The <c>id</c> of the document being replaced.</param>
+        /// <param name="partitionKey">The partition key the document belongs to.</param>
+        /// <param name="cancellationToken">Cancels the request.</param>
+        /// <returns><c>true</c> if a document was replaced, <c>false</c> if there was none to replace.</returns>
+        /// <exception cref="CosmosExecutionException">The service refused the request.</exception>
+        Task<bool> ReplaceItemAsync(byte[] document, string id, PartitionKey partitionKey, CancellationToken cancellationToken = default);
+
     }
 
 }

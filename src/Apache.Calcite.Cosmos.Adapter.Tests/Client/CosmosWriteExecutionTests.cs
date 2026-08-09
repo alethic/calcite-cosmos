@@ -138,10 +138,24 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
         /// <summary>
         /// Runs the write the way a compiled plan does.
         /// </summary>
-        static async Task<long> Write(CosmosWriteOperation operation, params object?[][] rows)
+        static Task<long> Write(CosmosWriteOperation operation, params object?[][] rows) =>
+            Run(operation, null, rows);
+
+        /// <summary>
+        /// Runs an update, whose rows trail one value per <paramref name="updates"/> entry.
+        /// </summary>
+        /// <remarks>
+        /// A separate name rather than an overload: an insert row of strings and nulls converts to
+        /// <c>string[]</c>, and an overload taking the update columns first would capture it —
+        /// leaving no rows, which is how that was found.
+        /// </remarks>
+        static Task<long> WriteSets(string[] updates, params object?[][] rows) =>
+            Run(CosmosWriteOperation.Update, updates, rows);
+
+        static async Task<long> Run(CosmosWriteOperation operation, string[]? updates, object?[][] rows)
         {
             var writer = new CosmosQueryExecutor(Container());
-            var write = new CosmosWrite(operation, Columns, PartitionKeyPaths);
+            var write = new CosmosWrite(operation, Columns, PartitionKeyPaths, updates);
 
             await foreach (var count in CosmosSequences.WriteAsync<object?[], long>(Rows(rows), writer, write, r => r!, c => c))
                 return count;
@@ -188,6 +202,50 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
 
             written.Should().NotBeNull();
             written!.Value.GetProperty("category").GetString().Should().Be("shoes");
+        }
+
+        /// <summary>
+        /// The replace path end to end: the old row identifies the document, the trailing
+        /// <c>SET</c> value is the new map, and the result is the new document.
+        /// </summary>
+        /// <remarks>
+        /// The row is the shape the planner produces for <c>UPDATE … SET "_MAP" = …</c> — the
+        /// table's columns holding what the scan read, then one trailing value per <c>SET</c>
+        /// column. A property present in the old document and absent from the new map is gone
+        /// afterwards, which is what distinguishes a replace from a merge.
+        /// </remarks>
+        [TestMethod]
+        public async Task UpdateOfTheMapReplacesTheDocument()
+        {
+            await Write(CosmosWriteOperation.Insert,
+                [Map("id", "u1", "category", "bikes", "price", java.lang.Long.valueOf(10), "old", "yes"), null, null, null, null]);
+
+            var count = await WriteSets(["_MAP"],
+                [Map("id", "u1", "category", "bikes", "price", java.lang.Long.valueOf(10), "old", "yes"), "u1", null, null, "bikes",
+                 Map("id", "u1", "category", "bikes", "price", java.lang.Long.valueOf(25), "note", "replaced")]);
+
+            count.Should().Be(1);
+
+            var written = await Read("u1", new PartitionKey("bikes"));
+
+            written.Should().NotBeNull();
+            written!.Value.GetProperty("price").GetInt64().Should().Be(25);
+            written!.Value.GetProperty("note").GetString().Should().Be("replaced");
+            written!.Value.TryGetProperty("old", out _).Should().BeFalse("a replace is not a merge");
+        }
+
+        /// <summary>
+        /// A document gone by the time the replace arrives was deleted by someone else, and a
+        /// smaller count is the honest answer — the same stance the delete takes.
+        /// </summary>
+        [TestMethod]
+        public async Task UpdateOfAMissingDocumentCountsNothing()
+        {
+            var count = await WriteSets(["_MAP"],
+                [Map("id", "u-missing", "category", "bikes"), "u-missing", null, null, "bikes",
+                 Map("id", "u-missing", "category", "bikes", "price", java.lang.Long.valueOf(1))]);
+
+            count.Should().Be(0);
         }
 
         /// <summary>

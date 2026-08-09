@@ -231,13 +231,14 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
         }
 
         /// <summary>
-        /// What an <c>UPDATE</c> would have to work from, recorded against the day it is implemented.
+        /// What an <c>UPDATE</c> works from: the named columns and their new values arrive separately
+        /// from the rows, trailing the table's own columns.
         /// </summary>
         /// <remarks>
-        /// The named columns and their new values arrive separately from the rows, which is exactly the
-        /// input <c>PatchItemAsync</c> takes. Nothing consumes this yet — <see cref="UpdateIsDeclined"/>
-        /// is the current behaviour — but the shape is what makes patch the obvious implementation
-        /// rather than a read-modify-write.
+        /// This is the shape <see cref="CosmosTableModify"/> consumes — the table columns hold what
+        /// the scan read, and the trailing expressions hold each <c>SET</c> value — and it is also
+        /// what would make a patch implementation possible; see <c>DESIGN.md</c> under
+        /// <em>Updating</em>.
         /// </remarks>
         [TestMethod]
         public void UpdateCarriesItsSetListSeparatelyFromTheRows()
@@ -296,17 +297,47 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
         }
 
         /// <summary>
-        /// An <c>UPDATE</c> has no implementation, and the plan fails rather than doing something else.
+        /// An <c>UPDATE</c> of the map column is a whole-document assignment, carried as a replace.
         /// </summary>
         /// <remarks>
-        /// The right failure for a statement the adapter cannot carry out. A replace standing in for a
-        /// patch would work and would silently cost a read-modify-write per row, which is the kind of
-        /// substitution that is only discovered on a bill.
+        /// SQL assigns whole values to named columns, and the map column is the document — so the
+        /// statement means "the document becomes this expression of the old one", and a replace is
+        /// that, priced as what it is. The rows arrive from the scan the plan shows, exactly as a
+        /// <c>DELETE</c>'s do.
         /// </remarks>
         [TestMethod]
-        public void UpdateIsDeclined()
+        public void UpdateOfTheMapColumnIsSelectedAsAReplace()
+        {
+            var modify = Find<CosmosTableModify>(Plan("UPDATE products SET \"_MAP\" = \"_MAP\" WHERE \"id\" = 'y'"));
+
+            modify.Should().NotBeNull();
+            modify!.Write.Should().Be(CosmosWriteOperation.Update);
+        }
+
+        /// <summary>
+        /// A <c>SET</c> naming a partition key column is declined: placement is not the statement's
+        /// to change, and the service forbids it on an existing document.
+        /// </summary>
+        /// <remarks>
+        /// Declined at planning, where the refusal is a plan that fails, rather than at the service,
+        /// where it would be a request that fails per row. Moving a document is a delete and a
+        /// create, which is a different statement.
+        /// </remarks>
+        [TestMethod]
+        public void UpdateOfThePartitionKeyIsDeclined()
         {
             var act = () => Plan("UPDATE products SET \"category\" = 'x' WHERE \"id\" = 'y'");
+
+            act.Should().Throw<java.lang.Throwable>();
+        }
+
+        /// <summary>
+        /// A <c>SET</c> naming <c>id</c> is declined for the same reason: identity is not a property.
+        /// </summary>
+        [TestMethod]
+        public void UpdateOfIdIsDeclined()
+        {
+            var act = () => Plan("UPDATE products SET \"id\" = 'z' WHERE \"id\" = 'y'");
 
             act.Should().Throw<java.lang.Throwable>();
         }

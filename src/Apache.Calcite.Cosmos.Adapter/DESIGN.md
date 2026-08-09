@@ -885,41 +885,57 @@ never shows it, its input being a scan, which claims no collation at all.
 
 ### Updating
 
-`UPDATE` is not implemented. The shape is recorded because the planner already supplies what it needs:
-the node carries `updateColumnList` and `sourceExpressionList`, which is a list of named columns and
-their new values — exactly the input `PatchItemAsync` wants, and far cheaper than the
-read-modify-write a replace would be.
+**SQL fixes the *what*; the adapter owns the *how*.** An `UPDATE` assigns whole values to named
+columns, computed from the old row — there is no sub-path assignment in the grammar — and the
+planner hands over the finished story: `updateColumnList`, `sourceExpressionList`, and the scanned
+rows to evaluate them against. Any execution that lands that result is legitimate, chosen by cost.
+That gives a ladder:
 
-**Decided: every `SET` target the current row model can name must be refused, so `UPDATE` waits on
-declared columns rather than on translation work.** The finding is an enumeration, not a judgment
-call. A `SET` target is a table column, and the columns are the map column, `id`, `_ts`, `_etag`,
-and the promoted partition key paths. Walking them:
+1. **Replace — implemented.** `SET "_MAP" = …` is whole-document assignment by its own words, and
+   `ReplaceItemAsync` is that operation, priced as what it is. Not a stand-in for a patch: when the
+   named column is the document, replacing the document is the faithful reading. The read this
+   requires is the scan the plan already shows — the same argument recorded for deleting — and
+   where the predicate pins `id` and a complete partition key that scan is already a point read.
+2. **Patch for targeted `SET`s — waits on a decision.** A `SET` of a plain document property is
+   `PatchItemAsync`'s native input, far cheaper than a replace. But no such column exists yet: the
+   row model's columns are all identity, placement, service bookkeeping, or the document itself
+   (the enumeration below). *Declared columns* — caller-declared, typed paths promoted to real
+   columns — would be the targets; they are designed and parked on the `declared-columns-parked`
+   branch pending the owner's decision.
+3. **Static decomposition — future.** A mutation operator in the Cosmos table (`JSON_SET`-style,
+   the way JSON-column databases spell copy-and-modify) would let a rule read patch operations
+   straight off a `SET "_MAP" = JSON_SET(…)` expression at plan time.
+4. **Optimizations, recorded not built.** A runtime diff of old against new document into patch
+   operations is only equivalent to a replace under `If-Match`, and is bounded by the ten-operation
+   patch limit; a *blind* patch — no read at all — is possible exactly when the predicate pins
+   `id` plus the full key and every `SET` value is a literal.
 
-- `SET "_MAP" = …` replaces the whole document, which a patch has no operation for. A replace
-  standing in would silently cost a read-modify-write per row and behaves differently under
-  concurrent writers — a different statement, not a different spelling.
-- `SET "id" = …` renames a document's identity, which the service forbids patching — a new identity
-  is a new document.
-- `SET` of a partition key path changes the document's *placement*. The service forbids patching a
-  partition key path; honouring it would be a delete and a create, which is neither atomic nor a
-  patch.
-- `_ts` and `_etag` are declared `STORED`, so the validator refuses them before any rule runs.
+**What a replace refuses, by enumeration.** `SET "id"` renames identity and `SET` of a partition
+key path changes placement; the service forbids both on an existing document, so both are declined
+at planning — a plan that fails once, rather than a request that fails per row. Honouring a
+placement change would be a delete and a create, which is a different statement. `_ts` and `_etag`
+are declared `STORED`, so the validator refuses them before any rule runs. The map column may still
+*carry* a different identity or placement inside its value — invisible at plan time, and the
+service rejects the resulting request loudly, which is the correct fate for it.
 
-Every row model column is on that list, so `UPDATE … SET` has no expressible target today — the
-observed plan this section used as its example, `SET category`, sets the partition key. The work
-that unblocks it is *declared columns*: caller-declared, typed document paths promoted to real
-columns (see `TODO.md`). Those are plain document properties, which is exactly what a patch sets.
-The same missing surface blocks the nullable-aggregate argument rewrite and a temporal
-representation, which is what makes it the keystone rather than one feature's prerequisite.
+**Building the replacement document.** The row's table columns hold what the scan read; the `SET`
+values trail them. The old values identify the target — `id` and the partition key are read out of
+the document they describe, as a delete's are. For the body, the old promoted values are *withheld*
+rather than copied when the map is being set: the document builder lets a non-null promoted column
+override the map's entry, which is right for an insert and would here silently write old values
+over whatever the new map says. `id` is the one exception kept, so a new map that omits it still
+describes the same document, while one that contradicts it fails loudly at the service.
 
-Two decisions recorded now so the eventual implementation inherits them:
+Two decisions the patch tier inherits when it lands:
 
 - **`SET x = NULL` writes a JSON null** rather than removing the property. An `INSERT` skips null
   promoted columns because an *unmentioned* column arrives as null; an `UPDATE`'s
   `updateColumnList` names exactly what the statement wrote, so its null is explicit and is
   written.
-- **No `If-Match`.** A patch sends no ETag, matching what `DELETE` does: per-property last write
-  wins, and optimistic concurrency is a session-level surface this adapter does not invent.
+- **No `If-Match`.** No write sends an ETag, matching `DELETE`: the read informs rather than
+  locks, last write wins, and optimistic concurrency is a session-level surface this adapter does
+  not invent. Under that stance a replace is the honest reading of `SET "_MAP"` — the document
+  becomes what was computed from what was read.
 
 ---
 

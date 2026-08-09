@@ -131,7 +131,21 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
             var inputRowType = input.getRowType();
             var fields = inputRowType.getFieldList();
 
-            var names = new string[fields.size()];
+            // An update's input is the table's row plus one trailing value per SET column; the
+            // trailing fields have generated names and are not part of the document, so the write
+            // is told the table's columns and the SET names separately.
+            string[]? updates = null;
+            var documentColumns = fields.size();
+            if (getUpdateColumnList() is java.util.List updateColumns && updateColumns.size() > 0)
+            {
+                updates = new string[updateColumns.size()];
+                for (var i = 0; i < updates.Length; i++)
+                    updates[i] = (string)updateColumns.get(i);
+
+                documentColumns -= updates.Length;
+            }
+
+            var names = new string[documentColumns];
             for (var i = 0; i < names.Length; i++)
                 names[i] = ((org.apache.calcite.rel.type.RelDataTypeField)fields.get(i)).getName();
 
@@ -139,7 +153,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
             for (var i = 0; i < paths.Length; i++)
                 paths[i] = _table.Container.PartitionKeyPaths[i];
 
-            var write = new CosmosWrite(_write, names, paths);
+            var write = new CosmosWrite(_write, names, paths, updates);
 
             return implementor.Result(physType,
                 Expression.Call(null,
