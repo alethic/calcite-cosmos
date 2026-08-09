@@ -295,6 +295,20 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
         }
 
         /// <remarks>
+        /// Not by any rule here: Calcite rewrites <c>COUNT(x)</c> over a non-nullable column to
+        /// <c>COUNT(*)</c> before conversion, so what arrives is the argumentless form that is
+        /// always safe. Pinned because it is why <see cref="CosmosAggregate.CanImplement"/> needs
+        /// no non-nullable <c>COUNT(x)</c> case — that branch was probed and found dead.
+        /// </remarks>
+        [TestMethod]
+        public void CountOfANonNullableColumnIsPushedDown()
+        {
+            var sql = Render(PlanToCosmos("SELECT COUNT(c.\"_ts\") AS n FROM products AS c"));
+
+            sql.Should().Be("SELECT COUNT(1) AS \"n\" FROM products c");
+        }
+
+        /// <remarks>
         /// <c>SUM</c> over a set containing a JSON null returns undefined rather than ignoring it.
         /// </remarks>
         [TestMethod]

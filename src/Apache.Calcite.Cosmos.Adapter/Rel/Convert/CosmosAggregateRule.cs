@@ -35,23 +35,32 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
             if (aggregate.getGroupType() != Aggregate.Group.SIMPLE)
                 return false;
 
-            if (CosmosImplementor.TryBindOutput(aggregate.getInput(), out var fields) == false)
+            return CanPush(aggregate.getInput(), aggregate.getGroupSet(), aggregate.getAggCallList());
+        }
+
+        /// <summary>
+        /// Determines whether a simple aggregation over the given input, keys and calls can be
+        /// rendered faithfully. Shared with <see cref="CosmosAggregateSplitRule"/>, which asks the
+        /// question of the bottom half it would create rather than of a node that exists.
+        /// </summary>
+        internal static bool CanPush(RelNode input, org.apache.calcite.util.ImmutableBitSet groupSet, java.util.List calls)
+        {
+            if (CosmosImplementor.TryBindOutput(input, out var fields) == false)
                 return false;
 
             // Binding passes through a sort, but an aggregate cannot: Cosmos rejects GROUP BY with
             // ORDER BY in one statement, and applies GROUP BY before OFFSET/LIMIT, so grouping above
             // a pushed row restriction would group the container rather than the restriction. The
             // same conditions implementation refuses, decided here instead.
-            if (ReadsThroughASort(aggregate.getInput()))
+            if (ReadsThroughASort(input))
                 return false;
 
-            var groupKeys = aggregate.getGroupSet().asList();
+            var groupKeys = groupSet.asList();
             for (var i = 0; i < groupKeys.size(); i++)
                 if (Resolves(fields, (java.lang.Integer)groupKeys.get(i)) == false)
                     return false;
 
-            var inputRowType = aggregate.getInput().getRowType();
-            var calls = aggregate.getAggCallList();
+            var inputRowType = input.getRowType();
 
             for (var i = 0; i < calls.size(); i++)
             {
