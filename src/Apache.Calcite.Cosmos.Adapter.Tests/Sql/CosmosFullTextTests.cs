@@ -120,7 +120,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Sql
 
             names.Should().BeEquivalentTo([
                 "FULLTEXTCONTAINS", "FULLTEXTCONTAINSALL", "FULLTEXTCONTAINSANY",
-                "FULLTEXTSCORE", "RRF",
+                "FULLTEXTSCORE", "RRF", "VECTORDISTANCE",
                 "IS_DEFINED", "IS_ARRAY", "IS_BOOL", "IS_NULL",
                 "IS_NUMBER", "IS_OBJECT", "IS_PRIMITIVE", "IS_STRING",
             ]);

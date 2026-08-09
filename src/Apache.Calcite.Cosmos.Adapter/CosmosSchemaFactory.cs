@@ -56,23 +56,27 @@ namespace Apache.Calcite.Cosmos.Adapter
         /// <summary>The operand selecting the connection mode, <c>gateway</c> or <c>direct</c>.</summary>
         public const string ConnectionModeOperand = "connectionMode";
 
+        /// <summary>
+        /// The operand naming an <see cref="ICosmosClientFactory"/> to obtain the client from.
+        /// </summary>
+        /// <remarks>
+        /// Supplied instead of <see cref="EndpointOperand"/> and <see cref="KeyOperand"/>, and the way
+        /// to reach anything a connection string cannot say — Entra ID, a custom serializer or retry
+        /// policy, or a client the application already owns.
+        /// </remarks>
+        public const string ClientFactoryOperand = "clientFactory";
+
         /// <inheritdoc />
         public Schema create(SchemaPlus parentSchema, string name, java.util.Map operand)
         {
             if (operand is null)
                 throw new ArgumentNullException(nameof(operand));
 
-            var endpoint = GetString(operand, EndpointOperand) ?? throw new ArgumentException($"Operand '{EndpointOperand}' is required.");
-            var key = GetString(operand, KeyOperand) ?? throw new ArgumentException($"Operand '{KeyOperand}' is required.");
             var database = GetString(operand, DatabaseOperand) ?? throw new ArgumentException($"Operand '{DatabaseOperand}' is required.");
-
-            var options = new CosmosClientOptions();
-            if (string.Equals(GetString(operand, ConnectionModeOperand), "gateway", StringComparison.OrdinalIgnoreCase))
-                options.ConnectionMode = ConnectionMode.Gateway;
 
             // The client is owned by the schema for the life of the process. Schemas are created
             // once per connection and Calcite offers no disposal hook to release it on.
-            var client = new CosmosClient(endpoint, key, options);
+            var client = CreateClient(operand);
             var db = client.GetDatabase(database);
 
             // The same database the metadata was read from also executes the queries, so the client the
@@ -81,6 +85,83 @@ namespace Apache.Calcite.Cosmos.Adapter
             return new CosmosSchema(
                 ReadContainers(db, GetStrings(operand, ContainersOperand)),
                 container => new CosmosQueryExecutor(db.GetContainer(container.Name)));
+        }
+
+        /// <summary>
+        /// Obtains the client, from a named factory where the model gives one and from an endpoint and
+        /// a key otherwise.
+        /// </summary>
+        /// <remarks>
+        /// The two are exclusive by construction rather than by check: a factory decides everything
+        /// about the client, so an endpoint alongside one would be a value nothing reads.
+        /// </remarks>
+        static CosmosClient CreateClient(java.util.Map operand)
+        {
+            if (GetString(operand, ClientFactoryOperand) is string factoryName && factoryName.Length > 0)
+                return CreateFromFactory(factoryName, operand);
+
+            var endpoint = GetString(operand, EndpointOperand)
+                ?? throw new ArgumentException($"Operand '{EndpointOperand}' is required unless '{ClientFactoryOperand}' is given.");
+            var key = GetString(operand, KeyOperand)
+                ?? throw new ArgumentException($"Operand '{KeyOperand}' is required unless '{ClientFactoryOperand}' is given.");
+
+            var options = new CosmosClientOptions();
+            if (string.Equals(GetString(operand, ConnectionModeOperand), "gateway", StringComparison.OrdinalIgnoreCase))
+                options.ConnectionMode = ConnectionMode.Gateway;
+
+            return new CosmosClient(endpoint, key, options);
+        }
+
+        /// <summary>
+        /// Constructs the named factory and asks it for a client.
+        /// </summary>
+        /// <remarks>
+        /// Resolved the way a model names any type: by assembly-qualified or fully qualified name,
+        /// searching the loaded assemblies for the latter. The failures are told apart deliberately —
+        /// a name that resolves to nothing, to something that is not a factory, or to a factory that
+        /// cannot be constructed are three different mistakes in a model file.
+        /// </remarks>
+        static CosmosClient CreateFromFactory(string factoryName, java.util.Map operand)
+        {
+            var type = Type.GetType(factoryName, throwOnError: false)
+                ?? ResolveFromLoadedAssemblies(factoryName)
+                ?? throw new ArgumentException($"Operand '{ClientFactoryOperand}' names the type '{factoryName}', which could not be found.");
+
+            if (typeof(ICosmosClientFactory).IsAssignableFrom(type) == false)
+                throw new ArgumentException($"'{factoryName}' does not implement {nameof(ICosmosClientFactory)}.");
+
+            var factory = Activator.CreateInstance(type) as ICosmosClientFactory
+                ?? throw new ArgumentException($"'{factoryName}' could not be constructed; it needs a public parameterless constructor.");
+
+            return factory.Create(ToDictionary(operand))
+                ?? throw new ArgumentException($"'{factoryName}' returned no client.");
+        }
+
+        static Type? ResolveFromLoadedAssemblies(string name)
+        {
+            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+                if (assembly.GetType(name, throwOnError: false) is Type found)
+                    return found;
+
+            return null;
+        }
+
+        /// <summary>
+        /// Presents the operand map to a factory as something it can read without knowing about IKVM.
+        /// </summary>
+        static IReadOnlyDictionary<string, object?> ToDictionary(java.util.Map operand)
+        {
+            var values = new Dictionary<string, object?>(StringComparer.Ordinal);
+
+            var iterator = operand.entrySet().iterator();
+            while (iterator.hasNext())
+            {
+                var entry = (java.util.Map.Entry)iterator.next();
+                if (entry.getKey()?.ToString() is string key)
+                    values[key] = entry.getValue();
+            }
+
+            return values;
         }
 
         /// <summary>

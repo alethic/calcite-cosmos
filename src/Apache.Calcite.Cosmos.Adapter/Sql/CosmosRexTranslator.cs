@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Text;
 
@@ -556,6 +556,10 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
             // The two-argument SQL form — truncate to a number of decimal places — is left out
             // rather than guessed at, the arity of Cosmos's TRUNC not having been verified.
             ["TRUNCATE"] = ("TRUNC", 1, 1),
+            // Rankable, but not restricted to a rank clause the way a full text score is: the reference
+            // projects it. So it renders wherever any other function does, and IsScoringFunction lets an
+            // ORDER BY over it reach the clause as well.
+            ["VECTORDISTANCE"] = ("VECTORDISTANCE", 2, 4),
             // The type tests. Their argument is an ordinary expression rather than a path, so they need
             // nothing beyond the name — which is already the Cosmos one, these operators being this
             // adapter's own rather than translations of a SQL counterpart. See CosmosOperators.
@@ -767,7 +771,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
         {
             return node is RexCall call && call.getOperator().getName() switch
             {
-                "FULLTEXTSCORE" or "RRF" => true,
+                "FULLTEXTSCORE" or "RRF" or "VECTORDISTANCE" => true,
                 _ => false,
             };
         }

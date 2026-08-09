@@ -24,10 +24,11 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
     /// translator holds them to that: a call over anything it cannot resolve to a path is declined.
     /// </para>
     /// <para>
-    /// The scoring functions are here too, and are a different kind of thing: <c>FULLTEXTSCORE</c> and
-    /// <c>RRF</c> are legal only in an <c>ORDER BY RANK</c> clause and may not be projected. They exist
-    /// as operators so that a query can write <c>ORDER BY FULLTEXTSCORE(…)</c>, which is the only shape
-    /// <c>CosmosRankRule</c> recognises; the translator refuses them anywhere else.
+    /// The scoring functions are here too, and ordering by any of them becomes <c>ORDER BY RANK</c>,
+    /// which is the shape <c>CosmosRankRule</c> recognises. They do not all carry the same restriction:
+    /// <c>FULLTEXTSCORE</c> and <c>RRF</c> are legal in that clause alone and may not be projected, so
+    /// the translator refuses them anywhere else, while <c>VECTORDISTANCE</c> may be projected and
+    /// renders like any other function.
     /// </para>
     /// </remarks>
     public static class CosmosOperators
@@ -74,6 +75,22 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
         public static readonly SqlFunction Rrf = Scoring("RRF", 2);
 
         /// <summary>
+        /// <c>VECTORDISTANCE(&lt;vector1&gt;, &lt;vector2&gt;, [&lt;brute_force&gt;], [&lt;options&gt;])</c> —
+        /// the similarity between two vectors.
+        /// </summary>
+        /// <remarks>
+        /// Unlike <see cref="FullTextScore"/> this one <em>may</em> be projected — the reference's own
+        /// example selects it as <c>SimilarityScore</c> — so it is an ordinary function that also
+        /// happens to be rankable. Ordering by it becomes <c>ORDER BY RANK</c>, and <see cref="Rrf"/>
+        /// fuses it with a full text score for hybrid search.
+        /// <para>
+        /// The optional third argument forces brute force over any vector index; the fourth is an
+        /// object literal of options — <c>distanceFunction</c>, <c>dataType</c> and the recall knobs.
+        /// </para>
+        /// </remarks>
+        public static readonly SqlFunction VectorDistance = Scoring("VECTORDISTANCE", 2);
+
+        /// <summary>
         /// <c>IS_DEFINED(&lt;expr&gt;)</c> — whether the property exists on the document at all.
         /// </summary>
         /// <remarks>
@@ -111,7 +128,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
         public static SqlOperatorTable Instance { get; } = SqlOperatorTables.of(
             [
                 FullTextContains, FullTextContainsAll, FullTextContainsAny,
-                FullTextScore, Rrf,
+                FullTextScore, Rrf, VectorDistance,
                 IsDefined, IsArray, IsBool, IsNull, IsNumber, IsObject, IsPrimitive, IsString,
             ]);
 
