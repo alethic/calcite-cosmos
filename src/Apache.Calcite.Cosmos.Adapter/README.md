@@ -67,6 +67,26 @@ SqlOperatorTables.chain(SqlStdOperatorTable.instance(), CosmosOperators.Instance
 
 Ranking works too. `ORDER BY FULLTEXTSCORE(c."_MAP"['name'], 'steel') FETCH FIRST 10 ROWS ONLY` becomes `ORDER BY RANK`, and `RRF(...)` fuses two scores for hybrid search. The score is never projected — the service forbids it — so it ranks the rows and does not appear in the result. See [DESIGN.md](DESIGN.md).
 
+## What a query cost
+
+Cosmos charges in request units and reports the charge on every response. The adapter records it, on a `Meter` and an `ActivitySource` both named `Apache.Calcite.Cosmos.Adapter`:
+
+| | |
+|---|---|
+| `cosmos.request_charge` | Request units, one measurement per response |
+| `cosmos.responses` | Responses received |
+| `cosmos.query` (span) | One statement, first request to last page |
+
+Both instruments are tagged with `cosmos.container` and with `cosmos.request_kind`, which is `query` or `point_read` — so a point read can be told from the query it replaced. Collect them however you already collect .NET telemetry:
+
+```csharp
+builder.Services.AddOpenTelemetry()
+    .WithMetrics(m => m.AddMeter("Apache.Calcite.Cosmos.Adapter"))
+    .WithTracing(t => t.AddSource("Apache.Calcite.Cosmos.Adapter"));
+```
+
+Add `"indexMetrics": true` to the operand to have the service report which indexes each statement used; it lands on the span as `cosmos.index_metrics`. Off by default, because the service computes it per query.
+
 ## Status
 
 Under development. Statement generation, container metadata, the schema and table layer, the scan/filter/project/sort/unnest/aggregate/rank nodes, and execution inside a Calcite plan are in place and tested. Every emitted statement form is executed against a live service, and the suite runs against a real account when `COSMOS_TEST_ENDPOINT` and `COSMOS_TEST_KEY` name one — which the emulator is not a substitute for, it having been found to accept statements the service rejects and reject features the service implements. See [DESIGN.md](DESIGN.md), including its record of assumptions still to be settled.

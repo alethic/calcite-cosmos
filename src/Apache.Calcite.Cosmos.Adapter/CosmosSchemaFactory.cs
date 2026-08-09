@@ -68,6 +68,16 @@ namespace Apache.Calcite.Cosmos.Adapter
         public const string ConnectionModeOperand = "connectionMode";
 
         /// <summary>
+        /// The operand asking the service which indexes each statement used.
+        /// </summary>
+        /// <remarks>
+        /// Off by default. The service computes the answer per query, so this is something to turn on
+        /// while working out why a query is expensive rather than to leave on. It appears on the
+        /// <c>cosmos.query</c> span — see <see cref="CosmosInstrumentation"/>.
+        /// </remarks>
+        public const string IndexMetricsOperand = "indexMetrics";
+
+        /// <summary>
         /// The operand naming an <see cref="ICosmosClientFactory"/> to obtain the client from.
         /// </summary>
         /// <remarks>
@@ -87,12 +97,13 @@ namespace Apache.Calcite.Cosmos.Adapter
             // once per connection and Calcite offers no disposal hook to release it on.
             var client = CreateClient(operand);
             var containers = GetStrings(operand, ContainersOperand);
+            var indexMetrics = GetBoolean(operand, IndexMetricsOperand);
 
             // Naming a database gives a schema whose tables are its containers. Omitting it gives the
             // account: one subschema per database, which is how Cosmos nests and how Calcite nests, and
             // which needs one client rather than one per database.
             if (GetString(operand, DatabaseOperand) is not string database || database.Length == 0)
-                return CreateAccountSchema(client, containers);
+                return CreateAccountSchema(client, containers, indexMetrics);
 
             var db = client.GetDatabase(database);
 
@@ -101,7 +112,7 @@ namespace Apache.Calcite.Cosmos.Adapter
             // so binding one per table costs nothing.
             return new CosmosSchema(
                 ReadContainers(db, containers),
-                container => new CosmosQueryExecutor(db.GetContainer(container.Name)));
+                container => new CosmosQueryExecutor(db.GetContainer(container.Name), indexMetrics));
         }
 
         /// <summary>
@@ -112,7 +123,7 @@ namespace Apache.Calcite.Cosmos.Adapter
         /// useful where they share container names. Omitting it, which is the ordinary case here,
         /// exposes every container of every database.
         /// </remarks>
-        static Schema CreateAccountSchema(CosmosClient client, IReadOnlyList<string> containers)
+        static Schema CreateAccountSchema(CosmosClient client, IReadOnlyList<string> containers, bool indexMetrics)
         {
             var databases = new List<KeyValuePair<string, IReadOnlyList<CosmosContainerMetadata>>>();
 
@@ -130,7 +141,7 @@ namespace Apache.Calcite.Cosmos.Adapter
 
             return new CosmosAccountSchema(
                 databases,
-                (database, container) => new CosmosQueryExecutor(client.GetDatabase(database).GetContainer(container.Name)));
+                (database, container) => new CosmosQueryExecutor(client.GetDatabase(database).GetContainer(container.Name), indexMetrics));
         }
 
         /// <summary>
@@ -235,6 +246,20 @@ namespace Apache.Calcite.Cosmos.Adapter
         }
 
         static string? GetString(java.util.Map operand, string name) => operand.get(name)?.ToString();
+
+        /// <summary>
+        /// Reads a flag, absent meaning false.
+        /// </summary>
+        /// <remarks>
+        /// A model may deliver a JSON boolean or the string that was written in the file, depending on
+        /// how it was parsed; both are read.
+        /// </remarks>
+        static bool GetBoolean(java.util.Map operand, string name) => operand.get(name) switch
+        {
+            null => false,
+            java.lang.Boolean value => value.booleanValue(),
+            var other => bool.TryParse(other.ToString(), out var parsed) && parsed,
+        };
 
         static IReadOnlyList<string> GetStrings(java.util.Map operand, string name)
         {

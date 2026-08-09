@@ -40,16 +40,26 @@ asked the old constant stands.
 estimate into a latency estimate, and it distinguishes a container that can absorb a scan from one
 that cannot.
 
-### `RequestCharge` — *medium*
+### `RequestCharge` — *done*
 
-The only real cost signal the service gives, on every response, and currently discarded. Wants
-somewhere to go — see *Observability*, which is the design decision.
+The only real cost signal the service gives, on every response. Recorded on the
+`cosmos.request_charge` histogram, tagged by container and by whether the request was a query or a
+point read, and totalled onto the `cosmos.query` span. See *Observability*.
 
-### `PopulateIndexMetrics` — *medium*
+Still open: **feeding it back into the cost model.** A measured charge for a query shape is worth
+more than the estimate that was used to choose it, but a cost model that learns needs somewhere to
+keep what it learnt, and that is the statistics-refresh question above wearing a different hat.
 
-Reports which indexes a query actually used, and which it recommends. Two uses, the second more
-interesting than the first: it would settle the composite-index question below by measurement, and it
-is the raw material for telling a user *why* a query was expensive.
+### `PopulateIndexMetrics` — *done*
+
+Behind the `indexMetrics` operand, off by default, surfaced as `cosmos.index_metrics` on the span.
+It serves the more interesting of its two uses — raw material for telling a user *why* a query was
+expensive. The emulator returns nothing for it, so the test asserting it is inconclusive there and
+passes against a real account.
+
+The other use, settling the composite-index question, turned out not to need it: the question is
+answered directly by whether the service accepts the statement, and it does not. See *Unsettled
+questions*, where it is no longer unsettled.
 
 ### Per-partition skew — *not available*
 
@@ -307,9 +317,11 @@ often such a thing.
 
 ## 8. Observability
 
-- **A diagnostics surface** — *medium, and it gates two items above.* `RequestCharge`, `IndexMetrics`
-  and `CosmosDiagnostics` all have somewhere to come from and nowhere to go. Calcite's `Hook` is one
-  candidate, an event on the schema another, `ActivitySource` a third. Deciding is the work.
+- **A diagnostics surface** — *done.* `CosmosInstrumentation` publishes a `Meter` and an
+  `ActivitySource`, both named `Apache.Calcite.Cosmos.Adapter`. Calcite was ruled out rather than
+  passed over: every `Hook` value is plan-time, and no adapter in the tree reports execution
+  statistics through one. `CosmosDiagnostics` is the piece still not surfaced — it is a large JSON
+  blob per response, so it wants a switch of its own rather than to ride on the span.
 - **`QUERY_PLAN` hook** — *done.* The converter already runs it with the rendered statement.
 - **RU regression tracking** — *medium, after the charge is surfaced.* Assert that a query shape does
   not get more expensive.
@@ -328,9 +340,10 @@ often such a thing.
   process — and require the same rows. Every pushdown is then checked against an oracle rather than
   against an expected string. This is what `ClrEnumerableDifferentialTests` does for the CLR
   conventions in `calcite-dotnet`, and it is where the defects were found there.
-- **Emulator gaps, recorded** — *small.* The emulator silently discards composite indexes and does not
-  implement full text search. Both are known; neither is asserted, so a future emulator that fixes
-  them would go unnoticed.
+- **Emulator gaps, recorded** — *small.* The emulator silently discards composite indexes, does not
+  implement full text search, reports a flat 1 RU for every request, and returns no index metrics.
+  All four are known and all four are why the corresponding tests report inconclusive there rather
+  than failing; none is asserted, so a future emulator that fixes one would go unnoticed.
 
 ---
 
@@ -339,9 +352,10 @@ often such a thing.
 These are not features. They are things believed but not measured, and each one is a defect waiting
 for the right query.
 
-- **The composite index requirement.** A multi-key `ORDER BY` is refused without a matching composite
-  index. Documented, never observed — the emulator implements composite indexes not at all.
-  `PopulateIndexMetrics` against a real account would settle it.
+- **The composite index requirement** — *settled.* Measured on a real account against a container
+  with no composite index: `ORDER BY c.category, c.price` is rejected with 400 and `ORDER BY c.price`
+  over the same container is served. The guard is refusing exactly what the service refuses, and
+  costs no pushdown that was ever available.
 - **`DISTINCT` with `ORDER BY`.** Assumed incompatible, never tested.
 - **Two-argument `TRIM` and `TRUNCATE`.** Left out for want of a measurement.
 - **Out-of-domain arithmetic.** Measured: `ASIN(2)`, `ACOS(2)`, `SQRT(-1)` and `LOG(0)` each fail the

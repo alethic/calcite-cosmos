@@ -1,5 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Diagnostics.Metrics;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -57,6 +59,19 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
 
         static bool IsEmulator => ReferenceEquals(Endpoint, EmulatorEndpoint);
 
+        /// <summary>
+        /// The database these tests build, named per target framework.
+        /// </summary>
+        /// <remarks>
+        /// Per framework because the fixture deletes and recreates its container, and a plain
+        /// <c>dotnet test</c> runs every target framework at once against whatever account is
+        /// configured. Sharing one database across them means one host dropping the container out from
+        /// under another host's query — which fails as a wrong answer somewhere unrelated rather than
+        /// as a collision. The container keeps its name, since statements are written against it.
+        /// </remarks>
+        static readonly string DatabaseName = "calcite_cosmos_tests_" +
+            System.Text.RegularExpressions.Regex.Replace(System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription, "[^A-Za-z0-9]", "_");
+
         static CosmosClient? _client;
         static Container? _container;
 
@@ -86,7 +101,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
                 using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(IsEmulator ? 10 : 120));
                 var client = new CosmosClient(Endpoint, Key, options);
 
-                var database = (await client.CreateDatabaseIfNotExistsAsync("calcite_cosmos_tests", cancellationToken: cts.Token)).Database;
+                var database = (await client.CreateDatabaseIfNotExistsAsync(DatabaseName, cancellationToken: cts.Token)).Database;
 
                 var properties = new ContainerProperties("products", "/category");
                 properties.IndexingPolicy.CompositeIndexes.Add(new System.Collections.ObjectModel.Collection<CompositePath>
@@ -137,6 +152,11 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
         [ClassCleanup]
         public static void ClassCleanup()
         {
+            // Dropped rather than left behind: the name carries the framework version, so leaving them
+            // accumulates a database per SDK the suite was ever run under — on a real account that is
+            // billed storage nobody remembers creating.
+            try { _client?.GetDatabase(DatabaseName).DeleteAsync().GetAwaiter().GetResult(); } catch (CosmosException) { }
+
             _client?.Dispose();
             _client = null;
             _container = null;
@@ -858,10 +878,12 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
 
         static java.util.Map Operand(bool listContainers)
         {
+            // The account under test, not the emulator: these tests read back the container the
+            // fixture built, and the fixture builds it wherever COSMOS_TEST_ENDPOINT points.
             var operand = new java.util.HashMap();
-            operand.put("endpoint", EmulatorEndpoint);
-            operand.put("key", EmulatorKey);
-            operand.put("database", "calcite_cosmos_tests");
+            operand.put("endpoint", Endpoint);
+            operand.put("key", Key);
+            operand.put("database", DatabaseName);
             operand.put("connectionMode", "gateway");
 
             if (listContainers)
@@ -903,6 +925,247 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
 
             table.Container.Name.Should().Be("products");
             table.Container.PartitionKeyPaths.Should().Equal("/category");
+        }
+
+        // ── What the adapter reports about what it did ────────────────────────────
+
+        /// <summary>
+        /// Collects every measurement the adapter's meter emits while <paramref name="body"/> runs.
+        /// </summary>
+        /// <remarks>
+        /// Subscribed by meter name and asserted by instrument name, so that a rename fails here rather
+        /// than silently stopping every collector configured against the old name.
+        /// </remarks>
+        static async Task<List<(string Instrument, double Value, Dictionary<string, object?> Tags)>> Collect(Func<Task> body)
+        {
+            var measurements = new List<(string, double, Dictionary<string, object?>)>();
+
+            using var listener = new MeterListener();
+
+            listener.InstrumentPublished = (instrument, l) =>
+            {
+                if (instrument.Meter.Name == CosmosInstrumentation.Name)
+                    l.EnableMeasurementEvents(instrument);
+            };
+
+            void Record<T>(Instrument instrument, T value, ReadOnlySpan<KeyValuePair<string, object?>> tags, object? state)
+                where T : struct
+            {
+                var copy = new Dictionary<string, object?>(StringComparer.Ordinal);
+                foreach (var tag in tags)
+                    copy[tag.Key] = tag.Value;
+
+                lock (measurements)
+                    measurements.Add((instrument.Name, Convert.ToDouble(value), copy));
+            }
+
+            listener.SetMeasurementEventCallback<double>(Record);
+            listener.SetMeasurementEventCallback<long>(Record);
+            listener.Start();
+
+            await body();
+
+            lock (measurements)
+                return [.. measurements];
+        }
+
+        [TestMethod]
+        public async Task AQueryReportsWhatItWasCharged()
+        {
+            var measurements = await Collect(() => Execute(Query(Builder())));
+
+            var charges = measurements.Where(m => m.Instrument == "cosmos.request_charge").ToList();
+
+            charges.Should().NotBeEmpty("every response carries a charge and every charge is recorded");
+            charges.Should().OnlyContain(m => m.Value > 0);
+            charges.Should().OnlyContain(m => (string?)m.Tags["cosmos.request_kind"] == CosmosInstrumentation.Kinds.Query);
+            charges.Should().OnlyContain(m => (string?)m.Tags["cosmos.container"] == "products");
+
+            // One response counted per charge measured. The two travel together by construction, and
+            // the count is what tells a query answered in one page from one answered in forty.
+            measurements.Where(m => m.Instrument == "cosmos.responses").Should().HaveSameCount(charges);
+        }
+
+        /// <remarks>
+        /// The kind tag is what makes the point read visible at all: it is charged and counted like any
+        /// other request, and without the tag it is indistinguishable from the query it replaced.
+        /// </remarks>
+        [TestMethod]
+        public async Task APointReadReportsUnderItsOwnKind()
+        {
+            var builder = Builder();
+            builder.Where = "c.id = \"1\" AND c.category = \"bikes\"";
+
+            var query = new CosmosQuery(builder.Build(), new CosmosParameterList().Parameters, ["bikes"], null, "1", PartitionKeyIsComplete: true);
+
+            var measurements = await Collect(() => Execute(query));
+
+            var charges = measurements.Where(m => m.Instrument == "cosmos.request_charge").ToList();
+
+            charges.Should().ContainSingle("a point read is one request");
+            charges[0].Tags["cosmos.request_kind"].Should().Be(CosmosInstrumentation.Kinds.PointRead);
+        }
+
+        /// <summary>
+        /// Runs a statement with a listener attached to the adapter's activity source, returning the
+        /// span it produced.
+        /// </summary>
+        static async Task<Activity?> Trace(Func<Task> body)
+        {
+            Activity? captured = null;
+
+            using var listener = new ActivityListener
+            {
+                ShouldListenTo = source => source.Name == CosmosInstrumentation.Name,
+                Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllDataAndRecorded,
+                ActivityStopped = activity => captured = activity,
+            };
+
+            ActivitySource.AddActivityListener(listener);
+
+            await body();
+
+            return captured;
+        }
+
+        [TestMethod]
+        public async Task AQuerySpanCarriesTheStatementAndItsTotalCost()
+        {
+            var activity = await Trace(() => Execute(Query(Builder())));
+
+            activity.Should().NotBeNull();
+            activity!.OperationName.Should().Be("cosmos.query");
+            activity.GetTagItem("cosmos.container").Should().Be("products");
+            activity.GetTagItem("db.query.text").Should().Be(Builder().Build());
+
+            // The total across continuations, which is what the whole statement cost rather than what
+            // any one page of it did.
+            activity.GetTagItem("cosmos.request_charge").Should().BeOfType<double>().Which.Should().BeGreaterThan(0);
+            activity.GetTagItem("cosmos.pages").Should().BeOfType<int>().Which.Should().BeGreaterThan(0);
+        }
+
+        /// <summary>
+        /// Index metrics arrive only where the caller asked for them.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Off is the default because the service computes the answer per query. The absence is
+        /// asserted as firmly as the presence: a flag that is on regardless is a cost paid by every
+        /// caller who never reads it.
+        /// </para>
+        /// <para>
+        /// Inconclusive where the account returns nothing for it. This emulator does not implement
+        /// composite indexes, so having nothing to say about index utilisation would be of a piece with
+        /// that, and asserting through it would be asserting the emulator rather than the service.
+        /// </para>
+        /// </remarks>
+        [TestMethod]
+        public async Task IndexMetricsArriveOnlyWhereTheyWereAskedFor()
+        {
+            static async Task Run(bool indexMetrics)
+            {
+                var executor = new CosmosQueryExecutor(Container(), indexMetrics);
+                await foreach (var _ in executor.ExecuteAsync(Query(Builder()))) { }
+            }
+
+            (await Trace(() => Run(indexMetrics: false)))!.GetTagItem("cosmos.index_metrics").Should().BeNull();
+
+            var asked = await Trace(() => Run(indexMetrics: true));
+
+            if (asked!.GetTagItem("cosmos.index_metrics") is not string metrics)
+            {
+                Assert.Inconclusive("This account returns no index metrics.");
+                return;
+            }
+
+            metrics.Should().NotBeEmpty();
+        }
+
+        // ── The composite index requirement ───────────────────────────────────────
+
+        /// <summary>
+        /// A multi-key <c>ORDER BY</c> needs a composite index spanning its keys, and a single-key one
+        /// does not.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// This is the premise <see cref="CosmosContainerMetadata.IsSortSupported"/> is built on, and
+        /// until now it was documentation rather than measurement: the guard refuses to push a
+        /// multi-key sort without a matching composite index, and if the service were the more
+        /// permissive of the two, that refusal would cost pushdown on every multi-key sort for nothing.
+        /// </para>
+        /// <para>
+        /// Measured against its own container, built with the default indexing policy and so with no
+        /// composite indexes at all — the fixture's container has one, which is exactly what would hide
+        /// the effect. The single-key sort is asserted alongside so that a container which rejected
+        /// sorting outright could not pass for a container that rejects only the multi-key form.
+        /// </para>
+        /// <para>
+        /// Inconclusive on the emulator, which discards composite indexes on create and accepts the
+        /// multi-key form regardless. That acceptance is a fact about the emulator and says nothing
+        /// about the service, which is the whole reason this needs a real account.
+        /// </para>
+        /// </remarks>
+        [TestMethod]
+        public async Task AMultiKeyOrderByNeedsACompositeIndex()
+        {
+            if (IsEmulator)
+                Assert.Inconclusive("The emulator does not implement composite indexes and accepts the multi-key form regardless.");
+
+            var database = _client!.GetDatabase(DatabaseName);
+            var name = "no_composite_index";
+
+            // Default indexing policy: every path indexed, no composite index over any pair of them.
+            var properties = new ContainerProperties(name, "/category");
+
+            try { await database.GetContainer(name).DeleteContainerAsync(); } catch (CosmosException) { }
+            var container = (await database.CreateContainerIfNotExistsAsync(properties)).Container;
+
+            try
+            {
+                var read = await container.ReadContainerAsync();
+                read.Resource.IndexingPolicy.CompositeIndexes.Should().BeEmpty("the premise of this measurement is a container with none");
+
+                foreach (var json in new[]
+                {
+                    """{"id":"1","category":"bikes","price":120}""",
+                    """{"id":"2","category":"bikes","price":340}""",
+                })
+                {
+                    using var stream = new MemoryStream(Encoding.UTF8.GetBytes(json));
+                    await container.CreateItemStreamAsync(stream, new PartitionKey("bikes"));
+                }
+
+                static async Task<CosmosException?> Run(Container container, string sql)
+                {
+                    try
+                    {
+                        using var iterator = container.GetItemQueryStreamIterator(new QueryDefinition(sql));
+                        while (iterator.HasMoreResults)
+                        {
+                            using var response = await iterator.ReadNextAsync();
+                            response.EnsureSuccessStatusCode();
+                        }
+
+                        return null;
+                    }
+                    catch (CosmosException e)
+                    {
+                        return e;
+                    }
+                }
+
+                var single = await Run(container, $"SELECT VALUE c FROM {name} c ORDER BY c.price");
+                var multi = await Run(container, $"SELECT VALUE c FROM {name} c ORDER BY c.category, c.price");
+
+                single.Should().BeNull("a single-key sort is served by the range index every path gets");
+                multi.Should().NotBeNull("the guard exists because the service refuses this without a composite index");
+                multi!.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
+            }
+            finally
+            {
+                try { await container.DeleteContainerAsync(); } catch (CosmosException) { }
+            }
         }
 
     }

@@ -123,10 +123,21 @@ documentation.
 > | --- | --- | --- |
 > | `ORDER BY t0` over `JOIN t0 IN c.tags` | accepted | **400** |
 > | `FULLTEXTCONTAINS` and `ORDER BY RANK` | **400** | accepted |
+> | multi-key `ORDER BY`, no composite index | accepted | **400** |
 >
 > The first is why `CosmosSort` refuses any sort key rooted at an unnest alias: a single-key
 > allowance stood for a long time on the emulator's word, and emitted a statement Azure will not
 > run. `ORDER BY t0.x` is rejected too, so it is the alias and not the arity.
+
+**A multi-key `ORDER BY` really does need a composite index spanning its keys.** Measured on a real
+account against a container built with the default indexing policy and so with no composite index at
+all: `ORDER BY c.category, c.price` is rejected with **400**, while `ORDER BY c.price` over the same
+container is served. So `CosmosContainerMetadata.IsSortSupported` is refusing exactly what the
+service refuses, and the guard costs no pushdown that was ever available.
+
+This is the third case where the emulator's answer was the wrong one, and it is why it could not be
+settled until now: the emulator discards composite indexes on create, reporting none on the create
+response and none on a subsequent read, and then accepts the multi-key form regardless.
 
 **The document count lags, and by more than a moment.** A container read reports `documentsCount` in
 its `x-ms-resource-usage` header, and immediately after writing four documents it reports **zero** —
@@ -766,18 +777,53 @@ shape of the plan, so `CosmosFilter.computeSelfCost` reflects both:
 Index coverage bears on cost only. A predicate or sort over an unindexed path still runs; it is
 the composite index requirement for multi-key sorts that affects legality.
 
+Everything above is *inference* — from declared metadata and, where the service gave one, a
+measured row count. The service reports what a request actually cost, and that number is the only
+one in the system that is not a guess.
+
+---
+
+## What the adapter reports
+
+`CosmosInstrumentation` publishes a `Meter` and an `ActivitySource`, both named
+`Apache.Calcite.Cosmos.Adapter`.
+
+**Through .NET rather than through Calcite**, because Calcite has nowhere to put it. Every `Hook`
+value is plan-time — `PARSE_TREE`, `CONVERTED`, `TRIMMED`, `PROGRAM`, `QUERY_PLAN` — and no adapter
+in the tree reports execution statistics through one. Cassandra, Druid, Elasticsearch, Geode and
+MongoDB all use `Hook.QUERY_PLAN` and stop, which this adapter does too. A meter and an activity
+source are what a .NET caller already has a collector for, cost nothing when nobody is listening,
+and require no coupling to this assembly.
+
+| | |
+|---|---|
+| `cosmos.request_charge` | Request units, one measurement per response |
+| `cosmos.responses` | Responses received |
+| `cosmos.query` (span) | One statement, first request to last page |
+
+Both instruments are tagged with `cosmos.container` and `cosmos.request_kind`, the latter being
+`query` or `point_read`. The kind is what makes the point read visible at all: it is charged and
+counted like any other request, and without the tag it cannot be told from the query it replaced.
+
+Per *response* rather than per execution, because a query spanning continuations is charged per
+page and the spread across pages is itself worth seeing. The span carries the totals —
+`cosmos.request_charge` and `cosmos.pages` — since that is what one reader of one trace wants. A
+span that never records them is an enumeration the caller abandoned, which is its own signal.
+
+### Index metrics
+
+`PopulateIndexMetrics`, behind the `indexMetrics` operand and off by default: the service computes
+the answer per query, so it is a thing to switch on while working out why a query is expensive
+rather than to leave on. It lands on the span as `cosmos.index_metrics`, a tag rather than a
+measurement, because it is a paragraph of prose naming indexes — something to read, not aggregate.
+
+It is also the instrument for settling the composite index question below.
+
 ---
 
 ## Unvalidated assumptions
 
 Recorded so they are not mistaken for tested behaviour.
-
-**The composite index requirement.** `CosmosContainerMetadata.IsSortSupported` refuses a
-multi-key `ORDER BY` without a matching composite index. The rule is documented, but the
-emulator implements composite indexes not at all, so nothing exercises it end to end. If the
-real service is more permissive, the guard silently costs pushdown on every multi-key sort.
-A real account can now settle this — see *Verified against the emulator* for how to point the suite
-at one — and it is the first thing worth measuring there.
 
 **Null placement on non-nullable keys.** Sorting a non-nullable key is accepted regardless of
 requested placement, on the grounds that a key which cannot be null has no null ordering to

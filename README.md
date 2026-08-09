@@ -1,4 +1,4 @@
-# Apache Calcite Cosmos Adapter
+﻿# Apache Calcite Cosmos Adapter
 
 Query [Azure Cosmos DB](https://learn.microsoft.com/azure/cosmos-db/) with SQL, through
 [Apache Calcite](https://calcite.apache.org/), from .NET.
@@ -121,6 +121,18 @@ ranks the rows and never appears in the result, the service not permitting it to
 > resolves the *schema's own* functions. So a connection can reach these in principle; they are simply
 > offered as a `SqlOperatorTable` rather than registered on the schema, which is what a connection
 > would look them up through. Everything else on this page works through the provider.
+
+## What a query cost
+
+Cosmos charges in request units and reports the charge on every response. The adapter records it on a `Meter` and an `ActivitySource`, both named `Apache.Calcite.Cosmos.Adapter`, so it collects the way anything else in a .NET application does:
+
+```csharp
+builder.Services.AddOpenTelemetry()
+    .WithMetrics(m => m.AddMeter("Apache.Calcite.Cosmos.Adapter"))
+    .WithTracing(t => t.AddSource("Apache.Calcite.Cosmos.Adapter"));
+```
+
+`cosmos.request_charge` is measured per response and tagged with the container and with whether the request was a `query` or a `point_read`; the `cosmos.query` span carries the total across continuations. Set `"indexMetrics": true` in the operand and the service also reports which indexes each statement used.
 
 ## Documentation
 

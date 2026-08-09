@@ -40,15 +40,36 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
     {
 
         readonly Container _container;
+        readonly bool _indexMetrics;
 
         /// <summary>
         /// Initializes a new instance.
         /// </summary>
         /// <param name="container">The container to execute against.</param>
+        /// <param name="indexMetrics">
+        /// Whether to ask the service which indexes each statement used. Off by default: the service
+        /// computes it per query and it is a diagnostic rather than something the adapter acts on.
+        /// </param>
         /// <exception cref="ArgumentNullException"><paramref name="container"/> is <c>null</c>.</exception>
-        public CosmosQueryExecutor(Container container)
+        public CosmosQueryExecutor(Container container, bool indexMetrics = false)
         {
             _container = container ?? throw new ArgumentNullException(nameof(container));
+            _indexMetrics = indexMetrics;
+        }
+
+        /// <summary>
+        /// Records what a response cost.
+        /// </summary>
+        /// <remarks>
+        /// Per response rather than per execution: a query spanning continuations is charged per page.
+        /// </remarks>
+        void Report(double charge, string kind)
+        {
+            var container = new KeyValuePair<string, object?>("cosmos.container", _container.Id);
+            var which = new KeyValuePair<string, object?>("cosmos.request_kind", kind);
+
+            CosmosInstrumentation.RequestCharge.Record(charge, container, which);
+            CosmosInstrumentation.Responses.Add(1, container, which);
         }
 
         /// <summary>
@@ -61,6 +82,8 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
         async IAsyncEnumerable<JsonElement> ReadItemAsync(string id, PartitionKey partitionKey, [EnumeratorCancellation] CancellationToken cancellationToken)
         {
             using var response = await _container.ReadItemStreamAsync(id, partitionKey, cancellationToken: cancellationToken).ConfigureAwait(false);
+
+            Report(response.Headers.RequestCharge, CosmosInstrumentation.Kinds.PointRead);
 
             if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
                 yield break;
@@ -159,17 +182,44 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
             if (query.MaxItemCount is int maxItemCount)
                 options.MaxItemCount = maxItemCount;
 
+            // Which indexes the statement used, where the caller asked. A diagnostic rather than
+            // something acted on — and the one way to settle by measurement whether the composite index
+            // guard is describing the service or the documentation.
+            options.PopulateIndexMetrics = _indexMetrics;
+
             // The stream iterator is used rather than the typed one so that results are read with
             // System.Text.Json. The SDK requires Newtonsoft.Json to be present, but nothing here
             // needs to go through it.
+            using var activity = CosmosInstrumentation.ActivitySource.StartActivity("cosmos.query");
+            activity?.SetTag("db.query.text", query.Sql);
+            activity?.SetTag("cosmos.container", _container.Id);
+
             using var iterator = _container.GetItemQueryStreamIterator(CreateDefinition(query), requestOptions: options);
+
+            // Accumulated across continuations. The per-response measurement is what a collector
+            // aggregates; this is what a reader of one trace wants, which is what the whole statement
+            // cost rather than what its third page did.
+            var charge = 0d;
+            var pages = 0;
 
             while (iterator.HasMoreResults)
             {
+                pages++;
+
                 cancellationToken.ThrowIfCancellationRequested();
 
                 using var response = await iterator.ReadNextAsync(cancellationToken).ConfigureAwait(false);
+
+                Report(response.Headers.RequestCharge, CosmosInstrumentation.Kinds.Query);
+                charge += response.Headers.RequestCharge;
+
                 response.EnsureSuccessStatusCode();
+
+                // Reported on the span rather than as a measurement: it is a paragraph of text naming
+                // the indexes the service considered, which is a thing to read and not a thing to
+                // aggregate. Present only on the first page, and only where it was asked for.
+                if (response.IndexMetrics is string metrics && metrics.Length > 0)
+                    activity?.SetTag("cosmos.index_metrics", metrics);
 
                 using var document = await JsonDocument.ParseAsync(response.Content, cancellationToken: cancellationToken).ConfigureAwait(false);
                 if (document.RootElement.TryGetProperty("Documents", out var documents) == false)
@@ -182,6 +232,12 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
                     yield return element.Clone();
                 }
             }
+
+            // Set at the end rather than incrementally: a span carries the totals it finished with, and
+            // an abandoned enumeration is a span that never reaches here — which is itself the signal
+            // that the caller stopped reading.
+            activity?.SetTag("cosmos.request_charge", charge);
+            activity?.SetTag("cosmos.pages", pages);
         }
 
     }
