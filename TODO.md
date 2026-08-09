@@ -269,10 +269,14 @@ it is worth the weight:
   instead of fanning out; and where the key is `id` together with a complete partition key, this is
   `ReadManyItemsAsync` — a genuine batch point read, not a query at all. See *batch point reads*.
 
-Open question worth measuring rather than assuming: whether `c.k IN (@b0, …, @bn)` and
-`ARRAY_CONTAINS(@keys, c.k)` are both served by the index. The second takes one parameter for a
-variable-length batch and needs no padding; the first is the form the service documents for index
-usage. `PopulateIndexMetrics` now answers this against a real account.
+**Measured, and it is the measurement the feature turned on.** `WHERE c.category IN (@k0, …, @k99)` —
+the form emitted, at the batch size emitted — reports `/category/?` under `UtilizedIndexes` with
+nothing under `PotentialIndexes`. So the restriction is index-served and the lookup join is an
+improvement rather than a scan with a hundred-term filter attached.
+
+Still unmeasured: whether `ARRAY_CONTAINS(@keys, c.k)` is served the same way. It would take one
+parameter for a variable-length batch instead of a hundred with padding, which is tidier but buys
+nothing now that the padded form is known to work.
 
 ### Weakening a disjunction — *medium*
 

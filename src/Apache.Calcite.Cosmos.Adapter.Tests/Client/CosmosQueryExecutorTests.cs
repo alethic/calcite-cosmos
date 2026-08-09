@@ -1081,6 +1081,80 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
             metrics.Should().NotBeEmpty();
         }
 
+        // ── What the lookup join's restriction costs ──────────────────────────────
+
+        /// <summary>
+        /// The form a lookup join emits is served by the index rather than by a scan.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// This is the measurement the whole feature turns on. A lookup join replaces "read the
+        /// container" with "read the container where the key is one of these hundred" — and if that
+        /// predicate is not index-served, it has replaced a scan with a scan plus a hundred-term
+        /// filter, which is worse than what it set out to improve.
+        /// </para>
+        /// <para>
+        /// A hundred terms because that is the batch size the node renders, so this is the statement
+        /// the service will actually be given rather than a small illustration of one.
+        /// </para>
+        /// <para>
+        /// Inconclusive on the emulator, which reports no index metrics at all.
+        /// </para>
+        /// </remarks>
+        [TestMethod]
+        public async Task TheLookupRestrictionIsServedByTheIndex()
+        {
+            var names = new List<string>();
+            var parameters = new CosmosParameterList("@k");
+
+            // One real key and ninety-nine repeats, which is what a short batch pads to.
+            for (var i = 0; i < 100; i++)
+                names.Add(parameters.Add("bikes"));
+
+            var sql = $"SELECT VALUE c FROM products c WHERE c.category IN ({string.Join(", ", names)})";
+            var query = new CosmosQuery(sql, parameters.Parameters);
+
+            string? metrics = null;
+
+            using (var listener = new ActivityListener
+            {
+                ShouldListenTo = source => source.Name == CosmosInstrumentation.Name,
+                Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllDataAndRecorded,
+                ActivityStopped = activity => metrics = activity.GetTagItem("cosmos.index_metrics") as string,
+            })
+            {
+                ActivitySource.AddActivityListener(listener);
+
+                var executor = new CosmosQueryExecutor(Container(), indexMetrics: true);
+                await foreach (var _ in executor.ExecuteAsync(query)) { }
+            }
+
+            if (metrics is null)
+            {
+                Assert.Inconclusive("This account returns no index metrics.");
+                return;
+            }
+
+            // JSON, and measured to be so rather than assumed -- the documented prose form is what the
+            // portal renders, not what the header carries:
+            //   {"UtilizedIndexes":{"SingleIndexes":[{"IndexSpec":"/category/?"}]},"PotentialIndexes":...}
+            //
+            // Read rather than searched, because the two sections mean opposite things: a path named
+            // under Potential is a path the query did *not* use, and a substring match over the whole
+            // report would count that as a pass.
+            using var report = JsonDocument.Parse(metrics);
+
+            var utilized = report.RootElement
+                .GetProperty("UtilizedIndexes")
+                .GetProperty("SingleIndexes")
+                .EnumerateArray()
+                .Select(x => x.GetProperty("IndexSpec").GetString())
+                .ToList();
+
+            utilized.Should().Contain(x => x!.Contains("/category"),
+                "an IN over a hundred keys should use the index on the path it restricts: " + metrics);
+        }
+
         // ── The composite index requirement ───────────────────────────────────────
 
         /// <summary>

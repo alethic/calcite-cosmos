@@ -129,6 +129,16 @@ documentation.
 > allowance stood for a long time on the emulator's word, and emitted a statement Azure will not
 > run. `ORDER BY t0.x` is rejected too, so it is the alias and not the arity.
 
+**A hundred-term `IN` is served by the index.** Measured on a real account with
+`PopulateIndexMetrics`: `WHERE c.category IN (@k0, ..., @k99)` reports
+`{"UtilizedIndexes":{"SingleIndexes":[{"IndexSpec":"/category/?"}]},"PotentialIndexes":{"SingleIndexes":[]}}`
+— the index on the restricted path is used and nothing is left unused. This is the form the lookup
+join emits, at the batch size it emits, and the measurement is what says the feature is an
+improvement rather than a scan with a large predicate bolted on.
+
+Also measured: the index metrics header carries **JSON**, not the prose the documentation shows. The
+prose is what the portal renders.
+
 **A multi-key `ORDER BY` really does need a composite index spanning its keys.** Measured on a real
 account against a container built with the default indexing policy and so with no composite index at
 all: `ORDER BY c.category, c.price` is rejected with **400**, while `ORDER BY c.price` over the same

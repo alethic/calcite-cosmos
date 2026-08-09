@@ -69,6 +69,22 @@ data-plane API — a page of results arrives only by awaiting it — so a synchr
 nothing but block a thread for a network round trip per page. Rather than hide that behind an
 interface that looks cheap, the adapter offers only the asynchronous route.
 
+## Joining a container to something else
+
+Cosmos has no relational join — its `JOIN` cross-products a document with its own nested arrays — so a join between a container and anything else is performed outside the service. The adapter does not read the whole container to do it: the other side's join keys are collected, deduplicated, and sent with the statement, so only documents that could match come back. This is the shape Flink calls a lookup join.
+
+It applies to an inner join on a single equality where the container's side of the key is a document path. Anything else is joined the ordinary way, by reading both sides.
+
+**One thing a host has to do for this to plan.** After the cost-based planner runs, apply the calc rules as a pass over the result:
+
+```csharp
+var program = new HepProgramBuilder();
+foreach (var rule in ClrAsyncEnumerableRules.CalcRules())
+    program.addRuleInstance(rule);
+```
+
+This is Calcite's own `Programs.CALC_PROGRAM` and it is a pass, not a set of rules for the planner. Without it a projection that sits above a join has nothing to implement it, and the failure says only that the plan cannot be implemented. It does not arise without a join, because every other projection is pushed into the container.
+
 ## The row model
 
 A container has no row schema: two items may share nothing but `id`. So a table is **one map column
