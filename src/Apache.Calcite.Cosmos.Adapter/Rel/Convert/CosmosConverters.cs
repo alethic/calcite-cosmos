@@ -178,6 +178,31 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
             return Expression.Call(null, GetExecutorMethod, root, Expression.Constant(names));
         }
 
+        static readonly System.Reflection.MethodInfo GetWriterMethod = typeof(CosmosSchemas).GetMethod(nameof(CosmosSchemas.GetWriter), [typeof(org.apache.calcite.DataContext), typeof(string[])])
+            ?? throw new InvalidOperationException($"'{nameof(CosmosSchemas.GetWriter)}' is missing from {nameof(CosmosSchemas)}.");
+
+        /// <summary>
+        /// Returns the expression by which the running plan reaches what writes to a container.
+        /// </summary>
+        /// <remarks>
+        /// The counterpart of <see cref="ExecutorExpression"/>, and it takes the table directly rather
+        /// than finding one at the leaf: a write's input is any sequence at all, and the container it
+        /// writes to is named by the modify rather than scanned below it.
+        /// </remarks>
+        /// <param name="table">The table being written to.</param>
+        /// <param name="root">The parameter the context arrives by.</param>
+        /// <returns>The expression.</returns>
+        public static Expression WriterExpression(RelOptTable table, ParameterExpression root)
+        {
+            var qualifiedName = (table ?? throw new ArgumentNullException(nameof(table))).getQualifiedName();
+
+            var names = new string[qualifiedName.size()];
+            for (var i = 0; i < names.Length; i++)
+                names[i] = (string)qualifiedName.get(i);
+
+            return Expression.Call(null, GetWriterMethod, root, Expression.Constant(names));
+        }
+
         /// <summary>
         /// Returns the single scan a Cosmos subtree bottoms out at.
         /// </summary>

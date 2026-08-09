@@ -74,6 +74,9 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
             /// <summary>A document read directly by id and partition key.</summary>
             public const string PointRead = "point_read";
 
+            /// <summary>A document created, replaced or deleted.</summary>
+            public const string Write = "write";
+
         }
 
     }

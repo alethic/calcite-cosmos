@@ -78,6 +78,15 @@ namespace Apache.Calcite.Cosmos.Adapter
         public const string MapColumnName = "_MAP";
 
         /// <summary>
+        /// The field ordinal the map column occupies, which is the first.
+        /// </summary>
+        /// <remarks>
+        /// Promoted columns begin at one, in the order <see cref="CosmosTable.GetPromotedColumnNames"/>
+        /// returns them.
+        /// </remarks>
+        public const int MapColumnOrdinal = 0;
+
+        /// <summary>
         /// Derives the ordinal-to-path binding for a row type.
         /// </summary>
         /// <remarks>

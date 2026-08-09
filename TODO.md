@@ -21,16 +21,18 @@ rejecting the full text search Azure runs — so "the reference says" is not a m
 
 ## 0. Resuming
 
-**433 tests: 428 passing, 5 skipped**, on net8.0 and net10.0. The skips are things only a real account
+**466 tests: 461 passing, 5 skipped**, on net8.0 and net10.0. The skips are things only a real account
 can answer; the suite runs against one when `COSMOS_TEST_ENDPOINT` and `COSMOS_TEST_KEY` name it, and
 reports inconclusive rather than passing where the emulator cannot. Several facts in this file and in
 `DESIGN.md` were settled that way — an Azure account, used and deleted.
 
-Work is on `claude/cosmos-disjunction-weakening`, which is what the repository has checked out. It is
-pushed; no pull request is open for it. Everything before it merged as PR #2.
+Work is on `claude/cosmos-dml`, branched from `claude/cosmos-disjunction-weakening`, which is open as
+[PR #3](https://github.com/ikvmnet/calcite-cosmos/pull/3) and not yet merged. Everything before that
+merged as PR #2. The repository moved to the `ikvmnet` organization.
 
 **Nothing is half-finished.** The lookup join, the disjunction weakening, the diagnostics surface, the
-statistics work and the Entra support are complete and covered. What remains below is not started.
+statistics work, the Entra support and now `INSERT` and `DELETE` are complete and covered. What
+remains below is not started.
 
 ### Running the sample
 
@@ -82,14 +84,22 @@ nothing exercised the model path.
 Everything small is done. Each of these is larger, and each has a stated prerequisite rather than an
 open question:
 
-1. **Shuffle the build side by partition key** (section 11) — the biggest remaining win for the lookup
+1. **`UPDATE` as a patch** (section 3) — the adapter now writes, and this is the hole left in that.
+   The planner already supplies the `SET` list separately from the rows, so the work is the
+   translation and the one decision it turns on: what `SET "_MAP" = …` means, a patch having no
+   operation that replaces a whole document.
+2. **Shuffle the build side by partition key** (section 11) — the biggest remaining win for the lookup
    join, but measure first: routing per key means one request per distinct key, and whether that beats
    one cross-partition query depends on key count against partition count. Grouping by feed range is
    the likelier shape.
-2. **DML** (section 3), and then **Patch for `UPDATE`** — the largest missing *category*. The adapter
-   is read-only and nothing about Cosmos requires that.
 3. **A cache across executions** (section 11) — the within-execution one is done; this one needs a TTL,
    a bound shared between queries, and something that owns it.
+
+**One thing found and not fixed.** `CosmosLookupJoinRule` has the shape of the defect measured in the
+write rule — a converter rule between two container-independent conventions, created once per
+container, whose instances therefore share a description and displace one another. Every existing
+lookup-join test puts the same container on the probe side, so none of them would show it. The
+experiment is a join with the *other* container on the probe side and both rule sets registered.
 
 ---
 
@@ -220,28 +230,74 @@ constraint on where this can apply rather than a reason not to.
 ## 3. Writing
 
 **Cosmos SQL has no DML, and this is not a reason the adapter cannot write.** The query language has no
-`INSERT`, `UPDATE` or `DELETE`, but the SDK has item CRUD, and Calcite expresses writes through
-`ModifiableTable` rather than through generated SQL. This is the largest missing *category* — the
-adapter is currently read-only and nothing about Cosmos requires that.
+`INSERT`, `UPDATE` or `DELETE`, but the SDK has item CRUD, and Calcite expresses writes as a
+`TableModify` consuming rows rather than as generated SQL.
 
-### `INSERT` — *large*
+`INSERT` and `DELETE` are done. `UPDATE` is not, and is the interesting one left.
 
-`ModifiableTable.getModifiableCollection`, or an `EnumerableTableModify` equivalent for the async
-convention, over `CreateItemAsync`/`UpsertItemAsync`. The row model makes it interesting: a document is
-the map column, so an insert of promoted columns alone is an incomplete document, and an insert of the
-map column is the document itself. Which one a caller means has to be decided.
+### `INSERT` — *done*
 
-### `DELETE` — *medium, after INSERT*
+`CosmosTableModify` over `CreateItemStreamAsync`. What it writes is recorded in `DESIGN.md` under
+*What an insert writes*: the map column is the document, a promoted column sets the property it
+projects, and a promoted column contributes only when it is not null — forced, because an unmentioned
+column arrives as null and the alternative overwrites the document it was handed with a row of nulls.
 
-`DeleteItemAsync` given `id` and the partition key — the same recovery the point lookup needs, so it
-falls out of that work. `WHERE` clauses that do not pin both would have to read then delete, which is a
-different cost and should probably be refused rather than done silently.
+`ModifiableTable` turned out **not to be needed**: `SqlToRelConverter` falls back to
+`LogicalTableModify` where a table unwraps to none, so a rule matching that is the whole entry point.
+Which is as well, since `getModifiableCollection` would have meant a collection blocking on
+`CreateItemAsync` per element — the sync-over-async pull the asynchronous convention exists to exclude.
 
-### `UPDATE` — *large*
+Four things were measured rather than assumed, and three of them changed the design:
+
+- **`INSERT` does not reach a rule without column strategies.** `_MAP` and `id` are both `NOT NULL`
+  and both true, so the validator refuses an insert omitting either. `ColumnStrategy` separates *not
+  null in the table* from *optional in an insert*, which is the distinction actually wanted.
+- **`STORED`, not `VIRTUAL`, for `_ts` and `_etag`.** Both refuse a write; `VIRTUAL` also means *not
+  stored*, and makes Calcite drop the column from the scan and project a null. Forty tests failed at
+  once. The row type is identical either way.
+- **The write rule cannot be bound to a convention.** A converter rule's description comes from the
+  traits it converts between, and `NONE → CLR_ASYNC_ENUMERABLE` names no container, so per-container
+  instances collide and a planner keeps one. With two containers registered, an insert into the first
+  stopped planning.
+- **A map literal cannot be inserted** — Calcite cannot build a type spec for `MAP<VARCHAR, ANY>`, so
+  implicit coercion throws. A source column already of that type is fine, which is what a scan of
+  another container gives, so copying documents between containers is unaffected.
+
+### `DELETE` — *done*
+
+`DeleteItemStreamAsync` given `id` and the partition key, both read out of the document the row
+describes — which is also how a nested partition key path works, that not being a promoted column.
+
+**Read-then-delete is allowed rather than refused**, reversing what this file previously guessed. The
+scan feeding the modify is visible in the plan, and refusing would make `DELETE … WHERE price > 100`
+impossible rather than expensive. Where the predicate pins `id` and a complete partition key the scan
+is already a point read.
+
+Still open: the whole-partition case. A predicate pinning only the partition key could be
+`DeleteAllItemsByPartitionKeyStreamAsync`, which is not a query at all — `SupportsDeletePushDown` in
+section 11.
+
+### `UPDATE` — *large, and the next thing here*
 
 Cosmos has patch operations (`PatchItemAsync`) that map onto a targeted `SET`, and replace for the
 rest. A patch is far cheaper than a read-modify-write and expresses a bounded set of operations, so the
 translation from `SET` clauses to patch operations is the interesting part.
+
+**The planner already hands over what a patch needs**, which is the part worth knowing before
+starting: the node carries `updateColumnList` and `sourceExpressionList` — named columns and their new
+values — separately from the rows. Observed, and pinned by a test:
+
+```
+LogicalTableModify(operation=[UPDATE], updateColumnList=[[category]], sourceExpressionList=[[$5]])
+  LogicalProject(_MAP=[$0], id=[$1], _ts=[$2], _etag=[$3], category=[$4], EXPR$0=['x'])
+```
+
+The question to settle first is what `SET "_MAP" = …` means. A patch expresses a bounded set of
+operations over paths, and setting the whole document is not one of them — so the map column is either
+refused as a patch target or falls back to a replace, and those are different costs rather than
+different spellings. Until then `UPDATE` is declined outright and the plan fails, which is the right
+answer for a statement the adapter cannot carry out: a replace standing in for a patch would work, and
+would silently cost a read-modify-write per row.
 
 ### Transactional batch — *medium*
 
@@ -523,7 +579,7 @@ the mappings point at something that exists rather than at something that sounds
 | `SupportsDynamicFiltering` | **worth taking** — FLIP-248 dynamic partition pruning. The other half of sideways information passing: instead of fetching by key, the build side's values *prune partitions* on the probe side at run time. Complements the lookup join rather than competing with it, and for Cosmos the unit pruned is a physical partition. |
 | `SupportsLookupCustomShuffle` | **worth taking, and it is the big one.** A connector says how rows should be partitioned before they reach the lookup. Shuffling build rows by Cosmos partition key would make every batch single-partition, turning a fan-out into one request — which is the saving the lookup join otherwise leaves on the table. |
 | `SupportsReadingMetadata` | **small.** Metadata columns declared rather than always promoted: `_rid`, `_self`, `_attachments`, and the per-item `ttl`. Would also let `_ts`/`_etag` stop occupying ordinary column ordinals. |
-| `SupportsRowLevelModificationScan` | **relevant once there is DML.** The scan is told it is feeding an `UPDATE`/`DELETE`, so it can read only what the modification needs — for Cosmos, `id` and the partition key rather than whole documents. |
+| `SupportsRowLevelModificationScan` | **worth taking, and now it would pay.** The scan is told it is feeding an `UPDATE`/`DELETE`, so it can read only what the modification needs. `DELETE` is implemented and reads whole documents to use two paths out of them — `id` and the partition key — which for a map row model is the whole cost of the statement. |
 | `SupportsWatermarkPushDown`, `SupportsSourceWatermark` | **only with the change feed.** Streaming concepts; the change feed is the analogue, and `_ts` the natural watermark. See *change feed*. |
 
 ### Lookup abilities
@@ -536,7 +592,7 @@ the mappings point at something that exists rather than at something that sounds
 | `LookupOptions` | The options that go with the above — cache type, maximum rows, TTL, reload strategy. Worth copying the *names* so anyone who knows Flink knows these. |
 | Lookup retry (FLIP-234) | **probably not.** Flink retries a lookup that comes back empty, for late-arriving reference data. The SDK already retries throttling, which is the failure that actually happens here. |
 
-### Sink abilities, for when there is DML
+### Sink abilities
 
 All of these bear on *Writing* above, and several map onto a Cosmos operation that is cheaper than the
 obvious one:
@@ -545,7 +601,7 @@ obvious one:
 |---|---|
 | `SupportsTargetColumnWriting` | **Patch.** Writing named columns only is exactly `PatchItemStreamAsync`, which sends the changed properties rather than the whole document. |
 | `SupportsRowLevelUpdate` | Same — an `UPDATE` touching three fields should be a patch, not a replace. |
-| `SupportsRowLevelDelete` | Delete by `id` and partition key, which is a point operation. |
+| `SupportsRowLevelDelete` | **done** — delete by `id` and partition key, which is a point operation. |
 | `SupportsDeletePushDown` | `DELETE … WHERE` decomposed and pushed. Where the predicate pins a partition key and nothing else, the service has `DeleteAllItemsByPartitionKeyStreamAsync` — a whole-partition delete that is not a query at all. |
 | `SupportsTruncate` | `TRUNCATE TABLE` — per-partition deletes, or recreating the container, which is cheaper and has different semantics. Worth deciding deliberately rather than by default. |
 | `SupportsOverwrite` | Upsert, which is native (`UpsertItemStreamAsync`). |
