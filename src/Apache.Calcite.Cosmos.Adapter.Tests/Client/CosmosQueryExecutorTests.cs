@@ -733,7 +733,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
             builder.SelectProperty("id", "c.id");
             builder.Where = "c.id = \"1\" AND c.category = \"bikes\"";
 
-            var query = new CosmosQuery(builder.Build(), new CosmosParameterList().Parameters, ["bikes"], null, "1");
+            var query = new CosmosQuery(builder.Build(), new CosmosParameterList().Parameters, ["bikes"], null, "1", PartitionKeyIsComplete: true);
             var results = await Execute(query);
 
             var document = results.Should().ContainSingle().Subject;
@@ -751,7 +751,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
             var builder = Builder();
             builder.Where = "c.id = \"nope\" AND c.category = \"bikes\"";
 
-            var query = new CosmosQuery(builder.Build(), new CosmosParameterList().Parameters, ["bikes"], null, "nope");
+            var query = new CosmosQuery(builder.Build(), new CosmosParameterList().Parameters, ["bikes"], null, "nope", PartitionKeyIsComplete: true);
 
             (await Execute(query)).Should().BeEmpty();
         }

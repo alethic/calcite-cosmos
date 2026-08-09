@@ -154,8 +154,11 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
             // Recovered before translation, from the same bindings, so that a query naming its
             // partition key can be executed against one partition instead of fanned out.
             if (implementor.PartitionKeyValues is null &&
-                Metadata.CosmosPartitionKeyExtractor.TryExtract(getCondition(), implementor.Fields, implementor.Container, implementor.RootAlias, out var partitionKey))
+                Metadata.CosmosPartitionKeyExtractor.TryExtractPrefix(getCondition(), implementor.Fields, implementor.Container, implementor.RootAlias, out var partitionKey, out var complete))
+            {
                 implementor.PartitionKeyValues = partitionKey;
+                implementor.PartitionKeyIsComplete = complete;
+            }
 
             // And whether the predicate is only that, plus an id — the shape a point read answers for
             // about 1 RU rather than the 2.3 a query costs at best. Offered here; whether it is taken

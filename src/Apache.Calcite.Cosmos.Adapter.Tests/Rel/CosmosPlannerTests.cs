@@ -677,6 +677,80 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             query.PointReadId.Should().Be("x");
         }
 
+
+        // ── Hierarchical partition keys ───────────────────────────────────────────
+
+        static readonly CosmosContainerMetadata Tenanted = new("products", new[] { "/tenant", "/user" });
+
+        /// <summary>
+        /// Plans against a container whose partition key is hierarchical.
+        /// </summary>
+        CosmosQuery TenantedQuery(string sql)
+        {
+            _table = new CosmosTable(Tenanted);
+
+            var logical = PlanLogical(sql);
+            var planner = (VolcanoPlanner)logical.getCluster().getPlanner();
+
+            foreach (var rule in CosmosRules.GetRules(_table.Convention))
+                planner.addRule(rule);
+
+            planner.setRoot(planner.changeTraits(logical, logical.getTraitSet().replace(_table.Convention).simplify()));
+            var best = planner.findBestExp();
+
+            var implementor = new CosmosImplementor(best.getCluster().getRexBuilder(), Tenanted);
+            implementor.Visit(best);
+            return implementor.Build();
+        }
+
+        /// <remarks>
+        /// Cosmos routes on any prefix of a hierarchical key, so pinning the outermost path reaches the
+        /// partitions under that tenant rather than every partition in the container. Recovering only a
+        /// complete key threw that away.
+        /// </remarks>
+        [TestMethod]
+        public void APinnedOutermostPathRoutesOnThePrefix()
+        {
+            var query = TenantedQuery("SELECT * FROM products AS c WHERE c.\"tenant\" = 'acme'");
+
+            query.PartitionKeyValues.Should().Equal("acme");
+            query.PartitionKeyIsComplete.Should().BeFalse();
+        }
+
+        [TestMethod]
+        public void PinningEveryPathIsACompleteKey()
+        {
+            var query = TenantedQuery("SELECT * FROM products AS c WHERE c.\"tenant\" = 'acme' AND c.\"user\" = 'kim'");
+
+            query.PartitionKeyValues.Should().Equal("acme", "kim");
+            query.PartitionKeyIsComplete.Should().BeTrue();
+        }
+
+        /// <remarks>
+        /// Prefix means prefix. Routing is on the leading components, so pinning an inner path without
+        /// the one above it narrows nothing and must not be presented as though it did.
+        /// </remarks>
+        [TestMethod]
+        public void AnInnerPathWithoutTheOuterRoutesNothing()
+        {
+            var query = TenantedQuery("SELECT * FROM products AS c WHERE c.\"user\" = 'kim'");
+
+            query.PartitionKeyValues.Should().BeNull();
+        }
+
+        /// <remarks>
+        /// A prefix routes to a set of partitions and does not identify a document, so it cannot carry
+        /// a point read however much of the predicate is an id.
+        /// </remarks>
+        [TestMethod]
+        public void APrefixCannotCarryAPointRead()
+        {
+            var query = TenantedQuery("SELECT * FROM products AS c WHERE c.\"tenant\" = 'acme' AND c.\"id\" = 'x'");
+
+            query.PartitionKeyValues.Should().Equal("acme");
+            query.PointReadId.Should().BeNull();
+        }
+
     }
 
 }

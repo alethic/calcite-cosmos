@@ -260,9 +260,10 @@ often such a thing.
   service, because nothing in the test data is binary.
 - **Temporal representation** — see *Temporal* above. The reading side handles ISO strings and epoch
   numbers; what is missing is any basis for deciding which a column holds.
-- **Hierarchical partition keys** — *small.* `CosmosPartitionKeyExtractor` yields nothing unless every
-  declared path is pinned. Cosmos narrows to a subset of physical partitions on a *prefix*, so pinning
-  the outer key of `/tenant,/user` should still count and currently does not.
+- **Hierarchical partition keys** — *done.* A pinned leading run routes on the prefix; an inner path
+  without the one above it narrows nothing and is not offered as though it did. A prefix routes and
+  does not identify a document, so it cannot carry a point read — `PartitionKeyIsComplete` is what
+  keeps those apart.
 
 ---
 
@@ -278,8 +279,11 @@ often such a thing.
   becomes a run-time failure rather than a plan-time refusal. That trade is the decision.
 - **Connection options as operands** — *small.* Consistency level, preferred regions, application name,
   for callers who do not want to write a factory.
-- **Multiple databases** — *small.* One schema is one database; a schema per database is a model
-  concern, but nothing supports a schema spanning several.
+- **Multiple databases** — *done.* Omitting `database` exposes the account, with one subschema per
+  database, which is how both Cosmos and Calcite nest. Metadata for every container of every database
+  is read eagerly when the schema is built — a container definition is small and Calcite asks for the
+  whole map at once, but an account with many databases pays for all of them to reach one. Lazy
+  subschemas would fix that and want a lazy `Map`.
 - **Client disposal** — *small.* The schema owns a client for the life of the process because Calcite
   offers no disposal hook. Worth revisiting against `SchemaPlus` rather than left as a comment.
 - **Server-side functions** — *medium.* Cosmos has stored procedures and JavaScript UDFs. A UDF is

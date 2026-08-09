@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Threading;
 
@@ -37,6 +37,17 @@ namespace Apache.Calcite.Cosmos.Adapter
     /// container's metadata is read from its definition — the partition key and indexing policy —
     /// and never inferred from the documents it holds.
     /// </para>
+    /// <para>
+    /// <b>Omit <c>database</c> to expose the account instead.</b> Cosmos nests account → database →
+    /// container and Calcite nests schema → subschema → table, so the schema then carries one
+    /// subschema per database and a query names a container as <c>"inventory"."products"</c>. One
+    /// entry, one client, and a join across two databases; naming a database is the right shape when
+    /// a caller wants one and nothing else.
+    /// </para>
+    /// <para>
+    /// Supply <c>clientFactory</c> instead of <c>endpoint</c> and <c>key</c> to reach an account any
+    /// other way — Entra ID, a custom serializer or retry policy, or a client the application owns.
+    /// </para>
     /// </remarks>
     public class CosmosSchemaFactory : SchemaFactory
     {
@@ -72,19 +83,54 @@ namespace Apache.Calcite.Cosmos.Adapter
             if (operand is null)
                 throw new ArgumentNullException(nameof(operand));
 
-            var database = GetString(operand, DatabaseOperand) ?? throw new ArgumentException($"Operand '{DatabaseOperand}' is required.");
-
             // The client is owned by the schema for the life of the process. Schemas are created
             // once per connection and Calcite offers no disposal hook to release it on.
             var client = CreateClient(operand);
+            var containers = GetStrings(operand, ContainersOperand);
+
+            // Naming a database gives a schema whose tables are its containers. Omitting it gives the
+            // account: one subschema per database, which is how Cosmos nests and how Calcite nests, and
+            // which needs one client rather than one per database.
+            if (GetString(operand, DatabaseOperand) is not string database || database.Length == 0)
+                return CreateAccountSchema(client, containers);
+
             var db = client.GetDatabase(database);
 
             // The same database the metadata was read from also executes the queries, so the client the
             // schema holds outlives this call. A container reference is a handle rather than a connection,
             // so binding one per table costs nothing.
             return new CosmosSchema(
-                ReadContainers(db, GetStrings(operand, ContainersOperand)),
+                ReadContainers(db, containers),
                 container => new CosmosQueryExecutor(db.GetContainer(container.Name)));
+        }
+
+        /// <summary>
+        /// Builds the account-level schema, with one subschema per database.
+        /// </summary>
+        /// <remarks>
+        /// The <c>containers</c> operand still applies, and applies to every database — which is only
+        /// useful where they share container names. Omitting it, which is the ordinary case here,
+        /// exposes every container of every database.
+        /// </remarks>
+        static Schema CreateAccountSchema(CosmosClient client, IReadOnlyList<string> containers)
+        {
+            var databases = new List<KeyValuePair<string, IReadOnlyList<CosmosContainerMetadata>>>();
+
+            using (var iterator = client.GetDatabaseQueryIterator<DatabaseProperties>())
+            {
+                while (iterator.HasMoreResults)
+                {
+                    foreach (var properties in iterator.ReadNextAsync(CancellationToken.None).GetAwaiter().GetResult())
+                    {
+                        var database = client.GetDatabase(properties.Id);
+                        databases.Add(new(properties.Id, ReadContainers(database, containers)));
+                    }
+                }
+            }
+
+            return new CosmosAccountSchema(
+                databases,
+                (database, container) => new CosmosQueryExecutor(client.GetDatabase(database).GetContainer(container.Name)));
         }
 
         /// <summary>

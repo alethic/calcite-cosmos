@@ -18,9 +18,14 @@ namespace Apache.Calcite.Cosmos.Adapter
     /// <param name="Sql">The statement text.</param>
     /// <param name="Parameters">The bound parameter values.</param>
     /// <param name="PartitionKeyValues">
-    /// One value per declared partition key path when the predicate pinned every one of them,
-    /// otherwise <c>null</c>. Supplying it restricts execution to a single physical partition
-    /// instead of fanning out across all of them.
+    /// The leading partition key values the predicate pinned, outermost first, or <c>null</c> where it
+    /// pinned none. Supplying them restricts execution to the partitions holding that prefix instead of
+    /// fanning out across every one — a complete key reaches a single logical partition, and a prefix of
+    /// a hierarchical key reaches the subset under it. Either way it routes and does not filter.
+    /// </param>
+    /// <param name="PartitionKeyIsComplete">
+    /// Whether <paramref name="PartitionKeyValues"/> covers every declared path. A prefix routes but
+    /// does not identify a document, so a point read requires this and a query does not.
     /// </param>
     /// <param name="MaxItemCount">
     /// The most rows the statement can return, when the statement says so, otherwise <c>null</c>.
@@ -41,7 +46,7 @@ namespace Apache.Calcite.Cosmos.Adapter
     /// <c>CosmosPartitionKeyExtractor.TryExtractPointRead</c> for the predicate condition.
     /// </para>
     /// </param>
-    public readonly record struct CosmosQuery(string Sql, IReadOnlyList<CosmosParameter> Parameters, IReadOnlyList<object?>? PartitionKeyValues = null, int? MaxItemCount = null, string? PointReadId = null);
+    public readonly record struct CosmosQuery(string Sql, IReadOnlyList<CosmosParameter> Parameters, IReadOnlyList<object?>? PartitionKeyValues = null, int? MaxItemCount = null, string? PointReadId = null, bool PartitionKeyIsComplete = false);
 
     /// <summary>
     /// Accumulates the state contributed by a tree of <see cref="CosmosRel"/> nodes and renders
@@ -274,6 +279,11 @@ namespace Apache.Calcite.Cosmos.Adapter
         public IReadOnlyList<object?>? PartitionKeyValues { get; set; }
 
         /// <summary>
+        /// Gets or sets whether <see cref="PartitionKeyValues"/> covers every declared path.
+        /// </summary>
+        public bool PartitionKeyIsComplete { get; set; }
+
+        /// <summary>
         /// Allocates a fresh alias for an array traversal.
         /// </summary>
         /// <remarks>
@@ -323,7 +333,7 @@ namespace Apache.Calcite.Cosmos.Adapter
         /// </summary>
         /// <returns>The statement text and its bound parameters.</returns>
         /// <exception cref="InvalidOperationException">The accumulated clauses form a statement Cosmos does not accept.</exception>
-        public CosmosQuery Build() => new(_query.Build(), _parameters.Parameters, PartitionKeyValues, MaxItemCount(), PointReadId());
+        public CosmosQuery Build() => new(_query.Build(), _parameters.Parameters, PartitionKeyValues, MaxItemCount(), PointReadId(), PartitionKeyIsComplete);
 
         /// <summary>
         /// Gets or sets the <c>id</c> a filter pinned alongside a complete partition key, or <c>null</c>.

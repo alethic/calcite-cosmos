@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
@@ -140,7 +140,9 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
             // query: about 1 RU against 2.3 at best, and no query engine. The caller decided this is
             // such a statement; what arrives is the document rather than a projection, which is why the
             // row builder for this path differs.
-            if (query.PointReadId is string id && effective is PartitionKey readKey)
+            // The key must be complete: a prefix routes to a set of partitions and does not identify a
+            // document, so ReadItem cannot use one.
+            if (query.PointReadId is string id && query.PartitionKeyIsComplete && effective is PartitionKey readKey)
             {
                 await foreach (var document in ReadItemAsync(id, readKey, cancellationToken))
                     yield return document;

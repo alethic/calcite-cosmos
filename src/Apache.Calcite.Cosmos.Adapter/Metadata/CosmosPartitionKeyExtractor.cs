@@ -72,6 +72,60 @@ namespace Apache.Calcite.Cosmos.Adapter.Metadata
         }
 
         /// <summary>
+        /// Recovers as much of a hierarchical partition key as a predicate pins, outermost first.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// A hierarchical key is up to three paths, and Cosmos routes on any <em>prefix</em> of them: a
+        /// query pinning <c>/tenant</c> out of <c>/tenant, /user</c> reaches the subset of physical
+        /// partitions holding that tenant rather than every partition in the container. That is a large
+        /// saving on a container with many partitions, and <see cref="TryExtract"/> — which answers only
+        /// for a complete key — throws it away.
+        /// </para>
+        /// <para>
+        /// <b>Prefix means prefix.</b> Pinning <c>/user</c> without <c>/tenant</c> narrows nothing,
+        /// because the routing is on the leading components; so this takes the longest run of pinned
+        /// paths starting at the outermost and stops at the first gap. Supplying a prefix restricts
+        /// which partitions are visited and filters no rows, so the predicate is unaffected either way.
+        /// </para>
+        /// </remarks>
+        /// <param name="condition">The predicate, expressed over <paramref name="fields"/>.</param>
+        /// <param name="fields">The ordinal-to-path binding of the filtered input.</param>
+        /// <param name="container">The container whose partition key is sought.</param>
+        /// <param name="rootAlias">The alias bound to the container.</param>
+        /// <param name="values">On success, the pinned leading values, outermost first.</param>
+        /// <param name="complete">On success, whether every declared path was pinned.</param>
+        /// <returns><c>true</c> if at least the outermost path was pinned; otherwise <c>false</c>.</returns>
+        public static bool TryExtractPrefix(RexNode condition, IReadOnlyList<CosmosPath?> fields, CosmosContainerMetadata container, string rootAlias, out IReadOnlyList<object?> values, out bool complete)
+        {
+            values = Array.Empty<object?>();
+            complete = false;
+
+            if (condition is null || fields is null || container is null || container.PartitionKeyPaths.Count == 0)
+                return false;
+
+            var pinned = new Dictionary<string, object?>(StringComparer.Ordinal);
+            Collect(condition, fields, rootAlias, pinned);
+
+            var prefix = new List<object?>();
+
+            foreach (var path in container.PartitionKeyPaths)
+            {
+                if (pinned.TryGetValue(path, out var value) == false)
+                    break;
+
+                prefix.Add(value);
+            }
+
+            if (prefix.Count == 0)
+                return false;
+
+            values = prefix;
+            complete = prefix.Count == container.PartitionKeyPaths.Count;
+            return true;
+        }
+
+        /// <summary>
         /// Attempts to recover an <c>id</c> and a complete partition key from a predicate that says
         /// nothing else — the shape a point read can answer.
         /// </summary>
