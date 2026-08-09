@@ -720,6 +720,77 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
             act.Should().Throw<CosmosMaterializationException>();
         }
 
+        // ── Point reads ───────────────────────────────────────────────────────────
+
+        /// <remarks>
+        /// The read returns the document, not the projection the statement would have constructed —
+        /// which is the whole reason the converter builds a different row builder for this path.
+        /// </remarks>
+        [TestMethod]
+        public async Task APointReadReturnsTheDocument()
+        {
+            var builder = Builder();
+            builder.SelectProperty("id", "c.id");
+            builder.Where = "c.id = \"1\" AND c.category = \"bikes\"";
+
+            var query = new CosmosQuery(builder.Build(), new CosmosParameterList().Parameters, ["bikes"], null, "1");
+            var results = await Execute(query);
+
+            var document = results.Should().ContainSingle().Subject;
+            document.GetProperty("id").GetString().Should().Be("1");
+            document.GetProperty("name").GetString().Should().Be("Trail Blazer");
+        }
+
+        /// <remarks>
+        /// A missing document is an empty result rather than an error: the query this stands in for
+        /// would have returned no rows, and a read answering "no such document" is that answer.
+        /// </remarks>
+        [TestMethod]
+        public async Task APointReadOfAMissingDocumentReturnsNothing()
+        {
+            var builder = Builder();
+            builder.Where = "c.id = \"nope\" AND c.category = \"bikes\"";
+
+            var query = new CosmosQuery(builder.Build(), new CosmosParameterList().Parameters, ["bikes"], null, "nope");
+
+            (await Execute(query)).Should().BeEmpty();
+        }
+
+        /// <remarks>
+        /// And it costs less, which is the point of the whole path: a point read is charged about 1 RU
+        /// where the same fetch as a query is 2.3 at best.
+        /// <para>
+        /// Inconclusive on the emulator, which reports a flat 1 RU for both and so cannot tell them
+        /// apart. Asserting against that would be asserting a fiction — the emulator does not model
+        /// request charges, and this is the third thing it does not model faithfully.
+        /// </para>
+        /// </remarks>
+        [TestMethod]
+        public async Task APointReadCostsLessThanTheQuery()
+        {
+            if (IsEmulator)
+                Assert.Inconclusive("The emulator reports a flat request charge and cannot distinguish a point read from a query.");
+
+            var sql = "SELECT VALUE c FROM products c WHERE c.id = \"1\" AND c.category = \"bikes\"";
+            var parameters = new CosmosParameterList().Parameters;
+
+            double queryCharge = 0;
+            using (var iterator = Container().GetItemQueryStreamIterator(new QueryDefinition(sql)))
+            {
+                while (iterator.HasMoreResults)
+                {
+                    using var response = await iterator.ReadNextAsync();
+                    queryCharge += response.Headers.RequestCharge;
+                }
+            }
+
+            using var read = await Container().ReadItemStreamAsync("1", new PartitionKey("bikes"));
+            var readCharge = read.Headers.RequestCharge;
+
+            readCharge.Should().BeLessThan(queryCharge,
+                $"a point read ({readCharge} RU) should cost less than the equivalent query ({queryCharge} RU)");
+        }
+
         // ── Metadata read back from the service ───────────────────────────────────
 
         /// <remarks>

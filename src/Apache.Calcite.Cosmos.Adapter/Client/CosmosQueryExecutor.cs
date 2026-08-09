@@ -52,6 +52,29 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
         }
 
         /// <summary>
+        /// Reads one document directly, yielding it if it exists and nothing if it does not.
+        /// </summary>
+        /// <remarks>
+        /// A missing document is an empty result rather than an error: the query this stands in for
+        /// would have returned no rows, and a read that answers "no such document" is that answer.
+        /// </remarks>
+        async IAsyncEnumerable<JsonElement> ReadItemAsync(string id, PartitionKey partitionKey, [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            using var response = await _container.ReadItemStreamAsync(id, partitionKey, cancellationToken: cancellationToken).ConfigureAwait(false);
+
+            if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+                yield break;
+
+            response.EnsureSuccessStatusCode();
+
+            using var document = await JsonDocument.ParseAsync(response.Content, cancellationToken: cancellationToken).ConfigureAwait(false);
+
+            // Cloned for the same reason the query path clones: the element belongs to the document,
+            // which is disposed here and returns its buffer to the pool.
+            yield return document.RootElement.Clone();
+        }
+
+        /// <summary>
         /// Builds the SDK query definition for a rendered statement.
         /// </summary>
         /// <param name="query">The statement and its bound parameters.</param>
@@ -112,6 +135,18 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
         {
             // An explicit key wins; otherwise use whatever the predicate pinned.
             var effective = partitionKey ?? CreatePartitionKey(query.PartitionKeyValues);
+
+            // A statement that is exactly a lookup by id and a complete partition key is a read, not a
+            // query: about 1 RU against 2.3 at best, and no query engine. The caller decided this is
+            // such a statement; what arrives is the document rather than a projection, which is why the
+            // row builder for this path differs.
+            if (query.PointReadId is string id && effective is PartitionKey readKey)
+            {
+                await foreach (var document in ReadItemAsync(id, readKey, cancellationToken))
+                    yield return document;
+
+                yield break;
+            }
 
             var options = new QueryRequestOptions();
             if (effective is PartitionKey key)

@@ -1,6 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Text.Json;
+
+using Apache.Calcite.Cosmos.Adapter.Sql;
 
 using org.apache.calcite.sql.type;
 
@@ -51,6 +54,47 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
                 throw new CosmosMaterializationException($"Expected a JSON object for the row, got {row.ValueKind}.");
 
             return row.TryGetProperty(name, out var value) ? GetValue(value, typeName) : null;
+        }
+
+        /// <summary>
+        /// Reads a document path as a value of the given SQL type.
+        /// </summary>
+        /// <remarks>
+        /// What a point read needs, and what the projected form does not: the row is the document
+        /// itself, so a field is reached by walking its path rather than by naming a property of a
+        /// constructed object. An empty path is the document — the map column.
+        /// <para>
+        /// A segment that is not there reads as SQL <c>NULL</c>, exactly as an absent property does in
+        /// the projected form, because both are Cosmos returning nothing for that path.
+        /// </para>
+        /// </remarks>
+        /// <param name="document">The document.</param>
+        /// <param name="segments">The path's segments, relative to the document root.</param>
+        /// <param name="typeName">The SQL type the plan was built against.</param>
+        /// <returns>The value, or <c>null</c> where the path is absent or JSON null.</returns>
+        public static object? GetPath(JsonElement document, IReadOnlyList<CosmosPathSegment> segments, SqlTypeName typeName)
+        {
+            if (segments is null)
+                throw new ArgumentNullException(nameof(segments));
+
+            var value = document;
+
+            foreach (var segment in segments)
+            {
+                if (segment.IsIndex)
+                {
+                    if (value.ValueKind != JsonValueKind.Array || segment.ArrayIndex >= value.GetArrayLength())
+                        return null;
+
+                    value = value[segment.ArrayIndex];
+                    continue;
+                }
+
+                if (value.ValueKind != JsonValueKind.Object || value.TryGetProperty(segment.Name!, out value) == false)
+                    return null;
+            }
+
+            return GetValue(value, typeName);
         }
 
         /// <summary>

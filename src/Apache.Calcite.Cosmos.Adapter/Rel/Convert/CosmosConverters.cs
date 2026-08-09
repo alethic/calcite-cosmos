@@ -1,4 +1,5 @@
-using System;
+﻿using System;
+using System.Collections.Generic;
 using System.Linq.Expressions;
 using System.Text.Json;
 
@@ -29,6 +30,9 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
         static readonly System.Reflection.MethodInfo GetPropertyMethod = typeof(CosmosJson).GetMethod(nameof(CosmosJson.GetProperty), [typeof(JsonElement), typeof(string), typeof(SqlTypeName)])
             ?? throw new InvalidOperationException($"'{nameof(CosmosJson.GetProperty)}' is missing from {nameof(CosmosJson)}.");
 
+        static readonly System.Reflection.MethodInfo GetPathMethod = typeof(CosmosJson).GetMethod(nameof(CosmosJson.GetPath), [typeof(JsonElement), typeof(IReadOnlyList<CosmosPathSegment>), typeof(SqlTypeName)])
+            ?? throw new InvalidOperationException($"'{nameof(CosmosJson.GetPath)}' is missing from {nameof(CosmosJson)}.");
+
         static readonly System.Reflection.MethodInfo GetExecutorMethod = typeof(CosmosSchemas).GetMethod(nameof(CosmosSchemas.GetExecutor), [typeof(org.apache.calcite.DataContext), typeof(string[])])
             ?? throw new InvalidOperationException($"'{nameof(CosmosSchemas.GetExecutor)}' is missing from {nameof(CosmosSchemas)}.");
 
@@ -39,7 +43,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
         /// <param name="rexBuilder">Used when translating expressions.</param>
         /// <returns>The statement, its bound parameters, and any partition key a filter pinned.</returns>
         /// <exception cref="CosmosTranslationException">The subtree has no Cosmos SQL equivalent.</exception>
-        public static CosmosQuery GenerateQuery(RelNode input, RexBuilder rexBuilder)
+        public static (CosmosQuery Query, IReadOnlyList<CosmosPath?> Fields) GenerateQuery(RelNode input, RexBuilder rexBuilder)
         {
             if (input.getConvention() is not CosmosConvention convention)
                 throw new CosmosTranslationException($"Node '{input.getRelTypeName()}' is not in the Cosmos convention.");
@@ -47,9 +51,14 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
             var implementor = new CosmosImplementor(rexBuilder, convention.Container);
             implementor.Visit(input);
 
+            // Captured before the projection is forced, because that is what rebinds them: these are
+            // the paths each output field addresses in the document, which is what a point read reads
+            // by. After EnsureProjection the statement projects them, and the query path reads by name.
+            var fields = implementor.Fields;
+
             EnsureProjection(implementor, input.getRowType());
 
-            return implementor.Build();
+            return (implementor.Build(), fields);
         }
 
         /// <summary>
@@ -169,6 +178,52 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
             // The reader hands back the value already boxed as Calcite holds it, so what is left is the
             // conversion this row shape needs: a cast where the row is its single column, and nothing at
             // all where it is the object[] every wider row is.
+            if (body.Type != physType.RowType)
+                body = Expression.Convert(body, physType.RowType);
+
+            return Expression.Lambda(typeof(Func<,>).MakeGenericType(typeof(JsonElement), physType.RowType), body, row);
+        }
+
+        /// <summary>
+        /// Builds the delegate that reads one row out of a whole document.
+        /// </summary>
+        /// <remarks>
+        /// The point read's counterpart to <see cref="RowBuilder"/>. A read returns the document rather
+        /// than the object the statement would have constructed, so a field is reached by walking the
+        /// path it addresses instead of by naming a property — <c>_MAP</c> being the empty path, which
+        /// is the document itself.
+        /// </remarks>
+        /// <param name="physType">The physical type of the rows.</param>
+        /// <param name="rowType">The logical row type.</param>
+        /// <param name="fields">The path each output field addresses.</param>
+        /// <returns>The lambda, or <c>null</c> where a field addresses nothing and a read cannot serve.</returns>
+        public static LambdaExpression? DocumentRowBuilder(ClrPhysType physType, RelDataType rowType, IReadOnlyList<CosmosPath?> fields)
+        {
+            var row = Expression.Parameter(typeof(JsonElement), "document");
+            var typeFields = rowType.getFieldList();
+            var fieldCount = typeFields.size();
+
+            if (fields.Count < fieldCount)
+                return null;
+
+            var values = new Expression[fieldCount];
+
+            for (var i = 0; i < fieldCount; i++)
+            {
+                // A computed output has no path in the document, so a read cannot produce it and the
+                // statement has to be a query.
+                if (fields[i] is not CosmosPath path)
+                    return null;
+
+                values[i] = Expression.Call(null,
+                    GetPathMethod,
+                    row,
+                    Expression.Constant(path.Segments),
+                    Expression.Constant(((RelDataTypeField)typeFields.get(i)).getType().getSqlTypeName()));
+            }
+
+            Expression body = fieldCount == 1 ? values[0] : Expression.NewArrayInit(typeof(object), values);
+
             if (body.Type != physType.RowType)
                 body = Expression.Convert(body, physType.RowType);
 

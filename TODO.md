@@ -1,4 +1,4 @@
-# Outstanding work
+﻿# Outstanding work
 
 What a complete adapter would have, sized and reasoned, so that the next session picks up an argument
 rather than a list.
@@ -71,19 +71,11 @@ with in-process alternatives on a real scale rather than a notional one.
 Every execution today is `GetItemQueryStreamIterator`. The SDK has cheaper routes and the adapter uses
 none of them.
 
-### Point lookup by `id` and partition key — *medium, highest value*
+### Point lookup by `id` and partition key — *done*
 
-~1 RU against 2.3 RU minimum for the same fetch as a query, and no query engine. For key-value access,
-a large share of Cosmos usage, this is the biggest saving available.
-
-Half the machinery exists: `CosmosPartitionKeyExtractor` recovers the partition key values and
-`CosmosQuery` carries them. What is missing is recovering an `id` equality alongside them and calling
-`ReadItem`.
-
-The design work is not the SDK call. **A point read returns the document, not the projected object**,
-and the materializer assumes every row is an object keyed by output field name. Either the point-read
-path carries its own row builder — reading promoted columns from the document root, the shape the map
-row model started from — or the query path stops projecting. The first is smaller.
+`ReadItem` where the predicate is exactly an `id` and a complete partition key, and the rest of the
+statement asks for nothing a read cannot answer. The converter carries a second row builder that walks
+paths in the returned document, because a read returns the document rather than the projection.
 
 ### Batch point reads for `id IN (…)` — *medium, after the above*
 

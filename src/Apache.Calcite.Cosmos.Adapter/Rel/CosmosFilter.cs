@@ -157,6 +157,13 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
                 Metadata.CosmosPartitionKeyExtractor.TryExtract(getCondition(), implementor.Fields, implementor.Container, implementor.RootAlias, out var partitionKey))
                 implementor.PartitionKeyValues = partitionKey;
 
+            // And whether the predicate is only that, plus an id — the shape a point read answers for
+            // about 1 RU rather than the 2.3 a query costs at best. Offered here; whether it is taken
+            // depends on what the rest of the statement asks for, which the implementor decides.
+            if (implementor.PointReadCandidate is null &&
+                Metadata.CosmosPartitionKeyExtractor.TryExtractPointRead(getCondition(), implementor.Fields, implementor.Container, implementor.RootAlias, out _, out var pointReadId))
+                implementor.PointReadCandidate = pointReadId;
+
             var condition = implementor.Translate(getCondition());
 
             // Stacked filters are normally merged by the planner, but conjoin defensively rather

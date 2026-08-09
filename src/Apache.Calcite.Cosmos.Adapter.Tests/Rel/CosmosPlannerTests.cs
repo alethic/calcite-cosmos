@@ -598,6 +598,85 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             act.Should().Throw<Exception>();
         }
 
+
+        // ── Point lookup ──────────────────────────────────────────────────────────
+
+        /// <remarks>
+        /// A lookup by id and a complete partition key is a read, not a query: about 1 RU against the
+        /// 2.3 a query costs at best, and no query engine.
+        /// </remarks>
+        [TestMethod]
+        public void IdAndPartitionKeyBecomeAPointRead()
+        {
+            var query = Query(PlanToCosmos("SELECT * FROM products AS c WHERE c.\"id\" = 'x' AND c.\"category\" = 'bikes'"));
+
+            query.PointReadId.Should().Be("x");
+            query.PartitionKeyValues.Should().Equal("bikes");
+        }
+
+        /// <remarks>
+        /// <b>The predicate must say nothing else.</b> A point read applies no predicate of its own, so
+        /// under an extra conjunct it would return a document the query excludes — a wrong answer rather
+        /// than a slow one. The statement is still rendered and still executed; it is just executed as a
+        /// query.
+        /// </remarks>
+        [TestMethod]
+        public void AResidualPredicateRulesOutAPointRead()
+        {
+            var query = Query(PlanToCosmos("SELECT * FROM products AS c WHERE c.\"id\" = 'x' AND c.\"category\" = 'bikes' AND c.\"_ts\" > 100"));
+
+            query.PointReadId.Should().BeNull();
+            query.PartitionKeyValues.Should().Equal("bikes");
+        }
+
+        [TestMethod]
+        public void AnIdWithoutThePartitionKeyIsNotAPointRead()
+        {
+            Query(PlanToCosmos("SELECT * FROM products AS c WHERE c.\"id\" = 'x'")).PointReadId.Should().BeNull();
+        }
+
+        [TestMethod]
+        public void APartitionKeyWithoutAnIdIsNotAPointRead()
+        {
+            Query(PlanToCosmos("SELECT * FROM products AS c WHERE c.\"category\" = 'bikes'")).PointReadId.Should().BeNull();
+        }
+
+        /// <remarks>
+        /// A read returns one document whole. A row limit and an ordering describe a result set rather
+        /// than a document, so either rules it out even though the predicate would allow it.
+        /// </remarks>
+        [TestMethod]
+        public void ARowLimitRulesOutAPointRead()
+        {
+            var query = Query(PlanToCosmos("SELECT * FROM products AS c WHERE c.\"id\" = 'x' AND c.\"category\" = 'bikes' FETCH FIRST 1 ROWS ONLY"));
+
+            query.PointReadId.Should().BeNull();
+        }
+
+        /// <remarks>
+        /// Under a disjunction an equality does not constrain the whole predicate, so it pins nothing —
+        /// the same reason the partition key is not recovered from one.
+        /// </remarks>
+        [TestMethod]
+        public void ADisjunctionIsNotAPointRead()
+        {
+            var query = Query(PlanToCosmos("SELECT * FROM products AS c WHERE (c.\"id\" = 'x' AND c.\"category\" = 'bikes') OR c.\"id\" = 'y'"));
+
+            query.PointReadId.Should().BeNull();
+        }
+
+        /// <remarks>
+        /// A projection of plain paths still reads: the converter walks each path in the returned
+        /// document rather than naming a property of an object the statement never constructed.
+        /// </remarks>
+        [TestMethod]
+        public void AProjectionOfPathsStillPointReads()
+        {
+            var query = Query(PlanToCosmos("SELECT c.\"id\", c.\"category\" FROM products AS c WHERE c.\"id\" = 'x' AND c.\"category\" = 'bikes'"));
+
+            query.PointReadId.Should().Be("x");
+        }
+
     }
 
 }

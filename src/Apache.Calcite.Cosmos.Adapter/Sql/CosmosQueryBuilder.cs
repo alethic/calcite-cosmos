@@ -128,6 +128,11 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
         public bool HasOrderBy => _orderBy.Count > 0;
 
         /// <summary>
+        /// Gets whether an array traversal has been added.
+        /// </summary>
+        public bool HasUnnest => _unnests.Count > 0;
+
+        /// <summary>
         /// Gets the number of <c>ORDER BY</c> keys.
         /// </summary>
         public int OrderByCount => _orderBy.Count;

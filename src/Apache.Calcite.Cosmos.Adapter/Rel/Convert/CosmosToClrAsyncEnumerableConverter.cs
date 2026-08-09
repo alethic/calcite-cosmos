@@ -83,7 +83,21 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
             var physType = ClrPhysTypeImpl.Of(implementor.TypeFactory, getRowType(), pref.PreferArray());
             var rowType = physType.RowType;
 
-            var query = CosmosConverters.GenerateQuery(input, implementor.RexBuilder);
+            var (query, fields) = CosmosConverters.GenerateQuery(input, implementor.RexBuilder);
+
+            // A point read returns the document rather than the object the statement constructs, so the
+            // two paths need different row builders — and the read needs every output field to address
+            // a path, which only this knows. Where one does not, the read is withdrawn and the
+            // statement is executed as the query it already is.
+            var rowBuilder = query.PointReadId is null
+                ? null
+                : CosmosConverters.DocumentRowBuilder(physType, getRowType(), fields);
+
+            if (query.PointReadId is not null && rowBuilder is null)
+                query = query with { PointReadId = null };
+
+            rowBuilder ??= CosmosConverters.RowBuilder(physType, getRowType());
+
             Hook.QUERY_PLAN.run(query.Sql);
 
             return implementor.Result(physType,
@@ -91,7 +105,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
                     ReadAsyncMethod.MakeGenericMethod(rowType),
                     CosmosConverters.ExecutorExpression(input, implementor.Root),
                     Expression.Constant(query),
-                    CosmosConverters.RowBuilder(physType, getRowType()),
+                    rowBuilder,
                     // Calcite's cancellation is an AtomicBoolean on the DataContext rather than a token,
                     // and polling one between pages would not interrupt a page in flight. Enumerating the
                     // result is what cancels this, by not asking for the next page.

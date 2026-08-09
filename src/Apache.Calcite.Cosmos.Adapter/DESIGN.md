@@ -625,6 +625,30 @@ rows come back, only how many arrive per round trip — and without it a stateme
 fetches a full default page and pays for the rows it discards. An offset alone bounds nothing and asks
 for nothing.
 
+### Not every statement is a query
+
+A lookup by `id` and a complete partition key is a **point read**: `ReadItem`, about 1 RU, no query
+engine, against the 2.3 RU a query costs at best. `CosmosQuery.PointReadId` carries the `id` when the
+statement is one, and the executor reads instead of querying.
+
+**A point read applies no predicate**, and that governs when it is offered. Under
+`WHERE id = 'x' AND pk = 'y' AND price > 100` a read would return a document the query excludes — a
+wrong answer, not a slow one. So every top-level conjunct must be one of the equalities pinning `id`
+or a partition key path, and all of them must be pinned. `CosmosPartitionKeyExtractor` answers that
+question in the direction its name does not suggest: `Collect` records what a predicate pins and
+ignores the rest, and `CoversExactly` asks whether there *is* a rest.
+
+The rest of the statement rules it out just as firmly. A read returns one document, whole, so an
+ordering, a row limit, a grouping and an array traversal each describe something a document is not.
+`CosmosImplementor.Build` withholds the read for any of them.
+
+**The projection is the interesting one.** A read returns the document; the statement would have
+returned `SELECT VALUE { … }`. Two row shapes again — and this time the answer is not to force one,
+because forcing the projected shape is exactly the query the read is avoiding. Instead the converter
+builds a second row builder that walks each output field's *path* in the returned document, `_MAP`
+being the empty path. It can only do that where every output field addresses a path, so a computed
+projection withdraws the read and the statement executes as the query it already is.
+
 What executes the statement is *not* written into the plan. Calcite prepares a statement once and
 executes it many times, so the plan holds the table's qualified name and `CosmosSchemas.GetExecutor`
 walks it from the `DataContext`'s root schema on each run. A live `CosmosClient` compiled into the

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 
 using Apache.Calcite.Cosmos.Adapter.Metadata;
@@ -30,7 +30,18 @@ namespace Apache.Calcite.Cosmos.Adapter
     /// still fetches a full default page, and pays for the rows it then discards.
     /// </para>
     /// </param>
-    public readonly record struct CosmosQuery(string Sql, IReadOnlyList<CosmosParameter> Parameters, IReadOnlyList<object?>? PartitionKeyValues = null, int? MaxItemCount = null);
+    /// <param name="PointReadId">
+    /// The <c>id</c> to read directly when the statement is exactly a lookup by <c>id</c> and a
+    /// complete partition key, otherwise <c>null</c>.
+    /// <para>
+    /// A point read costs about 1 RU where the same fetch as a query costs 2.3 at best and goes through
+    /// the query engine. It applies no predicate and returns the document rather than a projection, so
+    /// it is offered only where the statement asks for nothing a read cannot answer — see
+    /// <see cref="CosmosImplementor.Build"/> for what that excludes, and
+    /// <c>CosmosPartitionKeyExtractor.TryExtractPointRead</c> for the predicate condition.
+    /// </para>
+    /// </param>
+    public readonly record struct CosmosQuery(string Sql, IReadOnlyList<CosmosParameter> Parameters, IReadOnlyList<object?>? PartitionKeyValues = null, int? MaxItemCount = null, string? PointReadId = null);
 
     /// <summary>
     /// Accumulates the state contributed by a tree of <see cref="CosmosRel"/> nodes and renders
@@ -312,7 +323,39 @@ namespace Apache.Calcite.Cosmos.Adapter
         /// </summary>
         /// <returns>The statement text and its bound parameters.</returns>
         /// <exception cref="InvalidOperationException">The accumulated clauses form a statement Cosmos does not accept.</exception>
-        public CosmosQuery Build() => new(_query.Build(), _parameters.Parameters, PartitionKeyValues, MaxItemCount());
+        public CosmosQuery Build() => new(_query.Build(), _parameters.Parameters, PartitionKeyValues, MaxItemCount(), PointReadId());
+
+        /// <summary>
+        /// Gets or sets the <c>id</c> a filter pinned alongside a complete partition key, or <c>null</c>.
+        /// </summary>
+        /// <remarks>
+        /// Set by a filter whose predicate says nothing beyond those equalities. Whether it is acted on
+        /// is <see cref="Build"/>'s decision, because the predicate is only half the question.
+        /// </remarks>
+        public string? PointReadCandidate { get; set; }
+
+        /// <summary>
+        /// Returns the <c>id</c> to read directly, or <c>null</c> where the statement asks for something
+        /// a point read cannot answer.
+        /// </summary>
+        /// <remarks>
+        /// A point read returns one document, whole and unfiltered. So every clause beyond the pinned
+        /// predicate rules it out: a projection is computed by the query engine, a row limit and an
+        /// ordering describe a result set rather than a document, a grouping aggregates one, and an
+        /// array traversal returns a row per element rather than a row per document. The projection is
+        /// the exception — the converter can read paths out of the document itself — and it is checked
+        /// there rather than here, because only the converter knows whether every output field is a path.
+        /// </remarks>
+        string? PointReadId()
+        {
+            if (PointReadCandidate is null)
+                return null;
+
+            if (_query.HasGroupBy || _query.HasOrderBy || _query.HasOrderByRank || _query.HasRowLimit || _query.HasUnnest)
+                return null;
+
+            return PointReadCandidate;
+        }
 
         /// <summary>
         /// Returns the most rows the statement can return, or <c>null</c> where it is unbounded.
