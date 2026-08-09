@@ -72,28 +72,27 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
             // expression has been translated against them.
             var translator = implementor.CreateTranslator();
 
-            var paths = new CosmosPath[projects.size()];
-            var everyProjectionIsAPath = true;
+            var paths = new CosmosPath?[projects.size()];
 
             for (var i = 0; i < projects.size(); i++)
             {
                 var node = (RexNode)projects.get(i);
                 implementor.Query.SelectProperty((string)names.get(i), translator.Translate(node));
 
-                if (translator.TryResolvePath(node, out var path))
-                    paths[i] = path!;
-                else
-                    everyProjectionIsAPath = false;
+                // Null where the projection computes rather than addresses. Nothing downstream can
+                // refer to it, because Cosmos has no name for it — a projection alias is not
+                // addressable from ORDER BY or WHERE.
+                paths[i] = translator.TryResolvePath(node, out var path) ? path : null;
             }
 
             // Downstream clauses address the source document, not the projected object — Cosmos
             // ORDER BY cannot reference a projection alias. Rebinding to the underlying paths is
             // therefore what lets a sort above a projection still work.
             //
-            // When any projection is a computed expression it has no path to rebind to. Clearing
-            // the bindings makes every downstream field reference fail to resolve, which declines
-            // the operator rather than emitting something that addresses the wrong value.
-            implementor.Fields = everyProjectionIsAPath ? paths : Array.Empty<CosmosPath>();
+            // Per ordinal, not all or nothing: a computed column bound to null declines only the
+            // operators that actually read it, leaving a sort or filter over the plain paths beside
+            // it still pushable.
+            implementor.Fields = paths;
         }
 
     }

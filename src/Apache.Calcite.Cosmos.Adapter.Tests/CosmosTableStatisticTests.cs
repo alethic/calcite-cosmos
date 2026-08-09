@@ -1,4 +1,4 @@
-using Apache.Calcite.Cosmos.Adapter.Metadata;
+﻿using Apache.Calcite.Cosmos.Adapter.Metadata;
 
 using FluentAssertions;
 
@@ -91,32 +91,45 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests
             table.getStatistic().getKeys().size().Should().Be(0);
         }
 
+        /// <remarks>
+        /// <para>
+        /// A composite index is <b>not</b> a collation, and reporting one was a defect. A statistic's
+        /// collations are the order a scan's rows already arrive in — <c>RelOptTableImpl</c> hands them
+        /// to <c>RelMdCollation</c> as the collation of the scan — so claiming one licences the planner
+        /// to drop a <c>Sort</c> that asked for exactly that order. Cosmos guarantees no order without
+        /// an <c>ORDER BY</c>, whatever is indexed.
+        /// </para>
+        /// <para>
+        /// What a composite index decides is whether a multi-key sort is <em>legal</em>, and that
+        /// question belongs to the rule that pushes the sort — where
+        /// <c>CosmosContainerMetadata.IsSortSupported</c> answers it. Calcite's Cassandra adapter puts
+        /// its clustering order in the rule for the same reason, and that really is the storage order.
+        /// </para>
+        /// </remarks>
         [TestMethod]
-        public void CompositeIndexOverPromotedColumnsBecomesACollation()
+        public void ACompositeIndexIsNotACollation()
         {
-            var table = new CosmosTable(new CosmosContainerMetadata(
+            var container = new CosmosContainerMetadata(
                 "products",
                 new[] { "/category" },
-                new[] { Index(("/id", false), ("/_ts", true)) }));
+                new[] { Index(("/id", false), ("/_ts", true)) });
 
-            var collations = table.getStatistic().getCollations();
-            collations.size().Should().Be(1);
+            new CosmosTable(container).getStatistic().getCollations().size().Should().Be(0);
 
-            var fields = ((RelCollation)collations.get(0)).getFieldCollations();
-            fields.size().Should().Be(2);
-
-            ((RelFieldCollation)fields.get(0)).getFieldIndex().Should().Be(1);
-            ((RelFieldCollation)fields.get(0)).getDirection().Should().Be(RelFieldCollation.Direction.ASCENDING);
-            ((RelFieldCollation)fields.get(1)).getFieldIndex().Should().Be(2);
-            ((RelFieldCollation)fields.get(1)).getDirection().Should().Be(RelFieldCollation.Direction.DESCENDING);
+            // And is still what decides whether such a sort may be pushed.
+            container.IsSortSupported(new[]
+            {
+                new CosmosSortKey("/id", false),
+                new CosmosSortKey("/_ts", true),
+            }).Should().BeTrue();
         }
 
         /// <remarks>
-        /// A composite index over a path inside the map column names nothing the planner can
-        /// address, so it contributes no collation even though it remains valid for the sort guard.
+        /// A composite index over a path inside the map column names nothing the planner can address,
+        /// and remains valid for the sort guard regardless.
         /// </remarks>
         [TestMethod]
-        public void CompositeIndexOverUnpromotedPathsContributesNoCollation()
+        public void CompositeIndexOverUnpromotedPathsIsStillUsableForTheSortGuard()
         {
             var container = new CosmosContainerMetadata(
                 "products",
@@ -138,6 +151,102 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests
         {
             var table = new CosmosTable(new CosmosContainerMetadata("products", new[] { "/category" }));
             table.getStatistic().getRowCount().Should().BeNull();
+        }
+
+
+        // ── Statistics from the service ───────────────────────────────────────────
+
+        /// <remarks>
+        /// A container built from a definition alone has no row count, and the planner compares plans
+        /// without one exactly as it did before. Nothing here samples documents.
+        /// </remarks>
+        [TestMethod]
+        public void WithoutStatisticsTheRowCountIsUnknown()
+        {
+            new CosmosTable(new CosmosContainerMetadata("products")).getStatistic().getRowCount().Should().BeNull();
+        }
+
+        [TestMethod]
+        public void AMeasuredRowCountIsReported()
+        {
+            var container = new CosmosContainerMetadata("products").WithStatistics(new CosmosContainerStatistics(4200, 8_400_000, 4));
+
+            new CosmosTable(container).getStatistic().getRowCount().doubleValue().Should().Be(4200d);
+        }
+
+        /// <remarks>
+        /// What a row costs to move, which for a row model carrying whole documents dominates.
+        /// </remarks>
+        [TestMethod]
+        public void AverageDocumentSizeIsDerivedFromTheTotal()
+        {
+            new CosmosContainerStatistics(100, 50_000, 2).AverageDocumentSizeInBytes.Should().Be(500d);
+        }
+
+        [TestMethod]
+        public void AnEmptyContainerHasNoAverageDocumentSize()
+        {
+            new CosmosContainerStatistics(0, 0, 1).AverageDocumentSizeInBytes.Should().Be(0d);
+        }
+
+
+        // ── Statistics are fetched when asked for ─────────────────────────────────
+
+        /// <remarks>
+        /// A schema exposes every container of a database — at the account level, of every database —
+        /// and each fetch is two round trips. Paying for all of them to plan against one is the wrong
+        /// trade, so the provider is invoked when a plan first asks and never for a container nothing
+        /// touches. Flink's FLIP-231 collects connector statistics during optimisation for the same
+        /// reason.
+        /// </remarks>
+        [TestMethod]
+        public void AStatisticsProviderIsNotInvokedUntilItIsAsked()
+        {
+            var invocations = 0;
+
+            var container = new CosmosContainerMetadata("products")
+                .WithStatisticsProvider(() =>
+                {
+                    invocations++;
+                    return new CosmosContainerStatistics(7, 700, 2);
+                });
+
+            var table = new CosmosTable(container);
+            invocations.Should().Be(0, "building a table asks nothing of the service");
+
+            table.getStatistic().getRowCount().doubleValue().Should().Be(7d);
+            invocations.Should().Be(1);
+        }
+
+        [TestMethod]
+        public void AStatisticsProviderIsInvokedOnlyOnce()
+        {
+            var invocations = 0;
+
+            var container = new CosmosContainerMetadata("products")
+                .WithStatisticsProvider(() =>
+                {
+                    invocations++;
+                    return new CosmosContainerStatistics(7, 700, 2);
+                });
+
+            _ = container.Statistics;
+            _ = container.Statistics;
+            _ = container.Statistics;
+
+            invocations.Should().Be(1);
+        }
+
+        /// <remarks>
+        /// An account that cannot answer leaves the planner where it would have been without one,
+        /// rather than failing the query — which is what Flink does with an unavailable statistic too.
+        /// </remarks>
+        [TestMethod]
+        public void AProviderReturningNothingLeavesTheRowCountUnknown()
+        {
+            var container = new CosmosContainerMetadata("products").WithStatisticsProvider(() => null);
+
+            new CosmosTable(container).getStatistic().getRowCount().Should().BeNull();
         }
 
     }

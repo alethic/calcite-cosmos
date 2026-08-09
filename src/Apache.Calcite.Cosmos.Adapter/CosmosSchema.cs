@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 
+using Apache.Calcite.Cosmos.Adapter.Client;
 using Apache.Calcite.Cosmos.Adapter.Metadata;
 
 using org.apache.calcite.schema;
@@ -26,14 +27,18 @@ namespace Apache.Calcite.Cosmos.Adapter
         /// Initializes a new instance.
         /// </summary>
         /// <param name="containers">The containers to expose.</param>
+        /// <param name="executorFactory">
+        /// Returns what executes statements against a container. Omit it to expose tables that can be
+        /// planned against but not read — which is what a schema built from metadata alone can offer.
+        /// </param>
         /// <exception cref="ArgumentNullException"><paramref name="containers"/> is <c>null</c>.</exception>
-        public CosmosSchema(IEnumerable<CosmosContainerMetadata> containers)
+        public CosmosSchema(IEnumerable<CosmosContainerMetadata> containers, Func<CosmosContainerMetadata, ICosmosQueryExecutor>? executorFactory = null)
         {
             if (containers is null)
                 throw new ArgumentNullException(nameof(containers));
 
             foreach (var container in containers)
-                _tables.put(container.Name, new CosmosTable(container));
+                _tables.put(container.Name, new CosmosTable(container, executorFactory?.Invoke(container)));
         }
 
         /// <inheritdoc />

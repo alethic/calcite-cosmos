@@ -1,6 +1,7 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 
+using Apache.Calcite.Cosmos.Adapter.Client;
 using Apache.Calcite.Cosmos.Adapter.Metadata;
 using Apache.Calcite.Cosmos.Adapter.Rel;
 
@@ -40,22 +41,44 @@ namespace Apache.Calcite.Cosmos.Adapter
 
         readonly CosmosContainerMetadata _container;
         readonly CosmosConvention _convention;
+        readonly ICosmosQueryExecutor? _executor;
 
         /// <summary>
         /// Initializes a new instance.
         /// </summary>
         /// <param name="container">The container this table exposes.</param>
+        /// <param name="executor">Executes statements against the container, or <c>null</c> to expose a table that can be planned against but not read.</param>
         /// <exception cref="ArgumentNullException"><paramref name="container"/> is <c>null</c>.</exception>
-        public CosmosTable(CosmosContainerMetadata container)
+        public CosmosTable(CosmosContainerMetadata container, ICosmosQueryExecutor? executor = null)
         {
             _container = container ?? throw new ArgumentNullException(nameof(container));
             _convention = CosmosConvention.Create(container);
+            _executor = executor;
         }
 
         /// <summary>
         /// Gets the container this table exposes.
         /// </summary>
         public CosmosContainerMetadata Container => _container;
+
+        /// <summary>
+        /// Gets what executes statements against this container, or <c>null</c> when nothing can.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Read by the converters out of the Cosmos convention, and read <em>when the plan runs</em> rather
+        /// than when it is built: the expression they emit navigates to this table through the schema the
+        /// query is executing against. A live client written into the compiled plan would tie that plan —
+        /// which Calcite caches and re-executes — to whichever schema instance happened to be current when
+        /// it was compiled.
+        /// </para>
+        /// <para>
+        /// A table built from metadata alone has none. Planning is unaffected, since nothing about a
+        /// statement or its cost depends on who runs it; enumerating the result of such a plan is what
+        /// fails, and it fails saying so.
+        /// </para>
+        /// </remarks>
+        public ICosmosQueryExecutor? Executor => _executor;
 
         /// <summary>
         /// Gets the calling convention for this container.
@@ -166,13 +189,15 @@ namespace Apache.Calcite.Cosmos.Adapter
         /// ordinals. A nested partition key path yields no key at all rather than a wrong one.
         /// </para>
         /// <para>
-        /// Row count is left unknown; nothing here samples the container.
+        /// Row count comes from the service where the container was read from one, and is left unknown
+        /// otherwise. It is a measurement rather than a sample: the rule against inferring from
+        /// documents is about the <em>shape</em> of the data, where a wrong guess costs correctness. A
+        /// wrong row count costs speed.
         /// </para>
         /// </remarks>
         public override Statistic getStatistic()
         {
             var keys = new java.util.ArrayList();
-            var collations = new java.util.ArrayList();
 
             var partitionOrdinals = new java.util.ArrayList();
             var partitionPromoted = _container.PartitionKeyPaths.Count > 0;
@@ -200,32 +225,26 @@ namespace Apache.Calcite.Cosmos.Adapter
                 }
             }
 
-            // A composite index guarantees an ordering only when every one of its paths is a
-            // column the planner can name.
-            foreach (var index in _container.CompositeIndexes)
-            {
-                var fields = new java.util.ArrayList();
-                var usable = true;
+            // NO COLLATIONS ARE REPORTED, and a composite index is not one.
+            //
+            // A statistic's collations are the order a scan's rows already arrive in —
+            // RelOptTableImpl.getCollationList returns them and RelMdCollation reports them as the
+            // collation of the scan — so claiming one licences the planner to drop a Sort that asked
+            // for it. Cosmos guarantees no order without an ORDER BY, whatever is indexed: a composite
+            // index makes a multi-key ORDER BY *legal*, it does not sort a query that has none.
+            //
+            // That legality is a question for the rule that decides whether the sort may be pushed, and
+            // CosmosSortRule already asks it through CosmosContainerMetadata.IsSortSupported. Cassandra
+            // does the same with its clustering order, which unlike this really is the storage order.
 
-                foreach (var path in index.Paths)
-                {
-                    var ordinal = GetColumnOrdinal(path.Path);
-                    if (ordinal < 0)
-                    {
-                        usable = false;
-                        break;
-                    }
+            // A row count where the service gave one. It is approximate and lags, which is what a
+            // planner row count is allowed to be; what it must not be is invented, and this is read
+            // rather than sampled. Without it the planner compares plans with no sense of scale.
+            var rowCount = _container.Statistics is CosmosContainerStatistics statistics
+                ? java.lang.Double.valueOf(statistics.DocumentCount)
+                : null;
 
-                    fields.add(new RelFieldCollation(
-                        ordinal,
-                        path.Descending ? RelFieldCollation.Direction.DESCENDING : RelFieldCollation.Direction.ASCENDING));
-                }
-
-                if (usable)
-                    collations.add(RelCollations.of(fields));
-            }
-
-            return Statistics.of(null, keys, java.util.Collections.emptyList(), collations);
+            return Statistics.of(rowCount, keys, java.util.Collections.emptyList(), java.util.Collections.emptyList());
         }
 
         /// <inheritdoc />

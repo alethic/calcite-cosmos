@@ -1,4 +1,4 @@
-using Apache.Calcite.Cosmos.Adapter.Sql;
+﻿using Apache.Calcite.Cosmos.Adapter.Sql;
 
 using java.util.function;
 
@@ -20,8 +20,9 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
         /// Determines whether every projected expression can be rendered as Cosmos SQL.
         /// </summary>
         /// <remarks>
-        /// Checked against the binding derived from the input row type, which is the same binding
-        /// implementation will use, so a projection accepted here will not fail later.
+        /// Checked against the binding derived by walking the input, which is the same binding
+        /// implementation will use, so a projection accepted here will not fail later. Reading it off
+        /// the input row type would take a projection's aliases for document properties.
         /// </remarks>
         static bool IsTranslatable(Project project)
         {
@@ -29,7 +30,9 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
             if (projects.size() == 0)
                 return false;
 
-            var fields = CosmosImplementor.BindFields(project.getInput().getRowType());
+            if (CosmosImplementor.TryBindOutput(project.getInput(), out var fields) == false)
+                return false;
+
             var translator = new CosmosRexTranslator(project.getCluster().getRexBuilder(), fields, new CosmosParameterList());
 
             for (var i = 0; i < projects.size(); i++)

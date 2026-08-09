@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 
 using Apache.Calcite.Cosmos.Adapter.Sql;
 
@@ -34,6 +34,9 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Sql
             {
                 CosmosPath.Root("c").Property("s"),   // 0
                 CosmosPath.Root("c").Property("n"),   // 1
+                CosmosPath.Root("c").Property("a"),   // 2 — an array
+                CosmosPath.Root("c").Property("m"),   // 3 — a multiset
+                CosmosPath.Root("c").Property("o"),   // 4 — a map
             };
         }
 
@@ -46,6 +49,14 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Sql
         RexNode Lit(string value) => _rex.makeLiteral(value, _types.createSqlType(SqlTypeName.VARCHAR, value.Length));
 
         RexNode Int(int value) => _rex.makeExactLiteral(new java.math.BigDecimal(value));
+
+        RexNode Array() => _rex.makeInputRef(_types.createArrayType(_types.createSqlType(SqlTypeName.VARCHAR), -1), 2);
+
+        RexNode Multiset() => _rex.makeInputRef(_types.createMultisetType(_types.createSqlType(SqlTypeName.VARCHAR), -1), 3);
+
+        RexNode Map() => _rex.makeInputRef(_types.createMapType(_types.createSqlType(SqlTypeName.VARCHAR), _types.createSqlType(SqlTypeName.ANY)), 4);
+
+        RexNode Flag(SqlTrimFunction.Flag flag) => _rex.makeFlag(flag);
 
         string Translate(SqlOperator op, params RexNode[] operands) => Translator().Translate(_rex.makeCall(op, operands));
 
@@ -140,17 +151,101 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Sql
                 .Should().Be("(INDEX_OF(c.s, @p0) + 1)");
         }
 
-        // ── Declined ──────────────────────────────────────────────────────────────
+        // ── Trigonometry and the rest of the numeric set ──────────────────────────
+
+        [TestMethod]
+        public void TrigonometricFunctionsMapDirectly()
+        {
+            Translate(SqlStdOperatorTable.SIN, Num()).Should().Be("SIN(c.n)");
+            Translate(SqlStdOperatorTable.COS, Num()).Should().Be("COS(c.n)");
+            Translate(SqlStdOperatorTable.TAN, Num()).Should().Be("TAN(c.n)");
+            Translate(SqlStdOperatorTable.COT, Num()).Should().Be("COT(c.n)");
+            Translate(SqlStdOperatorTable.ASIN, Num()).Should().Be("ASIN(c.n)");
+            Translate(SqlStdOperatorTable.ACOS, Num()).Should().Be("ACOS(c.n)");
+            Translate(SqlStdOperatorTable.ATAN, Num()).Should().Be("ATAN(c.n)");
+            Translate(SqlStdOperatorTable.DEGREES, Num()).Should().Be("DEGREES(c.n)");
+            Translate(SqlStdOperatorTable.RADIANS, Num()).Should().Be("RADIANS(c.n)");
+        }
 
         /// <remarks>
-        /// Cosmos TRIM only strips whitespace, where SQL trims an arbitrary character set from a
-        /// chosen end.
+        /// The one name in the set that differs: Cosmos spells it ATN2, after T-SQL.
         /// </remarks>
         [TestMethod]
-        public void TrimIsDeclined()
+        public void Atan2IsSpelledAtn2()
         {
-            CanTranslate(SqlStdOperatorTable.TRIM, Lit(" "), Lit(" "), Str()).Should().BeFalse();
+            Translate(SqlStdOperatorTable.ATAN2, Num(), Num()).Should().Be("ATN2(c.n, c.n)");
         }
+
+        [TestMethod]
+        public void PiIsWrittenAsANiladicCall()
+        {
+            Translate(SqlStdOperatorTable.PI).Should().Be("PI()");
+        }
+
+        [TestMethod]
+        public void TruncateIsSpelledTrunc()
+        {
+            Translate(SqlStdOperatorTable.TRUNCATE, Num()).Should().Be("TRUNC(c.n)");
+        }
+
+        /// <remarks>
+        /// Truncating to a number of decimal places is left out rather than guessed at; the arity of
+        /// Cosmos's TRUNC has not been verified against the service.
+        /// </remarks>
+        [TestMethod]
+        public void TruncateToDecimalPlacesIsDeclined()
+        {
+            CanTranslate(SqlStdOperatorTable.TRUNCATE, Num(), Int(2)).Should().BeFalse();
+        }
+
+        // ── Collections ───────────────────────────────────────────────────────────
+
+        [TestMethod]
+        public void CardinalityOverAnArrayCountsIt()
+        {
+            Translate(SqlStdOperatorTable.CARDINALITY, Array()).Should().Be("ARRAY_LENGTH(c.a)");
+        }
+
+        /// <remarks>
+        /// SQL defines CARDINALITY over a map too, and ARRAY_LENGTH counts only an array. Emitting it
+        /// for a map would report something meaningless rather than fail.
+        /// </remarks>
+        [TestMethod]
+        public void CardinalityOverAMapIsDeclined()
+        {
+            CanTranslate(SqlStdOperatorTable.CARDINALITY, Map()).Should().BeFalse();
+        }
+
+        /// <remarks>
+        /// The operands swap: SQL is value MEMBER OF multiset, and ARRAY_CONTAINS takes the array first.
+        /// </remarks>
+        [TestMethod]
+        public void MemberOfBecomesArrayContainsWithTheOperandsSwapped()
+        {
+            Translate(SqlStdOperatorTable.MEMBER_OF, Lit("x"), Multiset()).Should().Be("ARRAY_CONTAINS(c.m, @p0)");
+        }
+
+        // ── TRIM ──────────────────────────────────────────────────────────────────
+
+        [TestMethod]
+        public void TrimSpecificationPicksTheCosmosFunction()
+        {
+            Translate(SqlStdOperatorTable.TRIM, Flag(SqlTrimFunction.Flag.BOTH), Lit(" "), Str()).Should().Be("TRIM(c.s)");
+            Translate(SqlStdOperatorTable.TRIM, Flag(SqlTrimFunction.Flag.LEADING), Lit(" "), Str()).Should().Be("LTRIM(c.s)");
+            Translate(SqlStdOperatorTable.TRIM, Flag(SqlTrimFunction.Flag.TRAILING), Lit(" "), Str()).Should().Be("RTRIM(c.s)");
+        }
+
+        /// <remarks>
+        /// Cosmos's two-argument TRIM forms have not been verified, and emitting the one-argument form
+        /// here would trim spaces where the query asked for something else.
+        /// </remarks>
+        [TestMethod]
+        public void TrimOfANonSpaceCharacterIsDeclined()
+        {
+            CanTranslate(SqlStdOperatorTable.TRIM, Flag(SqlTrimFunction.Flag.BOTH), Lit("x"), Str()).Should().BeFalse();
+        }
+
+        // ── Declined ──────────────────────────────────────────────────────────────
 
         [TestMethod]
         public void UnmappedFunctionIsDeclined()

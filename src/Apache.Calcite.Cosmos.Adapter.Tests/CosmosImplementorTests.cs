@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 
 using Apache.Calcite.Cosmos.Adapter.Metadata;
 using Apache.Calcite.Cosmos.Adapter.Sql;
@@ -45,7 +45,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests
             var implementor = Implementor();
 
             implementor.RootAlias.Should().Be("c");
-            implementor.Fields.Should().ContainSingle().Which.ToString().Should().Be("c");
+            implementor.Fields.Should().ContainSingle().Which!.ToString().Should().Be("c");
         }
 
         [TestMethod]
@@ -141,6 +141,61 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests
 
             var node = _rex.makeCall(SqlStdOperatorTable.INITCAP, Ref(0, SqlTypeName.VARCHAR));
             implementor.CreateTranslator().TryTranslate(node, out _).Should().BeFalse();
+        }
+
+        // ── Page size ─────────────────────────────────────────────────────────────
+
+        /// <remarks>
+        /// A statement with no row restriction reads to the end, so there is no page size worth
+        /// asking for and the SDK's own default stands.
+        /// </remarks>
+        [TestMethod]
+        public void UnboundedStatementAsksForNoParticularPageSize()
+        {
+            Implementor().Build().MaxItemCount.Should().BeNull();
+        }
+
+        [TestMethod]
+        public void LimitBecomesThePageSize()
+        {
+            var implementor = Implementor();
+            implementor.Query.Fetch = 5;
+
+            implementor.Build().MaxItemCount.Should().Be(5);
+        }
+
+        /// <remarks>
+        /// The service still walks the rows the offset skips, so the page worth asking for spans both.
+        /// </remarks>
+        [TestMethod]
+        public void OffsetIsCountedIntoThePageSize()
+        {
+            var implementor = Implementor();
+            implementor.Query.Offset = 10;
+            implementor.Query.Fetch = 5;
+
+            implementor.Build().MaxItemCount.Should().Be(15);
+        }
+
+        [TestMethod]
+        public void TopBecomesThePageSize()
+        {
+            var implementor = Implementor();
+            implementor.Query.Top = 3;
+
+            implementor.Build().MaxItemCount.Should().Be(3);
+        }
+
+        /// <remarks>
+        /// An offset alone bounds nothing — the statement still reads to the end of the container.
+        /// </remarks>
+        [TestMethod]
+        public void OffsetAloneAsksForNoParticularPageSize()
+        {
+            var implementor = Implementor();
+            implementor.Query.Offset = 10;
+
+            implementor.Build().MaxItemCount.Should().BeNull();
         }
 
     }
