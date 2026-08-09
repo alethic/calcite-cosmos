@@ -144,11 +144,19 @@ paths in the returned document, because a read returns the document rather than 
 `ReadManyItemsAsync` takes (id, partition key) pairs and is charged as point reads. Same recovery one
 level up, nearly free once the single point read exists.
 
-### `MaxConcurrency` and `MaxBufferedItemCount` — *small*
+### `MaxConcurrency` — *done*; `MaxBufferedItemCount` — *left alone, deliberately*
 
-`MaxItemCount` comes from a pushed-down limit; the fan-out knobs are untouched. A query with the
-partition key pinned needs no concurrency; a cross-partition one wants it, and how much depends on the
-partition count above.
+A query pinned to a partition key now asks for no concurrency: one logical partition lives on one
+physical partition, so there is nothing for a second worker to read, and the SDK otherwise sizes its
+fan-out for a query that might span every partition.
+
+A cross-partition query is left at the SDK's default. How much concurrency it wants depends on the
+container's spread, and a constant invented here would be a worse guess than the SDK's own — the
+partition count is known to the metadata but not to the executor, and plumbing it through is only
+worth doing with a measurement to point at.
+
+`MaxBufferedItemCount` is untouched for the same reason, with less to gain: it bounds a buffer whose
+right size depends on row size and consumer speed, neither of which this can see.
 
 ### Change feed — *large*
 

@@ -153,6 +153,44 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
             return builder.Build();
         }
 
+        /// <summary>
+        /// Builds the request options for a statement.
+        /// </summary>
+        /// <remarks>
+        /// A separate method because it is the only part of executing a statement that can be checked
+        /// without a service, and each of the three things it decides is a decision rather than a
+        /// default.
+        /// </remarks>
+        /// <param name="query">The statement being executed.</param>
+        /// <param name="partitionKey">The partition key the statement resolved to, where it resolved to one.</param>
+        /// <param name="indexMetrics">Whether to ask which indexes the statement used.</param>
+        /// <returns>The options.</returns>
+        public static QueryRequestOptions CreateRequestOptions(CosmosQuery query, PartitionKey? partitionKey, bool indexMetrics = false)
+        {
+            var options = new QueryRequestOptions();
+
+            if (partitionKey is PartitionKey key)
+            {
+                options.PartitionKey = key;
+
+                // One logical partition lives on one physical partition, so there is nothing for a
+                // second worker to read. The SDK otherwise sizes its fan-out for a query that might
+                // span every partition, which is machinery this statement has no use for.
+                options.MaxConcurrency = 1;
+            }
+
+            // A page size, not a limit. The statement already says how many rows it wants; this stops
+            // the service filling a default-sized page with rows the statement would discard.
+            if (query.MaxItemCount is int maxItemCount)
+                options.MaxItemCount = maxItemCount;
+
+            // Which indexes the statement used, where the caller asked. A diagnostic rather than
+            // something acted on.
+            options.PopulateIndexMetrics = indexMetrics;
+
+            return options;
+        }
+
         /// <inheritdoc />
         public async IAsyncEnumerable<JsonElement> ExecuteAsync(CosmosQuery query, PartitionKey? partitionKey = null, [EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
@@ -173,19 +211,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
                 yield break;
             }
 
-            var options = new QueryRequestOptions();
-            if (effective is PartitionKey key)
-                options.PartitionKey = key;
-
-            // A page size, not a limit. The statement already says how many rows it wants; this stops
-            // the service filling a default-sized page with rows the statement would discard.
-            if (query.MaxItemCount is int maxItemCount)
-                options.MaxItemCount = maxItemCount;
-
-            // Which indexes the statement used, where the caller asked. A diagnostic rather than
-            // something acted on — and the one way to settle by measurement whether the composite index
-            // guard is describing the service or the documentation.
-            options.PopulateIndexMetrics = _indexMetrics;
+            var options = CreateRequestOptions(query, effective, _indexMetrics);
 
             // The stream iterator is used rather than the typed one so that results are read with
             // System.Text.Json. The SDK requires Newtonsoft.Json to be present, but nothing here
