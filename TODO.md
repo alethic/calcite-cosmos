@@ -19,15 +19,47 @@ rejecting the full text search Azure runs — so "the reference says" is not a m
 
 ---
 
-## 0. Where this stands, and the one thing a host must do
+## 0. Resuming
 
-408 passing, 5 skipped, on net8.0 and net10.0. Every emitted statement form is executed against a
-live service; the suite runs against a real account when `COSMOS_TEST_ENDPOINT` and `COSMOS_TEST_KEY`
-name one, and reports inconclusive rather than passing where the emulator cannot answer.
+**433 tests: 428 passing, 5 skipped**, on net8.0 and net10.0. The skips are things only a real account
+can answer; the suite runs against one when `COSMOS_TEST_ENDPOINT` and `COSMOS_TEST_KEY` name it, and
+reports inconclusive rather than passing where the emulator cannot. Several facts in this file and in
+`DESIGN.md` were settled that way — an Azure account, used and deleted.
 
-**A host must run the calc rules as a pass after the planner.** This is the one integration
-requirement the adapter adds, and it is easy to miss because the failure names nothing useful — a
-plan that cannot be implemented, with no indication of what is missing:
+Work is on `claude/cosmos-disjunction-weakening`, which is what the repository has checked out. It is
+pushed; no pull request is open for it. Everything before it merged as PR #2.
+
+**Nothing is half-finished.** The lookup join, the disjunction weakening, the diagnostics surface, the
+statistics work and the Entra support are complete and covered. What remains below is not started.
+
+### Running the sample
+
+```
+dotnet run --project samples/Apache.Cosmos.Sample/Apache.Cosmos.Sample.csproj
+```
+
+It needs the Cosmos emulator on `localhost:8081` and prints the docker command if it is missing. It
+seeds both sources and is safe to re-run. What it demonstrates is the lookup join across two adapters:
+the CSV side's three product ids are pushed into Cosmos, so the container is filtered at the service
+rather than read whole.
+
+### Two things waiting on `ikvmnet/calcite-dotnet`
+
+- **[#24](https://github.com/ikvmnet/calcite-dotnet/issues/24) — the ADO.NET adapter cannot read SQL
+  Server.** Its metadata read calls `GetInt32` on columns SQL Server types as `tinyint`, so every
+  query against every table throws. The sample uses the CSV adapter instead; SQL Server is the better
+  demonstration and switching back is a one-line change.
+- **`EXPLAIN` over an async-only table.** A pull request is open. Until it lands, the sample shows the
+  *logical* plan for anything touching Cosmos and says so. `EXPLAIN` produces a `ClrExplainResult`
+  rather than a plan, which the provider's async path rejects; the synchronous path plans the explained
+  query into `ClrEnumerableConvention`, which this adapter deliberately has no converter into. Once
+  fixed, the sample should show the physical tree — `CosmosLookupJoin` and all — and drop the fallback.
+
+### The one integration requirement this adapter adds
+
+**A host must run the calc rules as a pass after the planner**, and it is easy to miss because the
+failure names nothing useful — a plan that cannot be implemented, with no indication of what is
+missing:
 
 ```csharp
 var program = new HepProgramBuilder();
@@ -37,19 +69,30 @@ foreach (var rule in ClrAsyncEnumerableRules.CalcRules())
 
 It is Calcite's `Programs.CALC_PROGRAM` and it is a *pass*, not rules for the planner — given to
 Volcano it does nothing, because `ClrAsyncEnumerableProject` is the cheaper node and also the one that
-throws when implemented. Without the pass, a projection above a join has nothing to implement it. It
-does not arise without a join, because every other projection is pushed into the container. See
-section 11.
+throws when implemented. Without it, a projection above a join has nothing to implement it. It does
+not arise without a join, because every other projection is pushed into the container.
 
-**Do not start the disjunction weakening without measuring first.** The analysis is done (section 4),
-but two facts about the service decide *soundness* rather than speed: how it evaluates `NOT undefined`,
-and whether `= null` is a comparison or a definedness test. The failure mode is a strengthened
-predicate — rows lost, a smaller answer returned as though it were the answer.
+**And a model names a factory assembly-qualified** — `…CosmosSchemaFactory, Apache.Calcite.Cosmos.Adapter`.
+The bare name resolves to nothing through IKVM, and the assembly must already be loaded when the model
+is read. Both are in the README now; the example there was wrong for as long as it existed, because
+nothing exercised the model path.
 
-**Nothing else is half-finished.** The lookup join, the diagnostics surface, and the statistics work
-are complete and covered; what remains below is not started rather than in progress.
+### Where to start
+
+Everything small is done. Each of these is larger, and each has a stated prerequisite rather than an
+open question:
+
+1. **Shuffle the build side by partition key** (section 11) — the biggest remaining win for the lookup
+   join, but measure first: routing per key means one request per distinct key, and whether that beats
+   one cross-partition query depends on key count against partition count. Grouping by feed range is
+   the likelier shape.
+2. **DML** (section 3), and then **Patch for `UPDATE`** — the largest missing *category*. The adapter
+   is read-only and nothing about Cosmos requires that.
+3. **A cache across executions** (section 11) — the within-execution one is done; this one needs a TTL,
+   a bound shared between queries, and something that owns it.
 
 ---
+
 
 ## 1. Statistics and the cost model
 
@@ -268,61 +311,33 @@ whose encoding the service defines. Pushing a temporal function down means decid
 
 ## 5. Planner
 
-### Half a join, as a lookup join — *large, highest value after the point lookup*
+### Half a join, as a lookup join — *done*
 
-A relational join is not expressible in Cosmos, so both sides are read whole and joined in process.
-One side can pay for the other: take the join keys of the build side and fetch only the documents that
-could match. The reference points the same way from the other end — its documented workaround for a
-join is to inline a literal array of reference data.
+A relational join is not expressible in Cosmos, so both sides used to be read whole and joined in
+process. `CosmosLookupJoin` makes one side pay for the other: the build side's keys are collected,
+deduplicated, and sent with the statement, so only documents that could match come back.
 
-**Sound for the same reason partial filter pushdown is.** Every row surviving the join satisfies
-`k IN (values)`, so the restriction is implied by the join condition and can only discard rows that
-would not have joined.
+Flink's lookup join is the shape, and the important part is what it does *not* do. The correlation
+variable Calcite uses to express "a value that will exist later" is a planner-level device — Flink's
+rule consumes it and the physical node never sees one, its `decorrelate()` rewriting every reference
+as an ordinary field reference. Nothing correlated reaches the runtime; what crosses is key values,
+which is what `asyncLookup(RowData)` receives there. No in-tree storage adapter renders a correlation
+variable, and the only one that touches `RexCorrelVariable` is JDBC, which expresses correlation
+natively in SQL.
 
-**The precedent is out of tree, and it is Flink's lookup join.** No in-tree storage adapter does
-anything with a join — Cassandra, MongoDB, Elasticsearch, Geode and Druid read both sides and let
-Calcite join them, and the only in-tree adapter that touches `RexCorrelVariable` is JDBC, which can
-express a correlated subquery natively in SQL.
+Inner joins on a single equality. It declines an outer join, a residual predicate, a key that is not a
+document path or cannot be a parameter, and anything above the scan a per-batch restriction would
+change the meaning of — a `LIMIT` above all, since `TOP 5` of the container is not `TOP 5` of a batch.
 
-Flink's shape is the one to copy, and the important part is what it does *not* do:
+**Measured on a real account**, in the form and at the batch size actually emitted:
+`WHERE c.category IN (@k0 … @k99)` reports `/category/?` under `UtilizedIndexes` with nothing under
+`PotentialIndexes`. Had it not been index-served this would have replaced a scan with a scan plus a
+hundred-term filter.
 
-- The correlation variable is a **planner-level device only**. `LogicalCorrelate` is what the rules
-  match, and `LogicalCorrelateToJoinFromTemporalTableRule` rewrites it away — its `decorrelate()`
-  rewrites every `RexCorrelVariable` reference as a `RexInputRef` against the combined row type. No
-  correlation variable survives into a physical node, which is why no adapter ever renders one.
-- The planner tells the source **which** key fields at plan time, as ordinals, through
-  `LookupTableSource.LookupContext.getKeys()`.
-- The runtime hands over **plain values**: `CompletableFuture<Collection<RowData>> asyncLookup(RowData
-  keyRow)`. There is nothing to translate, and nothing reads generated code.
+Keys are also cached for the length of one execution, since deduplication only reaches within a batch.
+See section 11 for the cache that would survive a query, which is not done.
 
-So the work here is a rule, a node, and a runtime call of the shape the converter already emits:
-
-- **`CosmosLookupJoinRule`** matches a join whose probe side is a Cosmos subtree and whose condition is
-  a conjunction of equalities between a build-side field and a path Cosmos can address. It records the
-  key ordinals and consumes the join.
-- **`CosmosLookupJoin`** is a `ClrAsyncEnumerableRel` over the build side, holding the Cosmos subtree's
-  statement. Its `Implement` emits one `Expression.Call`, which is what
-  `CosmosToClrAsyncEnumerableConverter` already does.
-- **The runtime** batches build rows, dedupes the keys, and fetches. Async throughout, which
-  `ICosmosQueryExecutor` already is.
-
-Two things this shape reaches that a rendered correlated predicate could not, and they are the reason
-it is worth the weight:
-
-- **Deduping.** The keys are data at that point, not a predicate, so a hundred build rows over ten
-  distinct keys fetch ten.
-- **The partition key.** If the key *is* the partition key, each batch routes to its partitions
-  instead of fanning out; and where the key is `id` together with a complete partition key, this is
-  `ReadManyItemsAsync` — a genuine batch point read, not a query at all. See *batch point reads*.
-
-**Measured, and it is the measurement the feature turned on.** `WHERE c.category IN (@k0, …, @k99)` —
-the form emitted, at the batch size emitted — reports `/category/?` under `UtilizedIndexes` with
-nothing under `PotentialIndexes`. So the restriction is index-served and the lookup join is an
-improvement rather than a scan with a hundred-term filter attached.
-
-Still unmeasured: whether `ARRAY_CONTAINS(@keys, c.k)` is served the same way. It would take one
-parameter for a variable-length batch instead of a hundred with padding, which is tidier but buys
-nothing now that the padded form is known to work.
+What is left is the shuffle — see *the three worth doing first* in section 11.
 
 ### Weakening a disjunction — *done*
 
