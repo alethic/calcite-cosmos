@@ -385,6 +385,26 @@ absent, so weakening it would have discarded exactly those rows.
 
 ## 7. Provider and integration
 
+### Cosmos functions as schema functions — *closed, and deliberately not done*
+
+The idea was that registering `IS_DEFINED`, `FULLTEXTCONTAINS` and the rest as schema functions would
+save a caller from chaining `CosmosOperators.Instance` into the validator's operator table.
+
+**Measured, and it would make things worse.** A Cosmos function that cannot be pushed — applied to a
+computed projection, say, which has no document path for a statement to name — currently fails
+*while planning*, because nothing can render it and nothing can evaluate it either. A schema function
+is bound to a CLR method, which gives Calcite something to call: the failure would move from plan
+time to the middle of an enumeration, with rows already flowing.
+
+An operator table is also Calcite's own answer for dialect-specific functions — `SqlLibrary` and
+`SqlLibraryOperatorTableFactory` — so the current shape matches the framework rather than working
+around it. The ergonomic wart is real but has no clean fix: `SqlLibrary` is a closed enum, so there
+is no `fun=cosmos` route for an out-of-tree adapter to register itself under.
+
+Covered by `CosmosFunctionResolutionTests`, which pins both halves: the functions resolve only with
+the table chained, and one that cannot be pushed fails while planning.
+
+
 - **Client factory** — *done.* `clientFactory` names an `ICosmosClientFactory`, which subsumes Entra
   ID, custom serializers, retry policies, preferred regions and a DI-owned client.
 - **Schema functions** — *medium, mis-sized before.* The validator resolves a name against the `fun`
