@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Data.Common;
 using System.Diagnostics;
@@ -176,6 +176,16 @@ namespace Apache.Cosmos.Sample
 
             AnsiConsole.WriteLine();
 
+            if (Explain(connection, sql) is (string plan, string kind))
+            {
+                AnsiConsole.Write(new Panel(new Markup($"[blue]{Markup.Escape(plan)}[/]"))
+                    .Header($"[dim]{kind}[/]")
+                    .BorderColor(Color.Grey35)
+                    .Padding(1, 0));
+
+                AnsiConsole.WriteLine();
+            }
+
             watcher.Clear();
 
             await using var command = connection.CreateCommand();
@@ -213,6 +223,76 @@ namespace Apache.Cosmos.Sample
                     .Header("[dim]sent to Cosmos[/]")
                     .BorderColor(Color.Grey35)
                     .Padding(1, 0));
+            }
+        }
+
+        /// <summary>
+        /// Asks the planner what it intends to do, without doing it.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// The plan is where the interesting part of this sample actually lives. A
+        /// <c>CosmosLookupJoin</c> in the tree is the adapter saying it will fetch the container by the
+        /// other side's keys; an ordinary join over two full scans would be the alternative, and the
+        /// difference is invisible from the rows alone.
+        /// </para>
+        /// <para>
+        /// Returns <c>null</c> rather than throwing where a statement cannot be explained, since a
+        /// sample that dies describing a query it could have run would be a poor trade.
+        /// </para>
+        /// </remarks>
+        /// <remarks>
+        /// <para>
+        /// Anything touching Cosmos gets the logical plan, and the reason is worth knowing. An
+        /// <c>EXPLAIN</c> never reaches the service, so the provider prepares it in the synchronous
+        /// convention — and a query over a Cosmos table plans only in the asynchronous one, because the
+        /// SDK has no synchronous data-plane API. The physical plan is refused with "not enough rules
+        /// to produce a node with desired properties: convention=CLR_ENUMERABLE".
+        /// </para>
+        /// <para>
+        /// So the logical plan shows the shape, and the statement printed after each result shows what
+        /// the physical plan did with it — which for a join is the more telling of the two anyway.
+        /// </para>
+        /// </remarks>
+        static (string Plan, string Kind)? Explain(DbConnection connection, string sql)
+        {
+            // The physical plan first, since that is the one that names CosmosLookupJoin. Where it
+            // cannot be had, the logical one still shows the shape of the query.
+            if (RunExplain(connection, "EXPLAIN PLAN FOR " + sql) is string physical)
+                return (physical, "how it will be answered");
+
+            if (RunExplain(connection, "EXPLAIN PLAN WITHOUT IMPLEMENTATION FOR " + sql) is string logical)
+                return (logical, "what was asked for [dim](logical plan only — see below)[/]");
+
+            return null;
+        }
+
+        /// <summary>
+        /// Runs one form of <c>EXPLAIN</c>, or returns <c>null</c> where it is refused.
+        /// </summary>
+        static string? RunExplain(DbConnection connection, string statement)
+        {
+            try
+            {
+                using var command = connection.CreateCommand();
+                command.CommandText = statement;
+
+                // Read synchronously, and that is not an oversight. A query over a Cosmos table plans
+                // only in the asynchronous convention, because the SDK has no synchronous data-plane
+                // API — but an EXPLAIN never reaches the service. Its rows are the plan itself, so it
+                // is prepared synchronously and asking for it asynchronously is refused.
+                using var reader = command.ExecuteReader();
+
+                var lines = new List<string>();
+                while (reader.Read())
+                    lines.Add(reader.GetValue(0)?.ToString()?.TrimEnd() ?? "");
+
+                var plan = string.Join(Environment.NewLine, lines).Trim();
+                return plan.Length == 0 ? null : plan;
+            }
+            catch (Exception)
+            {
+                return null;
             }
         }
 
