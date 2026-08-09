@@ -488,7 +488,7 @@ the mappings point at something that exists rather than at something that sounds
 | Flink | Here |
 |---|---|
 | `AsyncLookupFunctionProvider` | **in progress** — this is what `CosmosLookup` is. Async is the only option here, which matches. |
-| `PartialCachingLookupProvider` | **worth taking.** A cache in front of the lookup, with a maximum size and a TTL. Reference data is looked up repeatedly by construction, and a cache hit costs no RU at all. |
+| `PartialCachingLookupProvider` | **done, for one execution.** A bounded cache in front of the lookup; absence is remembered too, which is the case it most needs to hold. Scoped to a single execution deliberately: it then answers for no staleness the join did not already have. A cache *across* executions is the open part, and it is the part that needs a TTL and an owner. |
 | `FullCachingLookupProvider` | **worth considering** for small containers: load the whole thing once and never call the service on a miss, with a reload strategy. A lookup table of a few thousand documents is exactly this. |
 | `LookupOptions` | The options that go with the above — cache type, maximum rows, TTL, reload strategy. Worth copying the *names* so anyone who knows Flink knows these. |
 | Lookup retry (FLIP-234) | **probably not.** Flink retries a lookup that comes back empty, for late-arriving reference data. The SDK already retries throttling, which is the failure that actually happens here. |
@@ -532,8 +532,13 @@ obvious one:
 
 1. **Shuffle the build side by partition key** before the lookup (`SupportsLookupCustomShuffle`). It
    turns each batch from a fan-out into a single-partition request, and it is the difference between
-   the lookup join being an improvement and being a large one.
-2. **A lookup cache** (`PartialCachingLookupProvider`). Reference data is looked up repeatedly by
-   definition, and a hit costs nothing.
-3. **Patch for `UPDATE`** (`SupportsTargetColumnWriting`). When DML arrives, sending three properties
+   the lookup join being an improvement and being a large one. Wants measuring before designing:
+   routing per key means one request per distinct key, and whether that beats one cross-partition
+   query depends on the key count and the partition count. Grouping keys by *feed range* — one
+   request per physical partition — is the likelier shape.
+2. **Patch for `UPDATE`** (`SupportsTargetColumnWriting`). When DML arrives, sending three properties
    instead of a whole document is the difference in RU, not a refinement of it.
+3. **A cache across executions** (`FullCachingLookupProvider`). The within-execution one is done; the
+   one that survives a query needs a TTL, a size bound shared between queries, and something that
+   owns it — the schema is the obvious candidate and the wrong one if two connections disagree about
+   freshness.
