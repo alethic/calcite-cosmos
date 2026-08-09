@@ -90,7 +90,13 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             var cluster = RelOptCluster.create(planner, new RexBuilder(typeFactory));
             var converter = new SqlToRelConverter(null, validator, catalogReader, cluster, StandardConvertletTable.INSTANCE, SqlToRelConverter.config());
 
-            return converter.convertQuery(validator.validate(parsed), false, true).rel;
+            // project(), not rel. Ordering by an expression outside the select list makes
+            // SqlToRelConverter carry it as an extra column and record in the RelRoot that it is not
+            // output; project() is what applies that, and is what a real consumer uses. Taking rel
+            // leaves the column at the root, which for a scoring function is the difference between a
+            // plan that can be implemented and one that cannot — Cosmos will not project a score.
+            // It is a no-op wherever the mapping is trivial, which is every other query here.
+            return converter.convertQuery(validator.validate(parsed), false, true).project();
         }
 
         /// <summary>
@@ -527,6 +533,69 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             var best = PlanToCosmos("SELECT c.\"id\" FROM products AS c WHERE IS_DEFINED(c.\"_MAP\"['metadata']['sku'])");
 
             Render(best).Should().Contain("WHERE IS_DEFINED(c.metadata.sku)");
+        }
+
+
+        // ── Ranking by a scoring function ─────────────────────────────────────────
+
+        /// <remarks>
+        /// Calcite expresses this as three nodes — project the score, sort on it, project it away — and
+        /// the first is a statement Cosmos rejects, a scoring function not being projectable. The whole
+        /// shape collapses into one clause, and the score never appears in the select list.
+        /// </remarks>
+        [TestMethod]
+        public void OrderingByAScoreBecomesOrderByRank()
+        {
+            var best = PlanToCosmos("SELECT c.\"id\" FROM products AS c ORDER BY FULLTEXTSCORE(c.\"_MAP\"['name'], 'steel') FETCH FIRST 10 ROWS ONLY");
+            var sql = Render(best);
+
+            sql.Should().Be("SELECT TOP 10 VALUE { \"id\": c.id } FROM products c ORDER BY RANK FULLTEXTSCORE(c.name, @p0)");
+            sql.Should().NotContain("\"$f");
+        }
+
+        /// <remarks>
+        /// The keyword binds like any other literal, so the statement text does not vary with it.
+        /// </remarks>
+        [TestMethod]
+        public void TheRankKeywordIsBound()
+        {
+            var query = Query(PlanToCosmos("SELECT c.\"id\" FROM products AS c ORDER BY FULLTEXTSCORE(c.\"_MAP\"['name'], 'steel') FETCH FIRST 5 ROWS ONLY"));
+
+            query.Parameters.Should().ContainSingle().Which.Value.Should().Be("steel");
+        }
+
+        /// <remarks>
+        /// RRF fuses two scores, and its arguments are themselves scoring functions rather than paths.
+        /// </remarks>
+        [TestMethod]
+        public void RrfFusesTwoScores()
+        {
+            var best = PlanToCosmos(
+                "SELECT c.\"id\" FROM products AS c " +
+                "ORDER BY RRF(FULLTEXTSCORE(c.\"_MAP\"['name'], 'steel'), FULLTEXTSCORE(c.\"_MAP\"['tags'], 'frame')) " +
+                "FETCH FIRST 10 ROWS ONLY");
+
+            Render(best).Should().Contain("ORDER BY RANK RRF(FULLTEXTSCORE(c.name, @p0), FULLTEXTSCORE(c.tags, @p1))");
+        }
+
+        /// <remarks>
+        /// A scoring function anywhere but the rank clause is refused: the service will not project one,
+        /// and will not filter on one either.
+        /// </remarks>
+        [TestMethod]
+        public void AProjectedScoreIsNotPushedDown()
+        {
+            var act = () => PlanToCosmos("SELECT FULLTEXTSCORE(c.\"_MAP\"['name'], 'steel') AS \"s\" FROM products AS c");
+
+            act.Should().Throw<Exception>();
+        }
+
+        [TestMethod]
+        public void AScoreInAPredicateIsNotPushedDown()
+        {
+            var act = () => PlanToCosmos("SELECT c.\"id\" FROM products AS c WHERE FULLTEXTSCORE(c.\"_MAP\"['name'], 'steel') > 1");
+
+            act.Should().Throw<Exception>();
         }
 
     }

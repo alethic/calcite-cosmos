@@ -1,4 +1,4 @@
-# Apache.Calcite.Cosmos.Adapter
+﻿# Apache.Calcite.Cosmos.Adapter
 
 **Apache.Calcite.Cosmos.Adapter** lets [Apache Calcite](https://calcite.apache.org/) treat [Azure Cosmos DB](https://learn.microsoft.com/azure/cosmos-db/) containers as first-class relational schemas.
 
@@ -65,11 +65,11 @@ SqlOperatorTables.chain(SqlStdOperatorTable.instance(), CosmosOperators.Instance
 
 `FULLTEXTCONTAINS`, `FULLTEXTCONTAINSALL` and `FULLTEXTCONTAINSANY` are then usable in a `WHERE` clause and push down to the service. The first argument must be a property path.
 
-`FULLTEXTSCORE` and `RRF` are not yet reachable — the service permits them only in an `ORDER BY RANK` clause and forbids projecting them, which does not fit how Calcite expresses a sort. See [DESIGN.md](DESIGN.md).
+Ranking works too. `ORDER BY FULLTEXTSCORE(c."_MAP"['name'], 'steel') FETCH FIRST 10 ROWS ONLY` becomes `ORDER BY RANK`, and `RRF(...)` fuses two scores for hybrid search. The score is never projected — the service forbids it — so it ranks the rows and does not appear in the result. See [DESIGN.md](DESIGN.md).
 
 ## Status
 
-Under development. Statement generation, container metadata, the schema and table layer, the scan/filter/project/sort/unnest/aggregate nodes, and execution inside a Calcite plan are in place and tested. Results have not yet been read from a real account — the tests drive the compiled plan through a stub in place of the Cosmos SDK. See [DESIGN.md](DESIGN.md), including its record of assumptions that still need verifying against a real account.
+Under development. Statement generation, container metadata, the schema and table layer, the scan/filter/project/sort/unnest/aggregate/rank nodes, and execution inside a Calcite plan are in place and tested. Every emitted statement form is executed against a live service, and the suite runs against a real account when `COSMOS_TEST_ENDPOINT` and `COSMOS_TEST_KEY` name one — which the emulator is not a substitute for, it having been found to accept statements the service rejects and reject features the service implements. See [DESIGN.md](DESIGN.md), including its record of assumptions still to be settled.
 
 ## Further reading
 

@@ -1,4 +1,4 @@
-# Apache.Calcite.Cosmos.Adapter — Design
+﻿# Apache.Calcite.Cosmos.Adapter — Design
 
 `Apache.Calcite.Cosmos.Adapter` exposes Azure Cosmos DB containers to Apache Calcite as
 relational schemas, and pushes as much of the relational plan as possible down to Cosmos by
@@ -8,8 +8,8 @@ This document records the shape of the target language, the resulting design dec
 structure that follows from it.
 
 > **Status.** Under development. Statement generation, container metadata, the schema and table
-> layer, the scan/filter/project/sort/unnest/aggregate nodes with their conversion rules, and the
-> converter that hands results to `ClrAsyncEnumerableConvention` are in place and tested. Items
+> layer, the scan/filter/project/sort/unnest/aggregate/rank nodes with their conversion rules, and
+> the converter that hands results to `ClrAsyncEnumerableConvention` are in place and tested. Items
 > marked ✔ below exist; the rest are specification.
 >
 > One claim still rests on documentation rather than observation and needs a real Cosmos account
@@ -413,20 +413,33 @@ them to it: a call over anything that does not resolve to a path is declined rat
 Keywords bind as `@pN` like any other literal, so statement text stays independent of what is searched
 for.
 
-**The two scoring functions are a different kind of thing, and are not yet reachable.** The reference
-is explicit that `FULLTEXTSCORE` and `RRF` may appear *only* in an `ORDER BY RANK` clause and **cannot
-be part of a projection** — `SELECT FullTextScore(c.text, "kw") AS Score` is invalid. That is what
-makes them hard here rather than tedious: Calcite sorts by field ordinal, so the natural plan for
-`ORDER BY FULLTEXTSCORE(…)` is to project the score, sort on that column, and project it away — and
-the first step is exactly what Cosmos forbids. Reaching `ORDER BY RANK` needs a rule that recognises
-that shape and rewrites it into a rank clause without ever projecting the score.
+**The two scoring functions are a different kind of thing.** The reference is explicit that
+`FULLTEXTSCORE` and `RRF` may appear *only* in an `ORDER BY RANK` clause and **cannot be part of a
+projection** — `SELECT FullTextScore(c.text, "kw") AS Score` is invalid. That is what makes them
+structural rather than tedious. Calcite sorts by field ordinal, so ordering by an expression outside
+the select list becomes three nodes:
 
-What exists is the language layer below that rule. `CosmosQueryBuilder.RankBy` emits
-`ORDER BY RANK <function>`, and refuses to combine it with an ordinary `ORDER BY` or with `GROUP BY` —
-one `ORDER BY` clause per statement, and the reference says as much of `RRF` explicitly. The operator
-table deliberately does **not** carry `FULLTEXTSCORE` or `RRF`: until the rule exists, a query that
-could name one could only ever fail, and the translator refuses them with that reason where they
-appear in a `WHERE` or a projection.
+```
+LogicalProject(id=[$0])                                     drops the score
+  LogicalSort(sort0=[$1])                                   sorts on it
+    LogicalProject(id=[$1], $f1=[FULLTEXTSCORE($0, 'kw')])  adds it
+```
+
+and the innermost is a statement Cosmos will not run. `CosmosRankRule` matches the whole shape and
+collapses it into one `CosmosRank`, which projects what survives and renders the score into the clause
+and nowhere else.
+
+**Matching all three is what makes it safe.** Seeing only the sort would leave the score in the row
+type for something above to read, and it would read null — the statement never projects it. Requiring
+the outer projection to discard it is how the rule knows nothing does. A consumer reaches that shape
+through `RelRoot.project()`, which is where the extra column stops being output; a plan taken from
+`RelRoot.rel` still carries it, and is then correctly refused rather than silently returning nulls.
+
+`CosmosQueryBuilder.RankBy` emits the clause and refuses to combine it with an ordinary `ORDER BY` or
+with `GROUP BY` — one `ORDER BY` per statement, and the reference says as much of `RRF` explicitly.
+The scoring functions are in the operator table so a query can name them, and the translator permits
+them through `TranslateRank` alone; everywhere else is a place the service rejects them, so a `WHERE`
+or a select list containing one declines.
 
 ### Reading a value back
 
@@ -560,6 +573,7 @@ src/
       CosmosSort.cs                   ✔
       CosmosUnnest.cs                 ✔
       CosmosAggregate.cs              ✔
+      CosmosRank.cs                   ✔ ORDER BY RANK, which subsumes the projection
       Convert/                        ✔ One converter rule per node, and the one way out
     Sql/
       CosmosSql.cs                    ✔ Lexical primitives: identifiers, paths, JSON literals

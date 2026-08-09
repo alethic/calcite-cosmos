@@ -39,6 +39,11 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
     {
 
         readonly IReadOnlyList<CosmosPath?> _fields;
+
+        /// <summary>
+        /// Whether a scoring function is currently legal, which is only while rendering a rank clause.
+        /// </summary>
+        bool _scoring;
         readonly CosmosParameterList _parameters;
         readonly RexBuilder _rexBuilder;
 
@@ -591,10 +596,19 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
                     WriteFullTextPredicate(builder, call, name);
                     return;
                 case "FULLTEXTSCORE":
+                    if (_scoring == false)
+                        throw new CosmosTranslationException($"'{name}' is only legal in an ORDER BY RANK clause.");
+
+                    // Same shape as the predicates: a property path, then the terms.
+                    WriteFullTextPredicate(builder, call, name);
+                    return;
+
                 case "RRF":
-                    // Legal only in ORDER BY RANK, which no plan can yet produce. Reaching here means a
-                    // WHERE or a projection, where the service rejects them outright.
-                    throw new CosmosTranslationException($"'{name}' is only legal in an ORDER BY RANK clause.");
+                    if (_scoring == false)
+                        throw new CosmosTranslationException($"'{name}' is only legal in an ORDER BY RANK clause.");
+
+                    WriteRrf(builder, call);
+                    return;
             }
 
             if (DirectFunctions.TryGetValue(name, out var mapping) == false)
@@ -707,6 +721,81 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
             Write(builder, Operand(call, 1));
             builder.Append(", ");
             Write(builder, Operand(call, 0));
+            builder.Append(')');
+        }
+
+        /// <summary>
+        /// Translates a scoring function for an <c>ORDER BY RANK</c> clause.
+        /// </summary>
+        /// <remarks>
+        /// The one context in which <c>FULLTEXTSCORE</c> and <c>RRF</c> are legal. <see cref="Translate"/>
+        /// refuses them, because everywhere it is used — a predicate, a projection, an ordinary sort key
+        /// — is a place the service rejects them, and a refusal costs a pushdown where a rendered
+        /// statement would cost the query.
+        /// </remarks>
+        /// <param name="node">The scoring function.</param>
+        /// <returns>The Cosmos SQL text.</returns>
+        /// <exception cref="CosmosTranslationException">The expression is not a scoring function, or has no Cosmos equivalent.</exception>
+        public string TranslateRank(RexNode node)
+        {
+            if (node is null)
+                throw new ArgumentNullException(nameof(node));
+
+            if (IsScoringFunction(node) == false)
+                throw new CosmosTranslationException("An ORDER BY RANK clause takes a scoring function.");
+
+            _scoring = true;
+
+            try
+            {
+                var builder = new StringBuilder();
+                Write(builder, node);
+                return builder.ToString();
+            }
+            finally
+            {
+                _scoring = false;
+            }
+        }
+
+        /// <summary>
+        /// Determines whether an expression is one of the functions <c>ORDER BY RANK</c> ranks by.
+        /// </summary>
+        /// <param name="node">The expression to test.</param>
+        /// <returns><c>true</c> if it is a scoring function.</returns>
+        public static bool IsScoringFunction(RexNode? node)
+        {
+            return node is RexCall call && call.getOperator().getName() switch
+            {
+                "FULLTEXTSCORE" or "RRF" => true,
+                _ => false,
+            };
+        }
+
+        /// <summary>
+        /// Writes <c>RRF</c>, whose arguments are themselves scoring functions.
+        /// </summary>
+        /// <remarks>
+        /// Two or more of them, optionally followed by an array of weights. Only the scoring functions
+        /// are checked for here — a trailing weights array is an ordinary expression and renders as one —
+        /// so an argument that is neither is refused by the recursive call rather than by a count.
+        /// </remarks>
+        void WriteRrf(StringBuilder builder, RexCall call)
+        {
+            var operands = call.getOperands();
+            if (operands.size() < 2)
+                throw new CosmosTranslationException("RRF fuses two or more scoring functions.");
+
+            builder.Append("RRF(");
+
+            for (var i = 0; i < operands.size(); i++)
+            {
+                if (i > 0)
+                    builder.Append(", ");
+
+                Write(builder, Operand(call, i));
+            }
+
             builder.Append(')');
         }
 

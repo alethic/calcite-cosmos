@@ -62,6 +62,10 @@ namespace Apache.Calcite.Cosmos.Adapter
             // Partial pushdown: where only some of a predicate renders, the service still evaluates
             // that part rather than the plan declining the whole thing and scanning the container.
             yield return CosmosFilterSplitRule.Create(convention);
+
+            // Ordering by a scoring function, which Calcite expresses as three nodes and Cosmos as one
+            // clause — and whose middle node, a projected score, is a statement the service rejects.
+            yield return CosmosRankRule.Create(convention);
             yield return CosmosProjectRule.Create(convention);
             yield return CosmosSortRule.Create(convention);
             yield return CosmosUnnestRule.Create(convention);

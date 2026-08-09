@@ -120,25 +120,43 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Sql
 
             names.Should().BeEquivalentTo([
                 "FULLTEXTCONTAINS", "FULLTEXTCONTAINSALL", "FULLTEXTCONTAINSANY",
+                "FULLTEXTSCORE", "RRF",
                 "IS_DEFINED", "IS_ARRAY", "IS_BOOL", "IS_NULL",
                 "IS_NUMBER", "IS_OBJECT", "IS_PRIMITIVE", "IS_STRING",
             ]);
         }
 
         /// <remarks>
-        /// <c>FULLTEXTSCORE</c> and <c>RRF</c> are legal only in an <c>ORDER BY RANK</c> clause, so the
-        /// operator table does not carry them: a query that could name one could only ever fail.
+        /// The scoring functions are nameable — a query has to be able to write
+        /// <c>ORDER BY FULLTEXTSCORE(…)</c> for <c>CosmosRankRule</c> to recognise the shape — but they
+        /// are legal in that clause alone. The translator is what holds them to it, so naming one
+        /// anywhere else declines rather than rendering a statement the service rejects.
         /// </remarks>
         [TestMethod]
-        public void TheOperatorTableCarriesNoScoringFunction()
+        public void AScoringFunctionIsRefusedOutsideARankClause()
         {
-            var names = new List<string>();
-            var operators = CosmosOperators.Instance.getOperatorList();
+            CanTranslate(CosmosOperators.FullTextScore, Text(), Keyword("steel")).Should().BeFalse();
+            CanTranslate(CosmosOperators.Rrf, Text(), Keyword("steel")).Should().BeFalse();
+        }
 
-            for (var i = 0; i < operators.size(); i++)
-                names.Add(((org.apache.calcite.sql.SqlOperator)operators.get(i)).getName());
+        /// <remarks>
+        /// And renders in one. This is the only entry point that permits it.
+        /// </remarks>
+        [TestMethod]
+        public void AScoringFunctionRendersInARankClause()
+        {
+            Translator().TranslateRank(_rex.makeCall(CosmosOperators.FullTextScore, Text(), Keyword("steel")))
+                .Should().Be("FULLTEXTSCORE(c.text, @p0)");
+        }
 
-            names.Should().NotContain("FULLTEXTSCORE").And.NotContain("RRF");
+        /// <remarks>
+        /// An ordinary expression is not something to rank by.
+        /// </remarks>
+        [TestMethod]
+        public void ARankClauseTakesOnlyAScoringFunction()
+        {
+            var act = () => Translator().TranslateRank(Text());
+            act.Should().Throw<CosmosTranslationException>();
         }
 
 

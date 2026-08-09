@@ -1,4 +1,4 @@
-using org.apache.calcite.sql;
+﻿using org.apache.calcite.sql;
 using org.apache.calcite.sql.type;
 using org.apache.calcite.sql.util;
 
@@ -24,10 +24,10 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
     /// translator holds them to that: a call over anything it cannot resolve to a path is declined.
     /// </para>
     /// <para>
-    /// <b>The scoring functions are deliberately absent.</b> <c>FULLTEXTSCORE</c> and <c>RRF</c> are
-    /// legal only in an <c>ORDER BY RANK</c> clause — the reference is explicit that neither may appear
-    /// in a projection — and nothing here can yet produce that clause from a Calcite plan. Defining
-    /// them would let a query name a function that could only ever fail. See <c>DESIGN.md</c>.
+    /// The scoring functions are here too, and are a different kind of thing: <c>FULLTEXTSCORE</c> and
+    /// <c>RRF</c> are legal only in an <c>ORDER BY RANK</c> clause and may not be projected. They exist
+    /// as operators so that a query can write <c>ORDER BY FULLTEXTSCORE(…)</c>, which is the only shape
+    /// <c>CosmosRankRule</c> recognises; the translator refuses them anywhere else.
     /// </para>
     /// </remarks>
     public static class CosmosOperators
@@ -50,6 +50,28 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
         /// keyword occurs in the property.
         /// </summary>
         public static readonly SqlFunction FullTextContainsAny = Predicate("FULLTEXTCONTAINSANY", 2, -1);
+
+        /// <summary>
+        /// <c>FULLTEXTSCORE(&lt;property_path&gt;, &lt;string_expr1&gt;, …)</c> — a BM25 relevance score.
+        /// </summary>
+        /// <remarks>
+        /// Legal only in an <c>ORDER BY RANK</c> clause or as an argument to <see cref="Rrf"/>, and
+        /// explicitly not in a projection. It exists as an operator so a query can write
+        /// <c>ORDER BY FULLTEXTSCORE(…)</c>; <c>CosmosRankRule</c> is what recognises that shape and
+        /// turns it into the clause. The translator refuses it everywhere else, so a plan that reached
+        /// a <c>WHERE</c> or a select list with one declines rather than emitting a rejected statement.
+        /// </remarks>
+        public static readonly SqlFunction FullTextScore = Scoring("FULLTEXTSCORE", 2);
+
+        /// <summary>
+        /// <c>RRF(&lt;function1&gt;, &lt;function2&gt;, …, &lt;weights&gt;)</c> — a fused score.
+        /// </summary>
+        /// <remarks>
+        /// Combines two or more scoring functions, optionally weighted by a trailing array. Subject to
+        /// the same restriction as <see cref="FullTextScore"/>, and additionally cannot be combined with
+        /// ordering on other property paths.
+        /// </remarks>
+        public static readonly SqlFunction Rrf = Scoring("RRF", 2);
 
         /// <summary>
         /// <c>IS_DEFINED(&lt;expr&gt;)</c> — whether the property exists on the document at all.
@@ -89,8 +111,27 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
         public static SqlOperatorTable Instance { get; } = SqlOperatorTables.of(
             [
                 FullTextContains, FullTextContainsAll, FullTextContainsAny,
+                FullTextScore, Rrf,
                 IsDefined, IsArray, IsBool, IsNull, IsNumber, IsObject, IsPrimitive, IsString,
             ]);
+
+        /// <summary>
+        /// Defines a scoring function, whose value ranks a row rather than describing it.
+        /// </summary>
+        /// <remarks>
+        /// Typed as a double so that a query can name it in an <c>ORDER BY</c> and the validator will
+        /// accept the sort. Nothing may read the value — Cosmos will not project one — and the
+        /// translator enforces that; the type is what makes the clause expressible, not a promise that
+        /// a number comes back.
+        /// </remarks>
+        static SqlFunction Scoring(string name, int min)
+        {
+            return SqlBasicFunction.create(
+                name,
+                ReturnTypes.DOUBLE,
+                OperandTypes.variadic(SqlOperandCountRanges.from(min)),
+                SqlFunctionCategory.SYSTEM);
+        }
 
         /// <summary>
         /// Defines a unary type test.

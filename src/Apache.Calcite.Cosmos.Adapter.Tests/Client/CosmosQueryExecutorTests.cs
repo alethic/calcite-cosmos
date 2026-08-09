@@ -500,6 +500,21 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
                 ("fulltextcontainsall", b => b.Where = "FULLTEXTCONTAINSALL(c.name, \"steel\", \"frame\")"),
                 ("fulltextcontainsany", b => b.Where = "FULLTEXTCONTAINSANY(c.name, \"steel\", \"frame\")"),
                 ("order by rank fulltextscore", b => { b.Top = 10; b.RankBy = "FULLTEXTSCORE(c.name, \"steel\")"; }),
+
+                // The forms CosmosRank emits: a projection alongside the clause, and a fused score. The
+                // score is never in the select list, which is the whole reason that node exists.
+                ("rank with an object projection", b =>
+                {
+                    b.Top = 10;
+                    b.SelectProperty("id", "c.id");
+                    b.RankBy = "FULLTEXTSCORE(c.name, \"steel\")";
+                }),
+                ("rank by rrf", b =>
+                {
+                    b.Top = 10;
+                    b.SelectProperty("id", "c.id");
+                    b.RankBy = "RRF(FULLTEXTSCORE(c.name, \"steel\"), FULLTEXTSCORE(c.name, \"frame\"))";
+                }),
             };
 
             var rejected = new List<string>();
