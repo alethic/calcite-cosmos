@@ -316,43 +316,27 @@ Still unmeasured: whether `ARRAY_CONTAINS(@keys, c.k)` is served the same way. I
 parameter for a variable-length batch instead of a hundred with padding, which is tidier but buys
 nothing now that the padded form is known to work.
 
-### Weakening a disjunction — *medium, measured, and the rule is not what it looked like*
+### Weakening a disjunction — *done*
 
-Dropping a conjunct weakens; dropping a disjunct strengthens, so an `OR` is pushable only when every
-branch is. It is still pushable when every branch can be *weakened*: `a OR b` with `b` untranslatable
-can push `a OR w` for any `w` that `b` implies, because `a OR b` then implies `a OR w`, and a
-restriction the plan implies discards nothing the plan would have kept. `w = TRUE` always qualifies
-and is worthless, so the feature is entirely about finding a non-trivial `w`.
+Dropping a conjunct weakens; dropping a disjunct strengthens, so an `OR` with a branch Cosmos cannot
+render was declined whole. `CosmosFilterSplitRule` now pushes `a OR w` where each `w` is implied by
+its branch, and rechecks the original above it.
 
-`IS_DEFINED` of the paths `b` mentions is the candidate. **Measured on a real account**, against a
-document with no `price`:
+The weakening is "every path this branch reads is defined". **Measured**, and the measurement changed
+the rule: the guess was that `NOT` flips the implication, and it does not — a comparison on an absent
+property is undefined rather than false, and `NOT undefined` is not true either, so neither
+`c.price > 5` nor `NOT (c.price > 5)` reaches a document without a `price`. What breaks the
+implication is an operator that *observes absence*: `IS_DEFINED` returns a real boolean there, so
+`NOT IS_DEFINED(p)` is genuinely true where the path is missing. The rest of the `IS_*` family is
+refused with it, on the same reasoning rather than on measurement.
 
-| | matches the document without `price`? |
-|---|---|
-| `NOT IS_DEFINED(c.price)` | **yes** |
-| `c.price > 5` | no |
-| `NOT (c.price > 5)` | **no** |
-| `c.price = null` | no |
-| `NOT (c.price = null)` | **no** |
+Had the polarity walk previously specified here been implemented, it would have been sound but
+needlessly narrow — refusing every negated comparison.
 
-**So it is not polarity that decides it.** The guess had been that `NOT` flips the implication, and it
-does not: negating a comparison still does not reach an absent property, because the comparison is
-undefined rather than false and `NOT undefined` is not true either. What breaks the implication is an
-operator that *observes absence* — `IS_DEFINED` returns a real boolean for an absent path, so `NOT
-IS_DEFINED(p)` is genuinely true there.
+Also settled on the way: `= null` is a comparison, not a definedness test. Undefined is not null.
 
-That makes the rule simpler and more permissive than the polarity walk previously specified here:
-**collect the paths `b` mentions, at any depth and any polarity, and drop the whole weakening if `b`
-mentions `IS_DEFINED` at all.** Everything else — comparisons, arithmetic, scalar functions, `= null`
-— can only be true where its operands are defined.
-
-Also settled: `= null` is a comparison, not a definedness test. An absent property is undefined and
-undefined is not null.
-
-Still to check before writing it: which other built-ins observe absence the way `IS_DEFINED` does.
-`IS_NULL`, `IS_PRIMITIVE` and the rest of the `IS_*` family are the obvious suspects, and the
-conservative reading — treat every `IS_*` as absence-observing — costs little, since a branch using
-one is unusual.
+Left open: whether any operator outside the `IS_*` family observes absence. Nothing else in the
+translated set looks like it, but it has not been enumerated.
 
 ### Smaller rules
 
