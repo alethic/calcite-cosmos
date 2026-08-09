@@ -389,3 +389,69 @@ for the right query.
 - **Out-of-domain arithmetic.** Measured: `ASIN(2)`, `ACOS(2)`, `SQRT(-1)` and `LOG(0)` each fail the
   whole query where Calcite yields NaN. Pushed anyway, consistently, and recorded so the consistency
   is a decision.
+
+---
+
+## 11. Read off Flink's connector SPI
+
+Flink is the most complete Calcite-based connector framework in the open, and its source and sink
+*ability* interfaces are a catalogue of what a pushdown-capable connector can offer. Each one below is
+an interface a Flink connector implements; what follows is what it would mean for Cosmos. Read as a
+checklist rather than a plan — several are already done, several do not apply, and the ones that do
+are marked.
+
+Every Cosmos operation named below was compile-checked against the SDK this project references, so
+the mappings point at something that exists rather than at something that sounds right.
+
+### Source abilities
+
+| Flink | Here |
+|---|---|
+| `SupportsFilterPushDown` | **done** — and note the API shape: it returns *accepted* and *remaining* filters, so partial pushdown is a first-class contract rather than an afterthought. `CosmosFilterSplitRule` reaches the same place by rule. |
+| `SupportsProjectionPushDown` | **done**, including nested paths, which Cosmos addresses natively. |
+| `SupportsLimitPushDown` | **done** — `OFFSET`/`LIMIT`, plus `MaxItemCount` as the page size. |
+| `SupportsAggregatePushDown` | **partly done.** Flink pushes the *local* aggregate and combines above it. Worth taking: a `GROUP BY` that cannot be pushed whole may still be pushable as a partial aggregate the plan finishes — see below. |
+| `SupportsStatisticReport` | **done** — this is FLIP-231, already the model for reading statistics lazily at optimisation. |
+| `SupportsPartitionPushDown` | **worth taking.** Hands the planner the list of partitions. `GetFeedRangesAsync` gives the physical ones; see *parallel scan by feed range*. |
+| `SupportsDynamicFiltering` | **worth taking** — FLIP-248 dynamic partition pruning. The other half of sideways information passing: instead of fetching by key, the build side's values *prune partitions* on the probe side at run time. Complements the lookup join rather than competing with it, and for Cosmos the unit pruned is a physical partition. |
+| `SupportsLookupCustomShuffle` | **worth taking, and it is the big one.** A connector says how rows should be partitioned before they reach the lookup. Shuffling build rows by Cosmos partition key would make every batch single-partition, turning a fan-out into one request — which is the saving the lookup join otherwise leaves on the table. |
+| `SupportsReadingMetadata` | **small.** Metadata columns declared rather than always promoted: `_rid`, `_self`, `_attachments`, and the per-item `ttl`. Would also let `_ts`/`_etag` stop occupying ordinary column ordinals. |
+| `SupportsRowLevelModificationScan` | **relevant once there is DML.** The scan is told it is feeding an `UPDATE`/`DELETE`, so it can read only what the modification needs — for Cosmos, `id` and the partition key rather than whole documents. |
+| `SupportsWatermarkPushDown`, `SupportsSourceWatermark` | **only with the change feed.** Streaming concepts; the change feed is the analogue, and `_ts` the natural watermark. See *change feed*. |
+
+### Lookup abilities
+
+| Flink | Here |
+|---|---|
+| `AsyncLookupFunctionProvider` | **in progress** — this is what `CosmosLookup` is. Async is the only option here, which matches. |
+| `PartialCachingLookupProvider` | **worth taking.** A cache in front of the lookup, with a maximum size and a TTL. Reference data is looked up repeatedly by construction, and a cache hit costs no RU at all. |
+| `FullCachingLookupProvider` | **worth considering** for small containers: load the whole thing once and never call the service on a miss, with a reload strategy. A lookup table of a few thousand documents is exactly this. |
+| `LookupOptions` | The options that go with the above — cache type, maximum rows, TTL, reload strategy. Worth copying the *names* so anyone who knows Flink knows these. |
+| Lookup retry (FLIP-234) | **probably not.** Flink retries a lookup that comes back empty, for late-arriving reference data. The SDK already retries throttling, which is the failure that actually happens here. |
+
+### Sink abilities, for when there is DML
+
+All of these bear on *Writing* above, and several map onto a Cosmos operation that is cheaper than the
+obvious one:
+
+| Flink | Here |
+|---|---|
+| `SupportsTargetColumnWriting` | **Patch.** Writing named columns only is exactly `PatchItemStreamAsync`, which sends the changed properties rather than the whole document. |
+| `SupportsRowLevelUpdate` | Same — an `UPDATE` touching three fields should be a patch, not a replace. |
+| `SupportsRowLevelDelete` | Delete by `id` and partition key, which is a point operation. |
+| `SupportsDeletePushDown` | `DELETE … WHERE` decomposed and pushed. Where the predicate pins a partition key and nothing else, the service has `DeleteAllItemsByPartitionKeyStreamAsync` — a whole-partition delete that is not a query at all. |
+| `SupportsTruncate` | `TRUNCATE TABLE` — per-partition deletes, or recreating the container, which is cheaper and has different semantics. Worth deciding deliberately rather than by default. |
+| `SupportsOverwrite` | Upsert, which is native (`UpsertItemStreamAsync`). |
+| `SupportsPartitioning` | Writes routed by partition key. Bulk mode already groups by partition, so this is mostly about telling the planner. |
+| `SupportsWritingMetadata` | Writing the per-item `ttl`, which is a real Cosmos feature with no column to put it in today. |
+| `SupportsStaging`, `SupportsBucketing` | **Not applicable.** Two-phase commit for `CTAS`, and bucketed file layouts; neither has a Cosmos counterpart. |
+
+### The three worth doing first
+
+1. **Shuffle the build side by partition key** before the lookup (`SupportsLookupCustomShuffle`). It
+   turns each batch from a fan-out into a single-partition request, and it is the difference between
+   the lookup join being an improvement and being a large one.
+2. **A lookup cache** (`PartialCachingLookupProvider`). Reference data is looked up repeatedly by
+   definition, and a hit costs nothing.
+3. **Patch for `UPDATE`** (`SupportsTargetColumnWriting`). When DML arrives, sending three properties
+   instead of a whole document is the difference in RU, not a refinement of it.
