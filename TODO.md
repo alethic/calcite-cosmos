@@ -95,11 +95,16 @@ open question:
 3. **A cache across executions** (section 11) — the within-execution one is done; this one needs a TTL,
    a bound shared between queries, and something that owns it.
 
-**One thing found and not fixed.** `CosmosLookupJoinRule` has the shape of the defect measured in the
-write rule — a converter rule between two container-independent conventions, created once per
-container, whose instances therefore share a description and displace one another. Every existing
-lookup-join test puts the same container on the probe side, so none of them would show it. The
-experiment is a join with the *other* container on the probe side and both rule sets registered.
+**That one thing is now fixed, and the experiment this file proposed was the wrong one.** A join
+with the other container on the probe side passes even with the binding in place: the instance a
+planner consults is not the one `addRule` accepted but the freshest at the rule's *first* firing,
+which then stays bound for the run — and since `CosmosConvention.register` rebuilds the rule set
+per convention and a join's inputs register left before right, a lone join's freshest instance is
+its own probe side's. Two containers passed in either orientation by registration order. A join of
+*three* containers showed it: the instance bound at the first join declined the second's container,
+which was read whole. Fixed the way the write rule was — no binding, the container read from the
+probe side — and guarded by `EveryContainerInAQueryCanBeOnTheProbeSide`, whose remarks record both
+the mechanism and why the two-container experiment could not have caught it.
 
 ---
 

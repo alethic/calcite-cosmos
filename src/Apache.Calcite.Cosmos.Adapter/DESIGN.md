@@ -831,18 +831,32 @@ The columns a modify's input carries are unaffected by any of this: the input ro
 table's whole row type, with the omitted columns as typed null literals. Only the *arity* an `INSERT`
 without a column list expects changes, the two `STORED` columns dropping out of it.
 
-### The write rule is the one rule not bound to a convention
+### Two rules are not bound to a convention, and neither can be
 
 Every other rule here is created per `CosmosConvention`, because a convention is bound to a container
-and some rules must consult that container's metadata. The write rule cannot be, and the reason is a
-property of `ConverterRule`: its description is derived from the traits it converts between. This one
-converts `NONE` to `CLR_ASYNC_ENUMERABLE`, neither of which names a container, so every per-container
-instance carries the same description — and rules compare by description, so a planner given two
-containers' rule sets keeps one and discards the rest.
+and some rules must consult that container's metadata. The write rule and the lookup join rule
+cannot be, and the reason is a property of `ConverterRule`: its description is derived from the
+traits it converts between. Both convert `NONE` to `CLR_ASYNC_ENUMERABLE`, neither of which names a
+container, so every per-container instance carries the same description — and rules compare by
+description, so a planner given two containers' rule sets keeps one and discards the rest.
 
-**Measured.** With a second container's rules registered, an insert into the first stopped planning
-entirely: the surviving instance was checking for the wrong convention and declined. There is nothing
-for the binding to do anyway, the container being named by the modify rather than scanned beneath it.
+**Measured twice, and the second measurement sharpened the first.** With a second container's rules
+registered, an insert into the first stopped planning entirely: the surviving write-rule instance
+was checking for the wrong convention and declined. The lookup join then showed why its own tests
+had never caught the same defect — `addRule` does reject the later duplicates, but rejection does
+not decide matching: in every measured plan the predicate that ran belonged to an instance `addRule`
+had rejected, the one most recently constructed at the rule's *first* firing, and that instance
+stayed bound for the rest of the run. `CosmosConvention.register` rebuilds the rule set per
+convention and a join's inputs register left before right, so at a lone join's first match the
+freshest instance is its own probe side's. Two containers therefore passed in either orientation by
+an accident of registration order that a third container ends: the instance bound at the first join
+judged the second join too, declined it, and that container was read whole, through a hash join,
+silently.
+
+The consequence for both rules is the same: an unbound rule is correct only if every instance is
+interchangeable, so their predicates capture nothing and read everything from the matched node —
+the container being named by the modify, or found beneath the join's probe side. There was nothing
+for the binding to do anyway.
 
 ### Deleting, and reading first
 
