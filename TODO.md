@@ -222,10 +222,10 @@ whose encoding the service defines. Pushing a temporal function down means decid
 
 ## 5. Planner
 
-### Half a join — *large, highest value after the point lookup*
+### Half a join — *parked; no adapter in the tree is built this way*
 
 A relational join is not expressible in Cosmos, so both sides are read whole and joined in process.
-One side can pay for the other: evaluate `other`, collect the distinct values of its key, and push
+One side could pay for the other: evaluate `other`, collect the distinct values of its key, and push
 `cosmos.k IN (…)` into the Cosmos side. The reference points the same way from the other end — its
 documented workaround for a join is to inline a literal array of reference data.
 
@@ -233,17 +233,34 @@ documented workaround for a join is to inline a literal array of reference data.
 `k IN (values)`, so the pushed predicate is implied by the join condition and can only discard rows
 that would not have joined.
 
-Three things make it work rather than merely be correct:
+**But it has no precedent among storage adapters, and that is the finding.** Searching
+`apache/calcite` for `RexCorrelVariable`, the only adapter that handles one is the JDBC adapter, via
+`JdbcImplementor` and `SqlImplementor` — and that is a special case, because it emits SQL to another
+SQL engine and can express a correlated subquery natively. Cassandra, MongoDB, Elasticsearch, Geode
+and Druid do not touch correlation variables at all. `RexFieldAccess` appears in adapter code only in
+`RexToLixTranslator`, which is the in-process code generator rather than a pushdown path. What every
+storage adapter does about a join is nothing: read both sides, let Calcite join them.
 
-- **It is a run-time value.** The plan cannot hold the statement, because the values are not known
-  until the build side is read. Everything renders once at prepare today, so this is the design
-  decision the feature turns on.
-- **It needs a cardinality bound.** Ten values is a large win; a million is a statement the service
-  refuses on length. The bound wants measuring.
-- **It wants the partition key.** If the pushed key *is* the partition key this collapses a fan-out
-  into a handful of single-partition reads, and with `id` too, into the batch point read.
+What it would take, recorded so the shape is not re-derived:
 
-Calcite calls the general shape sideways information passing; the same machinery serves
+- **The restriction is a run-time value**, so no rule can write it. Calcite's plan-level stand-in for
+  one is a correlation variable, and `EnumerableBatchNestedLoopJoin` — mirrored as
+  `ClrAsyncEnumerableBatchNestedLoopJoin` — already rewrites a join into exactly the right shape,
+  with the batch's values as a disjunction over the right input. The filter it adds is evaluated in
+  process; pushing it into the source is the part nothing does.
+- **Rendering one needs a value at execution.** In the CLR conventions the variable is a linq4j local
+  in generated code, and the bridge to `System.Linq.Expressions` (`LixToClrTranslator`,
+  `IClrRelImplementor`) is internal to `Apache.Calcite.Extensions` — so an out-of-tree adapter cannot
+  read one without an addition there.
+- **The alternative is owning the join**, which no adapter does, and which means owning INNER, LEFT,
+  SEMI and ANTI semantics rather than borrowing them.
+
+Two things that would have made it worth the weight are also out of reach on the correlated route,
+and are the reason to revisit only with a different design: the values cannot be deduped, and the
+pushed key cannot pin the partition key, which is what would have collapsed a fan-out into a handful
+of single-partition reads.
+
+Calcite calls the general shape sideways information passing; the same machinery would serve
 `IN (subquery)`.
 
 ### Weakening a disjunction — *medium*
