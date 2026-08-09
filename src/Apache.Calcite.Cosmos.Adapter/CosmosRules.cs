@@ -33,6 +33,13 @@ namespace Apache.Calcite.Cosmos.Adapter
     /// <item><description>
     /// <b>No values rule.</b> There is no container-independent row source.
     /// </description></item>
+    /// <item><description>
+    /// <b>One way out, and it is asynchronous.</b> There is no converter into
+    /// <c>ClrEnumerableConvention</c> or Calcite's <c>EnumerableConvention</c>, because the Cosmos
+    /// SDK has no synchronous data-plane API and such a converter could only block a thread per
+    /// page. A query over a Cosmos table plans only when the root is asked for in
+    /// <c>ClrAsyncEnumerableConvention</c>.
+    /// </description></item>
     /// </list>
     /// </remarks>
     public static class CosmosRules
@@ -51,9 +58,17 @@ namespace Apache.Calcite.Cosmos.Adapter
 
             yield return CosmosAggregateRule.Create(convention);
             yield return CosmosFilterRule.Create(convention);
+
+            // Partial pushdown: where only some of a predicate renders, the service still evaluates
+            // that part rather than the plan declining the whole thing and scanning the container.
+            yield return CosmosFilterSplitRule.Create(convention);
             yield return CosmosProjectRule.Create(convention);
             yield return CosmosSortRule.Create(convention);
             yield return CosmosUnnestRule.Create(convention);
+
+            // The way out. Without it a pushed-down subtree is a statement nothing can read the rows of,
+            // and the planner has no complete plan to choose.
+            yield return CosmosToClrAsyncEnumerableConverterRule.Create(convention);
         }
 
     }

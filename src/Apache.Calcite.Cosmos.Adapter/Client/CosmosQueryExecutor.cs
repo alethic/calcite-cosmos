@@ -117,6 +117,11 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
             if (effective is PartitionKey key)
                 options.PartitionKey = key;
 
+            // A page size, not a limit. The statement already says how many rows it wants; this stops
+            // the service filling a default-sized page with rows the statement would discard.
+            if (query.MaxItemCount is int maxItemCount)
+                options.MaxItemCount = maxItemCount;
+
             // The stream iterator is used rather than the typed one so that results are read with
             // System.Text.Json. The SDK requires Newtonsoft.Json to be present, but nothing here
             // needs to go through it.

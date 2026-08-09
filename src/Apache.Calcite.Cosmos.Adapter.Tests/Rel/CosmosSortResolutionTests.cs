@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 
 using Apache.Calcite.Cosmos.Adapter.Rel;
 using Apache.Calcite.Cosmos.Adapter.Sql;
@@ -83,7 +83,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
                 .add(CosmosImplementor.MapColumnName, SqlTypeName.ANY)
                 .build();
 
-            CosmosImplementor.BindFields(rowType).Should().ContainSingle().Which.ToString().Should().Be("c");
+            CosmosImplementor.BindFields(rowType).Should().ContainSingle().Which!.ToString().Should().Be("c");
         }
 
         [TestMethod]
@@ -97,16 +97,16 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
 
             var fields = CosmosImplementor.BindFields(rowType);
 
-            fields[0].ToString().Should().Be("c");
-            fields[1].ToString().Should().Be("c.id");
-            fields[2].ToString().Should().Be("c._ts");
+            fields[0]!.ToString().Should().Be("c");
+            fields[1]!.ToString().Should().Be("c.id");
+            fields[2]!.ToString().Should().Be("c._ts");
         }
 
         [TestMethod]
         public void BindingHonoursTheRootAlias()
         {
             var rowType = _types.builder().add("id", SqlTypeName.VARCHAR).build();
-            CosmosImplementor.BindFields(rowType, "p")[0].ToString().Should().Be("p.id");
+            CosmosImplementor.BindFields(rowType, "p")[0]!.ToString().Should().Be("p.id");
         }
 
         // ── Path resolution ───────────────────────────────────────────────────────
@@ -222,9 +222,15 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
 
         // ── Keys rooted at an array-traversal alias ───────────────────────────────
         //
-        // A path rooted at an unnest alias is relative to the array element, so its policy form
-        // ("/key" from "t0.key") is not comparable with the container's index paths ("/tags/[]/key").
-        // Comparing them could match a composite index that does not in fact serve the sort.
+        // The service refuses to order by one at all. Measured against Azure, which rejects both
+        // `ORDER BY t0` and `ORDER BY t0.x` over `JOIN t0 IN c.tags` with a 400 while accepting the
+        // same JOIN ordered by a container path. The emulator accepts all three, which is why a
+        // single-key allowance stood here for so long.
+        //
+        // There is a second reason it could never have been right: a path rooted at an unnest alias is
+        // relative to the array element, so its policy form ("/key" from "t0.key") is not comparable
+        // with the container's index paths ("/tags/[]/key"), and comparing them could match a composite
+        // index that does not in fact serve the sort.
 
         static readonly CosmosPath[] UnnestFields =
         {
@@ -239,8 +245,12 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             .add("element", _types.createSqlType(SqlTypeName.VARCHAR))
             .build();
 
+        /// <remarks>
+        /// Refused however few keys there are: the service rejects ordering by an element alias
+        /// outright, so there is no arity at which it becomes legal.
+        /// </remarks>
         [TestMethod]
-        public void SingleKeyOnAnUnnestAliasIsAllowed()
+        public void SingleKeyOnAnUnnestAliasIsRefused()
         {
             CosmosSort.TryResolveSortKeys(
                 Collation((2, RelFieldCollation.Direction.ASCENDING)),
@@ -248,9 +258,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
                 UnnestRowType(),
                 "c",
                 out _,
-                out var paths).Should().BeTrue();
-
-            paths[0].ToString().Should().Be("t0.key");
+                out _).Should().BeFalse();
         }
 
         /// <remarks>

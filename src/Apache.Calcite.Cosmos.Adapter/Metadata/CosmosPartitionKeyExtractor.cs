@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 
 using Apache.Calcite.Cosmos.Adapter.Sql;
@@ -38,7 +38,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Metadata
         /// <param name="values">On success, one value per declared partition key path, in order.</param>
         /// <returns><c>true</c> if every partition key path was pinned; otherwise <c>false</c>.</returns>
         /// <exception cref="ArgumentNullException">Any argument is <c>null</c>.</exception>
-        public static bool TryExtract(RexNode condition, IReadOnlyList<CosmosPath> fields, CosmosContainerMetadata container, string rootAlias, out IReadOnlyList<object?> values)
+        public static bool TryExtract(RexNode condition, IReadOnlyList<CosmosPath?> fields, CosmosContainerMetadata container, string rootAlias, out IReadOnlyList<object?> values)
         {
             if (condition is null)
                 throw new ArgumentNullException(nameof(condition));
@@ -78,7 +78,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Metadata
         /// Only <c>AND</c> is descended into. Under a disjunction an equality does not constrain
         /// the whole predicate, so treating it as pinning would be wrong.
         /// </remarks>
-        static void Collect(RexNode node, IReadOnlyList<CosmosPath> fields, string rootAlias, Dictionary<string, object?> pinned)
+        static void Collect(RexNode node, IReadOnlyList<CosmosPath?> fields, string rootAlias, Dictionary<string, object?> pinned)
         {
             if (node is not RexCall call)
                 return;
@@ -109,7 +109,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Metadata
         /// Records <paramref name="pathNode"/> as pinned when it is a container-rooted path and
         /// <paramref name="valueNode"/> is a constant.
         /// </summary>
-        static bool TryPin(RexNode pathNode, RexNode valueNode, IReadOnlyList<CosmosPath> fields, string rootAlias, Dictionary<string, object?> pinned)
+        static bool TryPin(RexNode pathNode, RexNode valueNode, IReadOnlyList<CosmosPath?> fields, string rootAlias, Dictionary<string, object?> pinned)
         {
             if (valueNode is not RexLiteral literal)
                 return false;

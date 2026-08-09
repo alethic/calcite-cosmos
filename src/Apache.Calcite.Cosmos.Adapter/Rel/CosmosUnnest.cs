@@ -92,7 +92,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
             implementor.Query.AddUnnest(alias, path!.ToString());
 
             // The element is addressed by its alias; the input's bindings carry through unchanged.
-            var fields = new List<CosmosPath>(implementor.Fields) { CosmosPath.Root(alias) };
+            var fields = new List<CosmosPath?>(implementor.Fields) { CosmosPath.Root(alias) };
             implementor.Fields = fields;
         }
 

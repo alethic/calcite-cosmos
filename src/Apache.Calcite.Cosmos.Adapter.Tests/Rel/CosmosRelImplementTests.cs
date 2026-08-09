@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 
 using Apache.Calcite.Cosmos.Adapter.Metadata;
 using Apache.Calcite.Cosmos.Adapter.Rel;
@@ -140,9 +140,9 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             var implementor = Implementor();
             Scan().Implement(implementor);
 
-            implementor.Fields[0].ToString().Should().Be("c");
-            implementor.Fields[1].ToString().Should().Be("c.id");
-            implementor.Fields[4].ToString().Should().Be("c.category");
+            implementor.Fields[0]!.ToString().Should().Be("c");
+            implementor.Fields[1]!.ToString().Should().Be("c.id");
+            implementor.Fields[4]!.ToString().Should().Be("c.category");
         }
 
         // ── Filter ────────────────────────────────────────────────────────────────
@@ -457,7 +457,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             UnnestOver(Scan(), MapItem("tags")).Implement(implementor);
 
             implementor.Fields.Should().HaveCount(6);
-            implementor.Fields[5].ToString().Should().Be("t0");
+            implementor.Fields[5]!.ToString().Should().Be("t0");
         }
 
         [TestMethod]

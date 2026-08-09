@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 
 using Apache.Calcite.Cosmos.Adapter.Sql;
 
@@ -193,6 +193,57 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Sql
 
             var act = () => b.Build();
             act.Should().Throw<InvalidOperationException>();
+        }
+
+
+        // ── ORDER BY RANK ───────────────────────────────────────
+
+        /// <remarks>
+        /// No direction: the scoring function defines the ranking.
+        /// </remarks>
+        [TestMethod]
+        public void RankByEmitsOrderByRank()
+        {
+            var b = new CosmosQueryBuilder("products", "c");
+            b.RankBy = "FULLTEXTSCORE(c.text, @p0)";
+
+            b.Build().Should().Be("SELECT VALUE c FROM products c ORDER BY RANK FULLTEXTSCORE(c.text, @p0)");
+        }
+
+        [TestMethod]
+        public void RankByCombinesWithTop()
+        {
+            var b = new CosmosQueryBuilder("products", "c");
+            b.Top = 10;
+            b.RankBy = "FULLTEXTSCORE(c.text, @p0)";
+
+            b.Build().Should().Be("SELECT TOP 10 VALUE c FROM products c ORDER BY RANK FULLTEXTSCORE(c.text, @p0)");
+        }
+
+        /// <remarks>
+        /// A statement has one ORDER BY clause, and the reference says RRF cannot be combined with
+        /// ordering on other property paths.
+        /// </remarks>
+        [TestMethod]
+        public void RankByWithAnOrdinaryOrderByIsRefused()
+        {
+            var b = new CosmosQueryBuilder("products", "c");
+            b.RankBy = "FULLTEXTSCORE(c.text, @p0)";
+            b.AddOrderBy("c.id", false);
+
+            var act = () => b.Build();
+            act.Should().Throw<System.InvalidOperationException>();
+        }
+
+        [TestMethod]
+        public void RankByWithGroupByIsRefused()
+        {
+            var b = new CosmosQueryBuilder("products", "c");
+            b.RankBy = "FULLTEXTSCORE(c.text, @p0)";
+            b.AddGroupBy("c.category");
+
+            var act = () => b.Build();
+            act.Should().Throw<System.InvalidOperationException>();
         }
 
     }

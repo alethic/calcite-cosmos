@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 
 using Apache.Calcite.Cosmos.Adapter.Metadata;
@@ -92,7 +92,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
         /// <summary>
         /// Determines whether a predicate references any path outside the container's index.
         /// </summary>
-        static bool ReferencesUnindexedPath(RexNode condition, IReadOnlyList<CosmosPath> fields, CosmosContainerMetadata container)
+        static bool ReferencesUnindexedPath(RexNode condition, IReadOnlyList<CosmosPath?> fields, CosmosContainerMetadata container)
         {
             var translator = new CosmosRexTranslator(RexBuilderHolder.Value, fields, new CosmosParameterList());
             var unindexed = false;

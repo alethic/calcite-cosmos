@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 
+using Apache.Calcite.Cosmos.Adapter.Client;
 using Apache.Calcite.Cosmos.Adapter.Metadata;
 using Apache.Calcite.Cosmos.Adapter.Rel;
 
@@ -40,22 +41,44 @@ namespace Apache.Calcite.Cosmos.Adapter
 
         readonly CosmosContainerMetadata _container;
         readonly CosmosConvention _convention;
+        readonly ICosmosQueryExecutor? _executor;
 
         /// <summary>
         /// Initializes a new instance.
         /// </summary>
         /// <param name="container">The container this table exposes.</param>
+        /// <param name="executor">Executes statements against the container, or <c>null</c> to expose a table that can be planned against but not read.</param>
         /// <exception cref="ArgumentNullException"><paramref name="container"/> is <c>null</c>.</exception>
-        public CosmosTable(CosmosContainerMetadata container)
+        public CosmosTable(CosmosContainerMetadata container, ICosmosQueryExecutor? executor = null)
         {
             _container = container ?? throw new ArgumentNullException(nameof(container));
             _convention = CosmosConvention.Create(container);
+            _executor = executor;
         }
 
         /// <summary>
         /// Gets the container this table exposes.
         /// </summary>
         public CosmosContainerMetadata Container => _container;
+
+        /// <summary>
+        /// Gets what executes statements against this container, or <c>null</c> when nothing can.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Read by the converters out of the Cosmos convention, and read <em>when the plan runs</em> rather
+        /// than when it is built: the expression they emit navigates to this table through the schema the
+        /// query is executing against. A live client written into the compiled plan would tie that plan —
+        /// which Calcite caches and re-executes — to whichever schema instance happened to be current when
+        /// it was compiled.
+        /// </para>
+        /// <para>
+        /// A table built from metadata alone has none. Planning is unaffected, since nothing about a
+        /// statement or its cost depends on who runs it; enumerating the result of such a plan is what
+        /// fails, and it fails saying so.
+        /// </para>
+        /// </remarks>
+        public ICosmosQueryExecutor? Executor => _executor;
 
         /// <summary>
         /// Gets the calling convention for this container.

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 
+using Apache.Calcite.Cosmos.Adapter.Client;
 using Apache.Calcite.Cosmos.Adapter.Metadata;
 
 using Microsoft.Azure.Cosmos;
@@ -72,8 +73,14 @@ namespace Apache.Calcite.Cosmos.Adapter
             // The client is owned by the schema for the life of the process. Schemas are created
             // once per connection and Calcite offers no disposal hook to release it on.
             var client = new CosmosClient(endpoint, key, options);
+            var db = client.GetDatabase(database);
 
-            return new CosmosSchema(ReadContainers(client.GetDatabase(database), GetStrings(operand, ContainersOperand)));
+            // The same database the metadata was read from also executes the queries, so the client the
+            // schema holds outlives this call. A container reference is a handle rather than a connection,
+            // so binding one per table costs nothing.
+            return new CosmosSchema(
+                ReadContainers(db, GetStrings(operand, ContainersOperand)),
+                container => new CosmosQueryExecutor(db.GetContainer(container.Name)));
         }
 
         /// <summary>

@@ -9,7 +9,14 @@ Rather than going through ADO.NET or JDBC, the adapter translates the relational
 1. A Cosmos database is registered with Calcite as a schema, one table per container.
 2. Calcite's planner converts as much of the plan as possible into the Cosmos calling convention (`CosmosConvention`).
 3. Nodes in that convention are rendered to Cosmos SQL and executed by the Cosmos query engine.
-4. Anything Cosmos cannot express is executed in-process by Calcite's enumerable runtime.
+4. Results leave the convention as an `IAsyncEnumerable`, into the `ClrAsyncEnumerableConvention` provided by [`Apache.Calcite.Extensions`](https://www.nuget.org/packages/Apache.Calcite.Extensions).
+5. Anything Cosmos cannot express is executed in-process by Calcite, under that convention.
+
+## Queries are asynchronous
+
+A query over a Cosmos table plans **only** when the root is asked for in `ClrAsyncEnumerableConvention`.
+
+This is a property of the service, not a limitation of the adapter. The Cosmos v3 SDK has no synchronous data-plane API — a page of results arrives only by awaiting `FeedIterator.ReadNextAsync` — so a synchronous plan could do nothing but block a thread for a network round trip per continuation. Rather than hide that behind an `IEnumerable`, the adapter offers only the asynchronous exit.
 
 A container has no row schema, so a table is modelled as one map column carrying the whole document, plus promoted scalar columns for paths the service guarantees or the container declares — `id`, `_ts`, `_etag`, and the partition key. Nothing is inferred from sampling documents.
 
@@ -48,9 +55,21 @@ Omit `containers` to expose every container in the database.
 
 Relational joins, `UNION`/`INTERSECT`/`EXCEPT`, and `HAVING` have no Cosmos equivalent and are evaluated in-process by Calcite. Multi-property `ORDER BY` is pushed down only when the container declares a matching composite index, since the service rejects it otherwise.
 
+## Full text search
+
+Cosmos has full text search and SQL does not, so the functions come from this adapter. Chain its operator table into the one the validator is built with:
+
+```csharp
+SqlOperatorTables.chain(SqlStdOperatorTable.instance(), CosmosOperators.Instance)
+```
+
+`FULLTEXTCONTAINS`, `FULLTEXTCONTAINSALL` and `FULLTEXTCONTAINSANY` are then usable in a `WHERE` clause and push down to the service. The first argument must be a property path.
+
+`FULLTEXTSCORE` and `RRF` are not yet reachable — the service permits them only in an `ORDER BY RANK` clause and forbids projecting them, which does not fit how Calcite expresses a sort. See [DESIGN.md](DESIGN.md).
+
 ## Status
 
-Under development. Statement generation, container metadata, the schema and table layer, and the scan/filter/project/sort/unnest nodes are in place and tested. Aggregation and result execution inside a Calcite plan are not yet wired up. See [DESIGN.md](DESIGN.md), including its record of assumptions that still need verifying against a real account.
+Under development. Statement generation, container metadata, the schema and table layer, the scan/filter/project/sort/unnest/aggregate nodes, and execution inside a Calcite plan are in place and tested. Results have not yet been read from a real account — the tests drive the compiled plan through a stub in place of the Cosmos SDK. See [DESIGN.md](DESIGN.md), including its record of assumptions that still need verifying against a real account.
 
 ## Further reading
 

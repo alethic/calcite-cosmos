@@ -21,7 +21,15 @@ namespace Apache.Calcite.Cosmos.Adapter
     /// otherwise <c>null</c>. Supplying it restricts execution to a single physical partition
     /// instead of fanning out across all of them.
     /// </param>
-    public readonly record struct CosmosQuery(string Sql, IReadOnlyList<CosmosParameter> Parameters, IReadOnlyList<object?>? PartitionKeyValues = null);
+    /// <param name="MaxItemCount">
+    /// The most rows the statement can return, when the statement says so, otherwise <c>null</c>.
+    /// <para>
+    /// A page size rather than a limit: it caps how many rows a single round trip brings back and
+    /// cannot change which rows the query yields. Without it a statement ending in <c>LIMIT 5</c>
+    /// still fetches a full default page, and pays for the rows it then discards.
+    /// </para>
+    /// </param>
+    public readonly record struct CosmosQuery(string Sql, IReadOnlyList<CosmosParameter> Parameters, IReadOnlyList<object?>? PartitionKeyValues = null, int? MaxItemCount = null);
 
     /// <summary>
     /// Accumulates the state contributed by a tree of <see cref="CosmosRel"/> nodes and renders
@@ -71,7 +79,7 @@ namespace Apache.Calcite.Cosmos.Adapter
         /// <param name="rootAlias">The alias bound to the container.</param>
         /// <returns>The binding, indexed by field ordinal.</returns>
         /// <exception cref="ArgumentNullException"><paramref name="rowType"/> is <c>null</c>.</exception>
-        public static IReadOnlyList<CosmosPath> BindFields(org.apache.calcite.rel.type.RelDataType rowType, string? rootAlias = null)
+        public static IReadOnlyList<CosmosPath?> BindFields(org.apache.calcite.rel.type.RelDataType rowType, string? rootAlias = null)
         {
             if (rowType is null)
                 throw new ArgumentNullException(nameof(rowType));
@@ -94,7 +102,7 @@ namespace Apache.Calcite.Cosmos.Adapter
         readonly CosmosParameterList _parameters = new();
         readonly CosmosQueryBuilder _query;
 
-        IReadOnlyList<CosmosPath> _fields;
+        IReadOnlyList<CosmosPath?> _fields;
         int _unnestAliases;
 
         /// <summary>
@@ -145,8 +153,14 @@ namespace Apache.Calcite.Cosmos.Adapter
         /// <summary>
         /// Gets or sets the binding from input field ordinal to document path.
         /// </summary>
+        /// <remarks>
+        /// An entry is <c>null</c> where the field has no document path — a projection of a computed
+        /// expression, which addresses nothing Cosmos can name. That is per-ordinal rather than
+        /// per-binding: one computed column does not stop a downstream operator referring to the plain
+        /// paths beside it, and the operator declines only if it actually reads the computed one.
+        /// </remarks>
         /// <exception cref="ArgumentNullException">The value is <c>null</c>.</exception>
-        public IReadOnlyList<CosmosPath> Fields
+        public IReadOnlyList<CosmosPath?> Fields
         {
             get => _fields;
             set => _fields = value ?? throw new ArgumentNullException(nameof(value));
@@ -211,7 +225,31 @@ namespace Apache.Calcite.Cosmos.Adapter
         /// </summary>
         /// <returns>The statement text and its bound parameters.</returns>
         /// <exception cref="InvalidOperationException">The accumulated clauses form a statement Cosmos does not accept.</exception>
-        public CosmosQuery Build() => new(_query.Build(), _parameters.Parameters, PartitionKeyValues);
+        public CosmosQuery Build() => new(_query.Build(), _parameters.Parameters, PartitionKeyValues, MaxItemCount());
+
+        /// <summary>
+        /// Returns the most rows the statement can return, or <c>null</c> where it is unbounded.
+        /// </summary>
+        /// <remarks>
+        /// <c>OFFSET n LIMIT m</c> yields at most <c>m</c> rows, but the service must still walk the
+        /// <c>n</c> it skips, so the page worth asking for is <c>n + m</c>. <c>TOP n</c> is <c>n</c>.
+        /// An aggregation collapses its input and is left alone: the row it returns is not one of the
+        /// rows the limit counted, and the limit cannot appear above it anyway.
+        /// </remarks>
+        int? MaxItemCount()
+        {
+            if (_query.Top is int top)
+                return top;
+
+            if (_query.Fetch is not int fetch)
+                return null;
+
+            var offset = _query.Offset ?? 0;
+
+            // A page size has to be positive; a zero-row limit is expressed by the statement itself.
+            var total = (long)offset + fetch;
+            return total > 0 && total <= int.MaxValue ? (int)total : null;
+        }
 
     }
 

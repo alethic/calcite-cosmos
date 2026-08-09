@@ -8,9 +8,9 @@ This document records the shape of the target language, the resulting design dec
 structure that follows from it.
 
 > **Status.** Under development. Statement generation, container metadata, the schema and table
-> layer, and the scan/filter/project/sort/unnest nodes with their conversion rules are in place
-> and tested. Aggregation and the converter that hands results to a CLR enumerable convention are
-> not. Items marked ✔ below exist; the rest are specification.
+> layer, the scan/filter/project/sort/unnest/aggregate nodes with their conversion rules, and the
+> converter that hands results to `ClrAsyncEnumerableConvention` are in place and tested. Items
+> marked ✔ below exist; the rest are specification.
 >
 > One claim still rests on documentation rather than observation and needs a real Cosmos account
 > to settle: that a multi-key `ORDER BY` requires a matching composite index. See *Verified
@@ -114,6 +114,25 @@ metadata, not of the plan.** `CosmosSortRule` must read the indexing policy.
 The following were established empirically against the Cosmos DB emulator
 (`mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:vnext-preview`) rather than taken from
 documentation.
+
+> **The emulator is not the service, and the difference has bitten twice.** It accepts statements
+> Azure rejects, and rejects features Azure implements. Point `COSMOS_TEST_ENDPOINT` and
+> `COSMOS_TEST_KEY` at a real account to run the same suite against one.
+>
+> | | emulator | Azure |
+> | --- | --- | --- |
+> | `ORDER BY t0` over `JOIN t0 IN c.tags` | accepted | **400** |
+> | `FULLTEXTCONTAINS` and `ORDER BY RANK` | **400** | accepted |
+>
+> The first is why `CosmosSort` refuses any sort key rooted at an unnest alias: a single-key
+> allowance stood for a long time on the emulator's word, and emitted a statement Azure will not
+> run. `ORDER BY t0.x` is rejected too, so it is the alias and not the arity.
+
+**Out-of-domain arithmetic fails the whole query.** `ASIN(2)`, `ACOS(2)`, `SQRT(-1)` and `LOG(0)`
+each return a 400 rather than yielding undefined for the offending row. Calcite evaluates all four
+as NaN, so pushing any of them down trades a row of NaN for a failed statement — over data no schema
+lets the adapter check first. They are pushed anyway, `SQRT` and `LOG` always having been, and this
+is recorded so that the consistency is a decision rather than an oversight.
 
 **Ordering is a total order over JSON types.** Ascending:
 
@@ -264,6 +283,17 @@ Naming follows the house style in the sibling `calcite-dotnet` repository: membe
 Java declarations keep their lowercase Java names (`register`, `getInterface`), while new
 .NET-side contracts are PascalCase.
 
+`Fields` binds an input field ordinal to a document path, and an entry may be **null** — the field is
+a computed projection, which addresses nothing Cosmos can name. That is per ordinal rather than per
+binding, and the distinction is worth stating: a projection of `UPPER(c.id)` alongside `c.id` leaves
+the second still sortable, where clearing the whole binding declined every operator above it. An
+operator refuses only when it actually reads an unbound ordinal.
+
+> A rule may still fire where implementation then refuses. `CosmosSortRule` derives its bindings by
+> name from the sort's input row type, so above a projection it names paths that do not exist, finds
+> them resolvable, and converts; the refusal happens in `Implement`. That contradicts the rule
+> contract below and is a known defect, not a design decision.
+
 `CosmosImplementor` accumulates:
 
 | Field | Renders to |
@@ -339,6 +369,91 @@ Specific obligations:
 - `RexLiteral` → JSON literal, or a bound `@pN` parameter for anything non-trivial.
 - `CASE` → nested ternary (`? :`) where the arms permit it; otherwise decline.
 - Unknown operator → decline. Never emit a best guess.
+
+The scalar functions carried across are the ones where Calcite's standard operator table and Cosmos
+agree on name, arity *and* meaning. Most are a direct rename; four are not, and those are the ones
+worth naming:
+
+| SQL | Cosmos | why it differs |
+| --- | --- | --- |
+| `ATAN2` | `ATN2` | Cosmos follows T-SQL's spelling |
+| `TRUNCATE` | `TRUNC` | one argument only; the decimal-places form is unverified and declined |
+| `CARDINALITY` | `ARRAY_LENGTH` | SQL counts a collection *or a map*, Cosmos only an array, so the map case is declined rather than answered wrongly — and `_MAP` is a map |
+| `x MEMBER OF a` | `ARRAY_CONTAINS(a, x)` | the operands swap |
+| `TRIM`/`LTRIM`/`RTRIM` | same | Calcite carries `[flag, chars, string]`; the flag picks the function, and only trimming spaces is translated |
+
+`COALESCE` and `NULLIF` need no entry — the validator expands both to `CASE` before a `RexCall`
+exists. Several plausible additions are deliberately absent: `LOG(x, base)` and `SQUARE` are not in
+Calcite's standard table, so nothing can produce them; `CBRT` is, and Cosmos has no counterpart. The
+`IS TRUE` / `IS FALSE` family and `IS DISTINCT FROM` are declined because reproducing their null
+semantics over a property that may be *undefined* needs a Cosmos behaviour that has not been
+measured, and a wrong answer is worse than a refused pushdown.
+
+### Full text search
+
+Cosmos has full text search and SQL does not, so there is nothing in Calcite's standard operator table
+to map onto it. `CosmosOperators` defines the operators and `CosmosOperators.Instance` is the operator
+table to chain into the one the validator is built with; without it a query cannot name these at all.
+
+Signatures are the service's, from the query language reference:
+
+| function | | |
+| --- | --- | --- |
+| `FULLTEXTCONTAINS(path, keyword)` | boolean | `WHERE` |
+| `FULLTEXTCONTAINSALL(path, keyword, …)` | boolean | `WHERE` |
+| `FULLTEXTCONTAINSANY(path, keyword, …)` | boolean | `WHERE` |
+| `FULLTEXTSCORE(path, keyword, …)` | BM25 score | **`ORDER BY RANK` only** |
+| `RRF(scoring function, …, weights)` | fused score | **`ORDER BY RANK` only** |
+
+The first argument of every one is a **property path**, not an expression, and the translator holds
+them to it: a call over anything that does not resolve to a path is declined rather than rendered.
+Keywords bind as `@pN` like any other literal, so statement text stays independent of what is searched
+for.
+
+**The two scoring functions are a different kind of thing, and are not yet reachable.** The reference
+is explicit that `FULLTEXTSCORE` and `RRF` may appear *only* in an `ORDER BY RANK` clause and **cannot
+be part of a projection** — `SELECT FullTextScore(c.text, "kw") AS Score` is invalid. That is what
+makes them hard here rather than tedious: Calcite sorts by field ordinal, so the natural plan for
+`ORDER BY FULLTEXTSCORE(…)` is to project the score, sort on that column, and project it away — and
+the first step is exactly what Cosmos forbids. Reaching `ORDER BY RANK` needs a rule that recognises
+that shape and rewrites it into a rank clause without ever projecting the score.
+
+What exists is the language layer below that rule. `CosmosQueryBuilder.RankBy` emits
+`ORDER BY RANK <function>`, and refuses to combine it with an ordinary `ORDER BY` or with `GROUP BY` —
+one `ORDER BY` clause per statement, and the reference says as much of `RRF` explicitly. The operator
+table deliberately does **not** carry `FULLTEXTSCORE` or `RRF`: until the rule exists, a query that
+could name one could only ever fail, and the translator refuses them with that reason where they
+appear in a `WHERE` or a projection.
+
+### Reading a value back
+
+A row arrives as one JSON value and `CosmosJson` reads it into the representation Calcite holds that
+SQL type in — **Java boxes, not CLR primitives**. A CLR `int` in a row compiles and then fails at the
+first Calcite operator that casts it, a long way from where it was produced.
+
+| JSON | as `ANY` / inside `MAP` | as a declared type |
+| --- | --- | --- |
+| string | `string` | `CHAR`, `VARCHAR` |
+| number, whole | `java.lang.Long` | `TINYINT`…`BIGINT` as their boxes, `DECIMAL` from the raw digits |
+| number, fractional | `java.lang.Double` | `REAL`, `FLOAT`, `DOUBLE` |
+| `true` / `false` | `java.lang.Boolean` | `BOOLEAN` |
+| object | `java.util.LinkedHashMap` | `MAP` |
+| array | `java.util.ArrayList` | `ARRAY`, `MULTISET` |
+| `null`, or absent | `null` | `null` |
+
+Two choices worth stating. A whole number reads as a `Long` rather than a `Double` so that an
+identifier or a count does not surface as `42.0`; the choice is the value's, there being no schema to
+consult. And a document that disagrees with the declared type is **refused**, not coerced — reading
+`42` as `VARCHAR` throws rather than yielding `"42"`, because a row type that bends to the data is a
+suggestion rather than a declaration.
+
+Nesting is not truncated at the map column's one-level type: `MAP<VARCHAR, ANY>` describes the top of
+the document and the value goes as deep as the document does. Addressing is not limited either —
+`ITEM` over `ANY` is `ANY`, so `_MAP['a']['b']['c']` keeps type-checking and the translator folds the
+whole chain into one path, `c.a.b.c`, array indices included. What depth costs is planner metadata:
+nothing below `_MAP` has a type, a key or a collation, so it can be addressed but not reasoned about.
+The one limit is that a key must be constant — `_MAP[c.id]` names a property whose name is not known
+until the row is read, and is declined.
 
 ### The row model
 
@@ -425,6 +540,11 @@ src/
     CosmosSchemaFactory.cs            ✔ SchemaFactory for JSON model registration
     Client/
       CosmosQueryExecutor.cs          ✔ Executes a rendered statement via the Cosmos SDK
+      CosmosSequences.cs              ✔ The IAsyncEnumerable a compiled plan reads rows from
+      CosmosJson.cs                   ✔ JSON value → the representation Calcite holds a value in
+      CosmosSchemas.cs                ✔ Resolves the table's executor from the DataContext
+      CosmosExecutionException.cs     ✔ The plan cannot reach what would execute it
+      CosmosMaterializationException.cs ✔ A document does not hold what the query assumed
     Metadata/
       CosmosCompositeIndex.cs         ✔ Composite index and sort-key matching
       CosmosContainerMetadata.cs      ✔ Declared container facts; sort legality
@@ -437,7 +557,7 @@ src/
       CosmosSort.cs                   ✔
       CosmosUnnest.cs                 ✔
       CosmosAggregate.cs              ✔
-      Convert/                        ✔ One converter rule per node
+      Convert/                        ✔ One converter rule per node, and the one way out
     Sql/
       CosmosSql.cs                    ✔ Lexical primitives: identifiers, paths, JSON literals
       CosmosPath.cs                   ✔ Immutable property path rooted at a FROM alias
@@ -451,8 +571,55 @@ src/
 ```
 
 ✔ marks what exists today. The `Sql/` layer is deliberately free of any dependency on the
-convention or on the CLR enumerable conventions being built in `calcite-dotnet`, so it can be
-completed and tested ahead of them.
+convention or on the CLR conventions in `calcite-dotnet`, which is what let it be completed and
+tested ahead of them, and is why it remains testable without one.
+
+---
+
+## Leaving the Convention
+
+A subtree of Cosmos nodes is a statement, not rows. `CosmosToClrAsyncEnumerableConverter` is where
+it becomes rows: it renders the statement, executes it, and reads the JSON value each row arrives
+as into the row the plan above expects.
+
+**The exit is asynchronous, and only asynchronous.** The v3 Cosmos SDK has no synchronous
+data-plane API — a page arrives only by awaiting `FeedIterator.ReadNextAsync` — so a converter into
+`ClrEnumerableConvention` or Calcite's `EnumerableConvention` could do nothing but wait on each
+page, blocking a thread for a network round trip per continuation. That is the sync-over-async pull
+`ClrAsyncEnumerableConvention` exists to keep out of a plan, and putting one at the leaf would
+defeat it. The consequence is worth stating rather than discovering: **a query over a Cosmos table
+plans only when the root is asked for in `ClrAsyncEnumerableConvention`.**
+
+Three things follow from the row being one JSON value:
+
+- **The result is always an object keyed by output field name.** A bare scan would otherwise render
+  `SELECT VALUE c` and hand back the document itself, giving two row shapes for the materializer to
+  tell apart. The converter projects the scan's own path bindings when nothing above it has
+  projected, so `SELECT VALUE { … }` is the only shape that reaches the reader.
+- **Fields are read by name, not position.** A Cosmos object constructor omits a property whose
+  value is undefined, so the properties present in a row are a subset of the output fields.
+- **A missing property and a null one are both SQL `NULL`.** Nothing in the row model can
+  distinguish them, and SQL has no third value to distinguish them with.
+
+A rendered statement carries one execution hint beyond its text. `OFFSET n LIMIT m` and `TOP n` bound
+how many rows the statement can return, so `CosmosQuery.MaxItemCount` carries `n + m` (or `n`) and the
+executor asks the service for pages that size. It is a page size, not a limit — it cannot change which
+rows come back, only how many arrive per round trip — and without it a statement ending in `LIMIT 5`
+fetches a full default page and pays for the rows it discards. An offset alone bounds nothing and asks
+for nothing.
+
+What executes the statement is *not* written into the plan. Calcite prepares a statement once and
+executes it many times, so the plan holds the table's qualified name and `CosmosSchemas.GetExecutor`
+walks it from the `DataContext`'s root schema on each run. A live `CosmosClient` compiled into the
+expression tree would bind that plan to whichever schema instance happened to be current when it
+was compiled. This is the same discipline as an adapter reaching its data source through
+`Schemas.unwrap` over a convention's schema expression; it is spelled out here because the plan is a
+`System.Linq.Expressions` tree and calls into managed code rather than carrying a linq4j expression.
+
+A `CosmosTable` may hold no executor at all, which is what a table built from container metadata
+alone is. Planning is unaffected — nothing about a statement or its cost depends on who runs it —
+and enumerating such a plan is what fails, saying so. Most of the test suite plans against tables in
+exactly that state.
 
 ---
 
@@ -540,6 +707,8 @@ Recorded so they are not mistaken for tested behaviour.
 multi-key `ORDER BY` without a matching composite index. The rule is documented, but the
 emulator implements composite indexes not at all, so nothing exercises it end to end. If the
 real service is more permissive, the guard silently costs pushdown on every multi-key sort.
+A real account can now settle this — see *Verified against the emulator* for how to point the suite
+at one — and it is the first thing worth measuring there.
 
 **Null placement on non-nullable keys.** Sorting a non-nullable key is accepted regardless of
 requested placement, on the grounds that a key which cannot be null has no null ordering to

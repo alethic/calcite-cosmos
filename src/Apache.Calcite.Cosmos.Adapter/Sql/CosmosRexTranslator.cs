@@ -6,6 +6,7 @@ using Apache.Calcite.Cosmos.Adapter.Internal;
 
 using org.apache.calcite.rex;
 using org.apache.calcite.sql;
+using org.apache.calcite.sql.fun;
 using org.apache.calcite.sql.type;
 using org.apache.calcite.util;
 
@@ -37,7 +38,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
     public sealed class CosmosRexTranslator
     {
 
-        readonly IReadOnlyList<CosmosPath> _fields;
+        readonly IReadOnlyList<CosmosPath?> _fields;
         readonly CosmosParameterList _parameters;
         readonly RexBuilder _rexBuilder;
 
@@ -48,7 +49,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
         /// <param name="fields">Maps input field ordinals onto document paths.</param>
         /// <param name="parameters">Receives bound literal values.</param>
         /// <exception cref="ArgumentNullException">Any argument is <c>null</c>.</exception>
-        public CosmosRexTranslator(RexBuilder rexBuilder, IReadOnlyList<CosmosPath> fields, CosmosParameterList parameters)
+        public CosmosRexTranslator(RexBuilder rexBuilder, IReadOnlyList<CosmosPath?> fields, CosmosParameterList parameters)
         {
             _rexBuilder = rexBuilder ?? throw new ArgumentNullException(nameof(rexBuilder));
             _fields = fields ?? throw new ArgumentNullException(nameof(fields));
@@ -95,9 +96,12 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
         {
             switch (node)
             {
+                // A null binding is a field with no document path — a computed projection — and does
+                // not resolve. The caller declines the operator, exactly as it would for an ordinal
+                // that was never bound.
                 case RexInputRef inputRef when inputRef.getIndex() >= 0 && inputRef.getIndex() < _fields.Count:
                     path = _fields[inputRef.getIndex()];
-                    return true;
+                    return path is not null;
 
                 // A field of a correlation variable addresses the correlated input's row type,
                 // so it resolves against the same bindings as a plain field reference. This is how
@@ -105,7 +109,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
                 case RexFieldAccess access when access.getReferenceExpr() is RexCorrelVariable
                     && access.getField().getIndex() >= 0 && access.getField().getIndex() < _fields.Count:
                     path = _fields[access.getField().getIndex()];
-                    return true;
+                    return path is not null;
 
                 case RexCall call when KindOf(call) == SqlKind.__Enum.ITEM && call.getOperands().size() == 2:
                     if (TryResolvePath(Operand(call, 0), out var basePath) == false || Operand(call, 1) is not RexLiteral accessor)
@@ -185,7 +189,13 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
             if (index < 0 || index >= _fields.Count)
                 throw new CosmosTranslationException($"Field ordinal {index} is not bound to a document path.");
 
-            _fields[index].WriteTo(builder);
+            // Unbound because the field is a computed projection. Cosmos cannot address one — a
+            // projection alias is not visible to WHERE or ORDER BY — so the operator reading it is
+            // declined and Calcite evaluates it in-process.
+            var path = _fields[index]
+                ?? throw new CosmosTranslationException($"Field ordinal {index} is a computed projection and has no document path.");
+
+            path.WriteTo(builder);
         }
 
         void WriteLiteral(StringBuilder builder, RexLiteral literal)
@@ -315,6 +325,9 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
                     break;
                 case SqlKind.__Enum.CASE:
                     WriteCase(builder, call);
+                    break;
+                case SqlKind.__Enum.TRIM:
+                    WriteTrim(builder, call);
                     break;
                 case SqlKind.__Enum.FLOOR:
                     RequireOperandCount(call, 1);
@@ -515,6 +528,40 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
             ["SQRT"] = ("SQRT", 1, 1),
             ["SIGN"] = ("SIGN", 1, 1),
             ["ROUND"] = ("ROUND", 1, 1),
+            // Cosmos carries the whole trigonometric set under the names SQL uses, ATAN2 excepted:
+            // Cosmos spells it ATN2, after T-SQL.
+            ["SIN"] = ("SIN", 1, 1),
+            ["COS"] = ("COS", 1, 1),
+            ["TAN"] = ("TAN", 1, 1),
+            ["COT"] = ("COT", 1, 1),
+            // ASIN and ACOS carry a domain, and Cosmos fails the whole query for a value outside it
+            // rather than yielding undefined — measured, along with SQRT(-1), which does the same and
+            // which this adapter has always pushed. LOG(0) is accepted. So this is one property of the
+            // service rather than a fact about these two, and they are treated as SQRT already is; see
+            // OutOfDomainArithmeticFailsTheQuery, which pins the measurement, and DESIGN.md, which
+            // records that the choice to live with it is a choice.
+            ["ASIN"] = ("ASIN", 1, 1),
+            ["ACOS"] = ("ACOS", 1, 1),
+            ["ATAN"] = ("ATAN", 1, 1),
+            ["ATAN2"] = ("ATN2", 2, 2),
+            ["DEGREES"] = ("DEGREES", 1, 1),
+            ["RADIANS"] = ("RADIANS", 1, 1),
+            // Niladic, and written PI() at both ends.
+            ["PI"] = ("PI", 0, 0),
+            // The two-argument SQL form — truncate to a number of decimal places — is left out
+            // rather than guessed at, the arity of Cosmos's TRUNC not having been verified.
+            ["TRUNCATE"] = ("TRUNC", 1, 1),
+            // The type tests. Their argument is an ordinary expression rather than a path, so they need
+            // nothing beyond the name — which is already the Cosmos one, these operators being this
+            // adapter's own rather than translations of a SQL counterpart. See CosmosOperators.
+            ["IS_DEFINED"] = ("IS_DEFINED", 1, 1),
+            ["IS_ARRAY"] = ("IS_ARRAY", 1, 1),
+            ["IS_BOOL"] = ("IS_BOOL", 1, 1),
+            ["IS_NULL"] = ("IS_NULL", 1, 1),
+            ["IS_NUMBER"] = ("IS_NUMBER", 1, 1),
+            ["IS_OBJECT"] = ("IS_OBJECT", 1, 1),
+            ["IS_PRIMITIVE"] = ("IS_PRIMITIVE", 1, 1),
+            ["IS_STRING"] = ("IS_STRING", 1, 1),
         };
 
         /// <summary>
@@ -532,6 +579,22 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
                 case "POSITION":
                     WritePosition(builder, call);
                     return;
+                case "CARDINALITY":
+                    WriteCardinality(builder, call);
+                    return;
+                case "MEMBER OF":
+                    WriteMemberOf(builder, call);
+                    return;
+                case "FULLTEXTCONTAINS":
+                case "FULLTEXTCONTAINSALL":
+                case "FULLTEXTCONTAINSANY":
+                    WriteFullTextPredicate(builder, call, name);
+                    return;
+                case "FULLTEXTSCORE":
+                case "RRF":
+                    // Legal only in ORDER BY RANK, which no plan can yet produce. Reaching here means a
+                    // WHERE or a projection, where the service rejects them outright.
+                    throw new CosmosTranslationException($"'{name}' is only legal in an ORDER BY RANK clause.");
             }
 
             if (DirectFunctions.TryGetValue(name, out var mapping) == false)
@@ -606,6 +669,119 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
             builder.Append(", ");
             Write(builder, Operand(call, 0));
             builder.Append(") + 1)");
+        }
+
+        /// <summary>
+        /// Writes <c>CARDINALITY</c> in terms of <c>ARRAY_LENGTH</c>.
+        /// </summary>
+        /// <remarks>
+        /// SQL defines <c>CARDINALITY</c> over a collection <em>or a map</em>, and Cosmos counts only an
+        /// array. Counting a map's properties has no Cosmos form — the map column is the whole document,
+        /// so the question is real and simply unanswerable here — and the map case is declined rather
+        /// than emitted as an array count, which would report nothing meaningful.
+        /// </remarks>
+        void WriteCardinality(StringBuilder builder, RexCall call)
+        {
+            RequireOperandCount(call, 1);
+
+            var typeName = Operand(call, 0).getType().getSqlTypeName();
+            if (typeName != SqlTypeName.ARRAY && typeName != SqlTypeName.MULTISET)
+                throw new CosmosTranslationException($"CARDINALITY over {typeName.name()} has no Cosmos equivalent; ARRAY_LENGTH counts an array.");
+
+            WriteFunctionCall(builder, call, "ARRAY_LENGTH");
+        }
+
+        /// <summary>
+        /// Writes <c>MEMBER OF</c> in terms of <c>ARRAY_CONTAINS</c>.
+        /// </summary>
+        /// <remarks>
+        /// The operands are the other way round: SQL is <c>&lt;value&gt; MEMBER OF &lt;multiset&gt;</c> and
+        /// Cosmos takes the array first. The optional third argument of <c>ARRAY_CONTAINS</c>, which asks
+        /// for a partial match of an object, is not emitted — <c>MEMBER OF</c> means full equality.
+        /// </remarks>
+        void WriteMemberOf(StringBuilder builder, RexCall call)
+        {
+            RequireOperandCount(call, 2);
+
+            builder.Append("ARRAY_CONTAINS(");
+            Write(builder, Operand(call, 1));
+            builder.Append(", ");
+            Write(builder, Operand(call, 0));
+            builder.Append(')');
+        }
+
+        /// <summary>
+        /// Writes a full text predicate.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <c>FULLTEXTCONTAINS(&lt;property_path&gt;, &lt;string_expr&gt;)</c> and the <c>ALL</c> and
+        /// <c>ANY</c> forms, which take one or more keywords. The rendered form is the SQL form: the
+        /// arguments are already in the service's order.
+        /// </para>
+        /// <para>
+        /// The first argument is a <em>property path</em> and not an expression, so a call over anything
+        /// that does not resolve to one is declined rather than rendered — the service would reject it.
+        /// The keywords are ordinary expressions and bind as parameters like any other literal.
+        /// </para>
+        /// </remarks>
+        void WriteFullTextPredicate(StringBuilder builder, RexCall call, string name)
+        {
+            var operands = call.getOperands();
+            if (operands.size() < 2)
+                throw new CosmosTranslationException($"'{name}' expects a property path and at least one keyword.");
+
+            if (TryResolvePath(Operand(call, 0), out var path) == false || path is null)
+                throw new CosmosTranslationException($"The first argument of '{name}' must be a document path.");
+
+            builder.Append(name).Append('(');
+            path.WriteTo(builder);
+
+            for (var i = 1; i < operands.size(); i++)
+            {
+                builder.Append(", ");
+                Write(builder, Operand(call, i));
+            }
+
+            builder.Append(')');
+        }
+
+        /// <summary>
+        /// Writes <c>TRIM</c>, whose specification decides which of Cosmos's three functions applies.
+        /// </summary>
+        /// <remarks>
+        /// Calcite carries the operands as specification, characters, string — the specification being a
+        /// symbol literal of <c>BOTH</c>, <c>LEADING</c> or <c>TRAILING</c>, which pick <c>TRIM</c>,
+        /// <c>LTRIM</c> and <c>RTRIM</c>.
+        /// <para>
+        /// Only trimming spaces is translated. Cosmos's two-argument forms have not been verified, and
+        /// emitting the one-argument form for <c>TRIM(LEADING 'x' FROM s)</c> would silently trim
+        /// something else.
+        /// </para>
+        /// </remarks>
+        void WriteTrim(StringBuilder builder, RexCall call)
+        {
+            RequireOperandCount(call, 3);
+
+            if (Operand(call, 0) is not RexLiteral specification || specification.getValue() is not SqlTrimFunction.Flag flag)
+                throw new CosmosTranslationException("TRIM without a constant specification has no Cosmos equivalent.");
+
+            if (Operand(call, 1) is not RexLiteral characters || GetLiteralValue(characters) as string != " ")
+                throw new CosmosTranslationException("TRIM of any character other than a space has no Cosmos equivalent.");
+
+            // Dispatched on the name: a Java enum's ordinals are not stable across versions and its
+            // names are.
+            var name = flag.name() switch
+            {
+                "BOTH" => "TRIM",
+                "LEADING" => "LTRIM",
+                "TRAILING" => "RTRIM",
+                var other => throw new CosmosTranslationException($"TRIM specification '{other}' has no Cosmos equivalent."),
+            };
+
+            builder.Append(name).Append('(');
+            Write(builder, Operand(call, 2));
+            builder.Append(')');
         }
 
         /// <summary>

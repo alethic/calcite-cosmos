@@ -19,9 +19,13 @@
     </ItemGroup>
 
     <ItemGroup>
-        <MavenReference Include="org.apache.calcite:calcite-core" Version="1.41.0" />
-        <!-- RelBuilder.create opens an internal Calcite connection, which needs the JDBC driver. -->
-        <MavenReference Include="org.apache.calcite.avatica:avatica-core" Version="1.26.0" />
+        <MavenReference Include="org.apache.calcite:calcite-core" Version="1.42.0" />
+        <!-- RelBuilder.create opens an internal Calcite connection, which needs the JDBC driver.
+             Held at the version calcite-core 1.42 resolves to. Naming an older one here does not fail the
+             build — the adapter is compiled against whatever core brought — it fails at run time, the
+             moment a test touches a method whose body names an avatica type, with a FileNotFoundException
+             for the assembly the adapter was bound to. -->
+        <MavenReference Include="org.apache.calcite.avatica:avatica-core" Version="1.28.0" />
     </ItemGroup>
 
     <ItemGroup>
