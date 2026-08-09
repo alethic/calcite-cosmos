@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Threading;
 
 namespace Apache.Calcite.Cosmos.Adapter.Metadata
 {
@@ -71,7 +72,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Metadata
             _partitionKeyPaths = partitionKeyPaths is null ? Array.Empty<string>() : new List<string>(partitionKeyPaths).ToArray();
             _compositeIndexes = compositeIndexes is null ? Array.Empty<CosmosCompositeIndex>() : new List<CosmosCompositeIndex>(compositeIndexes).ToArray();
             _includedPaths = includedPaths is null ? Array.Empty<string>() : new List<string>(includedPaths).ToArray();
-            Statistics = statistics;
+            _statistics = new Lazy<CosmosContainerStatistics?>(() => statistics, LazyThreadSafetyMode.ExecutionAndPublication);
             _excludedPaths = excludedPaths is null ? Array.Empty<string>() : new List<string>(excludedPaths).ToArray();
 
             if (_partitionKeyPaths.Length > 3)
@@ -199,15 +200,33 @@ namespace Apache.Calcite.Cosmos.Adapter.Metadata
         /// </summary>
         public IReadOnlyList<CosmosCompositeIndex> CompositeIndexes => _compositeIndexes;
 
+        Lazy<CosmosContainerStatistics?> _statistics;
+
         /// <summary>
-        /// Gets what the service reports about the container's size, or <c>null</c> where nothing asked.
+        /// Gets what the service reports about the container's size, or <c>null</c> where nothing asked
+        /// or the account did not answer.
         /// </summary>
         /// <remarks>
+        /// <para>
         /// A measurement rather than a declaration, and optional for that reason: a container built from
         /// a definition alone — which is what every test that does not need a service uses — has none,
-        /// and the planner falls back to comparing plans without a row count exactly as it did before.
+        /// and the planner compares plans without a row count exactly as it did before.
+        /// </para>
+        /// <para>
+        /// <b>Fetched when it is first asked for, not when the schema is built.</b> It costs two round
+        /// trips per container, and a schema exposes every container of a database — or, at the account
+        /// level, of every database — so paying for all of them to plan against one is the wrong trade.
+        /// Flink's FLIP-231 makes the same call for the same reason, collecting connector statistics
+        /// during optimisation rather than at catalog registration; Drill goes further and keeps them in
+        /// a metastore that an explicit <c>ANALYZE</c> populates.
+        /// </para>
+        /// <para>
+        /// The fetch blocks, because Calcite's <c>getStatistic</c> is synchronous and there is nowhere to
+        /// await. That is the one place this adapter does block — the planning path, once per container —
+        /// and it is why the data path refuses to.
+        /// </para>
         /// </remarks>
-        public CosmosContainerStatistics? Statistics { get; }
+        public CosmosContainerStatistics? Statistics => _statistics.Value;
 
         /// <summary>
         /// Returns the same metadata carrying the given statistics.
@@ -224,6 +243,27 @@ namespace Apache.Calcite.Cosmos.Adapter.Metadata
             return statistics is null
                 ? this
                 : new CosmosContainerMetadata(_name, _partitionKeyPaths, _compositeIndexes, _includedPaths, _excludedPaths, statistics);
+        }
+
+        /// <summary>
+        /// Returns the same metadata whose statistics are fetched on first use.
+        /// </summary>
+        /// <remarks>
+        /// The provider is invoked at most once, and a container nothing plans against never invokes it
+        /// at all — which is the point. A provider returning <c>null</c> leaves the planner where it
+        /// would have been without one.
+        /// </remarks>
+        /// <param name="provider">Fetches the statistics.</param>
+        /// <returns>The metadata.</returns>
+        /// <exception cref="ArgumentNullException"><paramref name="provider"/> is <c>null</c>.</exception>
+        public CosmosContainerMetadata WithStatisticsProvider(Func<CosmosContainerStatistics?> provider)
+        {
+            if (provider is null)
+                throw new ArgumentNullException(nameof(provider));
+
+            var metadata = new CosmosContainerMetadata(_name, _partitionKeyPaths, _compositeIndexes, _includedPaths, _excludedPaths);
+            metadata._statistics = new Lazy<CosmosContainerStatistics?>(provider, LazyThreadSafetyMode.ExecutionAndPublication);
+            return metadata;
         }
 
         /// <summary>

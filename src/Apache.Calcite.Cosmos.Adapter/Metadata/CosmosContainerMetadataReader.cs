@@ -34,7 +34,33 @@ namespace Apache.Calcite.Cosmos.Adapter.Metadata
             var response = await container.ReadContainerAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
             var metadata = FromProperties(response.Resource);
 
-            return metadata.WithStatistics(await ReadStatisticsAsync(container, response, cancellationToken).ConfigureAwait(false));
+            // Attached rather than fetched. A schema exposes every container of a database, and at the
+            // account level every container of every database, so reading the size of all of them to
+            // plan against one is the wrong trade — and it is two more round trips each.
+            return metadata.WithStatisticsProvider(() => ReadStatisticsAsync(container, CancellationToken.None).GetAwaiter().GetResult());
+        }
+
+        /// <summary>
+        /// Reads what the service says about a container's size and spread.
+        /// </summary>
+        /// <param name="container">The container to measure.</param>
+        /// <param name="cancellationToken">Cancels the read.</param>
+        /// <returns>The statistics, or <c>null</c> where the account did not answer.</returns>
+        /// <exception cref="ArgumentNullException"><paramref name="container"/> is <c>null</c>.</exception>
+        public static async Task<CosmosContainerStatistics?> ReadStatisticsAsync(Container container, CancellationToken cancellationToken = default)
+        {
+            if (container is null)
+                throw new ArgumentNullException(nameof(container));
+
+            try
+            {
+                var response = await container.ReadContainerAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
+                return await ReadStatisticsAsync(container, response, cancellationToken).ConfigureAwait(false);
+            }
+            catch (CosmosException)
+            {
+                return null;
+            }
         }
 
         /// <summary>

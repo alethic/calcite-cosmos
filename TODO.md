@@ -56,6 +56,21 @@ is the raw material for telling a user *why* a query was expensive.
 Per-partition storage is an Azure Monitor metric, not data plane. The count is reachable and the
 distribution is not, so a hot-partition estimate would have to come from outside the adapter.
 
+### Statistics refresh — *medium*
+
+Fetched once per container, on first use, and never again: a schema that lives for the life of a
+process will plan against a row count from whenever it was first asked. A time-to-live, or an explicit
+refresh, is the missing piece. Drill's answer is a metastore that `ANALYZE TABLE COMPUTE STATISTICS`
+populates, which decouples the fetch from the query entirely and is worth considering over a TTL.
+
+### Statistics after pushdown — *large*
+
+Flink collects connector statistics *after* partition pruning and filter pushdown, so the number the
+planner sees describes the scan it will actually do rather than the whole table. Here that would mean
+a row count for a partition-pinned scan rather than for the container — which is the difference
+between costing a single-partition read and costing everything. It needs a statistic attached to a
+`RelNode` rather than to a table, which is a larger change than it sounds.
+
 ### A cost model in RU — *large*
 
 The above are inputs; this is the model. Cosmos charges in RUs and the current model multiplies
@@ -279,10 +294,10 @@ often such a thing.
 - **Connection options as operands** — *small.* Consistency level, preferred regions, application name,
   for callers who do not want to write a factory.
 - **Multiple databases** — *done.* Omitting `database` exposes the account, with one subschema per
-  database, which is how both Cosmos and Calcite nest. Metadata for every container of every database
-  is read eagerly when the schema is built — a container definition is small and Calcite asks for the
-  whole map at once, but an account with many databases pays for all of them to reach one. Lazy
-  subschemas would fix that and want a lazy `Map`.
+  database, which is how both Cosmos and Calcite nest. Container *definitions* are still read eagerly
+  when the schema is built — small, and Calcite asks for the whole map at once — so an account with
+  many databases pays a read per container to reach one. Statistics are no longer part of that cost.
+  Lazy subschemas would close the rest and want a lazy `Map`.
 - **Client disposal** — *small.* The schema owns a client for the life of the process because Calcite
   offers no disposal hook. Worth revisiting against `SchemaPlus` rather than left as a comment.
 - **Server-side functions** — *medium.* Cosmos has stored procedures and JavaScript UDFs. A UDF is

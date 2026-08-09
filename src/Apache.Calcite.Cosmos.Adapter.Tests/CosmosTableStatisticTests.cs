@@ -189,6 +189,66 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests
             new CosmosContainerStatistics(0, 0, 1).AverageDocumentSizeInBytes.Should().Be(0d);
         }
 
+
+        // ── Statistics are fetched when asked for ─────────────────────────────────
+
+        /// <remarks>
+        /// A schema exposes every container of a database — at the account level, of every database —
+        /// and each fetch is two round trips. Paying for all of them to plan against one is the wrong
+        /// trade, so the provider is invoked when a plan first asks and never for a container nothing
+        /// touches. Flink's FLIP-231 collects connector statistics during optimisation for the same
+        /// reason.
+        /// </remarks>
+        [TestMethod]
+        public void AStatisticsProviderIsNotInvokedUntilItIsAsked()
+        {
+            var invocations = 0;
+
+            var container = new CosmosContainerMetadata("products")
+                .WithStatisticsProvider(() =>
+                {
+                    invocations++;
+                    return new CosmosContainerStatistics(7, 700, 2);
+                });
+
+            var table = new CosmosTable(container);
+            invocations.Should().Be(0, "building a table asks nothing of the service");
+
+            table.getStatistic().getRowCount().doubleValue().Should().Be(7d);
+            invocations.Should().Be(1);
+        }
+
+        [TestMethod]
+        public void AStatisticsProviderIsInvokedOnlyOnce()
+        {
+            var invocations = 0;
+
+            var container = new CosmosContainerMetadata("products")
+                .WithStatisticsProvider(() =>
+                {
+                    invocations++;
+                    return new CosmosContainerStatistics(7, 700, 2);
+                });
+
+            _ = container.Statistics;
+            _ = container.Statistics;
+            _ = container.Statistics;
+
+            invocations.Should().Be(1);
+        }
+
+        /// <remarks>
+        /// An account that cannot answer leaves the planner where it would have been without one,
+        /// rather than failing the query — which is what Flink does with an unavailable statistic too.
+        /// </remarks>
+        [TestMethod]
+        public void AProviderReturningNothingLeavesTheRowCountUnknown()
+        {
+            var container = new CosmosContainerMetadata("products").WithStatisticsProvider(() => null);
+
+            new CosmosTable(container).getStatistic().getRowCount().Should().BeNull();
+        }
+
     }
 
 }
