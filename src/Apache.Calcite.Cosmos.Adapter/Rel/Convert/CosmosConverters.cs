@@ -62,6 +62,61 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
         }
 
         /// <summary>
+        /// Renders the statement a lookup join runs against the container, restricted to the keys a
+        /// batch will carry.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// The restriction is added before the projection is forced, because Cosmos applies
+        /// <c>WHERE</c> to the source rather than to what <c>SELECT</c> constructs, and a projection
+        /// alias is not visible to it. The key is therefore named by its document path, which is also
+        /// why a key that does not resolve to one cannot be pushed.
+        /// </para>
+        /// <para>
+        /// A fixed number of parameters, because the statement is rendered once and run per batch. A
+        /// short batch repeats a key rather than re-rendering — see <c>CosmosLookup.Bind</c>.
+        /// </para>
+        /// </remarks>
+        /// <param name="input">The subtree being restricted.</param>
+        /// <param name="rexBuilder">Used when translating expressions.</param>
+        /// <param name="keyOrdinal">Which output field of the subtree the join matches on.</param>
+        /// <param name="prefix">The key parameters' name prefix.</param>
+        /// <param name="batchSize">How many key parameters to render.</param>
+        /// <returns>The statement and the bindings of its output fields.</returns>
+        /// <exception cref="CosmosTranslationException">The subtree or its key has no Cosmos equivalent.</exception>
+        public static (CosmosQuery Query, IReadOnlyList<CosmosPath?> Fields) GenerateLookupQuery(RelNode input, RexBuilder rexBuilder, int keyOrdinal, string prefix, int batchSize)
+        {
+            if (input.getConvention() is not CosmosConvention convention)
+                throw new CosmosTranslationException($"Node '{input.getRelTypeName()}' is not in the Cosmos convention.");
+
+            var implementor = new CosmosImplementor(rexBuilder, convention.Container);
+            implementor.Visit(input);
+
+            var fields = implementor.Fields;
+
+            if (keyOrdinal < 0 || keyOrdinal >= fields.Count || fields[keyOrdinal] is not CosmosPath keyPath)
+                throw new CosmosTranslationException("The lookup key is not bound to a document path.");
+
+            var names = new string[batchSize];
+            for (var i = 0; i < batchSize; i++)
+                names[i] = prefix + i.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+            var restriction = $"{keyPath} IN ({string.Join(", ", names)})";
+
+            implementor.Query.Where = string.IsNullOrEmpty(implementor.Query.Where)
+                ? restriction
+                : $"({implementor.Query.Where} AND {restriction})";
+
+            EnsureProjection(implementor, input.getRowType());
+
+            // A batch restriction is not a lookup by id, whatever the rest of the predicate said. The
+            // extractor reads literals only and so would not have offered one, but a point read applies
+            // no predicate at all — it would ignore this and return a document the batch did not ask
+            // for, which is a wrong answer rather than a slow one.
+            return (implementor.Build() with { PointReadId = null }, fields);
+        }
+
+        /// <summary>
         /// Projects the subtree's output fields by name where nothing above the scan already has.
         /// </summary>
         /// <remarks>

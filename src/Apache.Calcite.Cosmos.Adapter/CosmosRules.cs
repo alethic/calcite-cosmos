@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 
 using Apache.Calcite.Cosmos.Adapter.Rel.Convert;
@@ -22,9 +22,15 @@ namespace Apache.Calcite.Cosmos.Adapter
     /// </para>
     /// <list type="bullet">
     /// <item><description>
-    /// <b>No join rule.</b> Cosmos <c>JOIN</c> has no predicate — it cross-products a document
-    /// with its own nested arrays. Relational joins are inexpressible. Array traversal arrives via
-    /// <c>Uncollect</c>/<c>Correlate</c> instead.
+    /// <b>No join rule into this convention.</b> Cosmos <c>JOIN</c> has no predicate — it
+    /// cross-products a document with its own nested arrays. Relational joins are inexpressible as a
+    /// statement, and array traversal arrives via <c>Uncollect</c>/<c>Correlate</c> instead.
+    /// <para>
+    /// <see cref="Rel.Convert.CosmosLookupJoinRule"/> is not a counter-example. It converts a join
+    /// into <c>ClrAsyncEnumerableConvention</c>, not into this one: the join is still performed
+    /// outside the service, and all that reaches the statement is a restriction to the keys one side
+    /// actually has.
+    /// </para>
     /// </description></item>
     /// <item><description>
     /// <b>No set operation rules.</b> Cosmos has no <c>UNION</c>, <c>INTERSECT</c>, or
@@ -73,6 +79,12 @@ namespace Apache.Calcite.Cosmos.Adapter
             // The way out. Without it a pushed-down subtree is a statement nothing can read the rows of,
             // and the planner has no complete plan to choose.
             yield return CosmosToClrAsyncEnumerableConverterRule.Create(convention);
+
+            // The other way out, and the only one that reads less than the whole container: a join
+            // whose other side supplies the keys. It leaves the convention for the same reason the
+            // converter does — the join happens here, not at the service — so it is registered last,
+            // alongside it.
+            yield return CosmosLookupJoinRule.Create(convention);
         }
 
     }
