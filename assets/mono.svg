@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Apache Calcite Cosmos adapter">
+<!--
+  Apache Calcite Cosmos adapter.
+  The crystal is derived from the Apache Calcite logo (https://calcite.apache.org/),
+  Copyright the Apache Software Foundation, licensed under the Apache License 2.0,
+  recoloured to the .NET palette. The orbit is original to this repository.
+  Not an ASF mark and not a Microsoft one.
+-->
+  <g transform="translate(-10.7163,-8.4672) scale(1.058398)">
+    <mask id="a" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">
+      <rect width="512" height="512" fill="#000"/>
+      <g transform="rotate(-22 252 294)"><ellipse cx="252" cy="294" rx="198" ry="78" fill="none" stroke="#fff" stroke-width="15"/></g>
+      <g transform="translate(49.1641,-0.7368) scale(0.928793)"><g transform="translate(447.81,-431.72) scale(12.5860)"><g transform="matrix(0.21374972,0.11443934,-0.11443934,0.21374972,0,0)"><path d="m 72.769296,278.65947 -11.010793,6.74091 -11.010792,-0.006 -11.010792,-0.006 -11.010793,-6.75414 -13.399267,-19.40016 35.761967,-87.93272 35.50138,87.97544 z" fill="#000" stroke="#000" stroke-width="9.69" stroke-linejoin="round"/></g></g></g>
+      <g transform="translate(49.1641,-0.7368) scale(0.928793)"><g transform="translate(447.81,-431.72) scale(12.5860)"><g transform="matrix(0.21374972,0.11443934,-0.11443934,0.21374972,0,0)"><path d="m 72.769296,278.65947 -11.010793,6.74091 -11.010792,-0.006 -11.010792,-0.006 -11.010793,-6.75414 -13.399267,-19.40016 35.761967,-87.93272 35.50138,87.97544 z" fill="#fff"/></g></g></g>
+    </mask>
+    <rect width="512" height="512" fill="#512BD4" mask="url(#a)"/>
+  </g>
+</svg>

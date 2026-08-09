@@ -128,6 +128,11 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
         public bool HasOrderBy => _orderBy.Count > 0;
 
         /// <summary>
+        /// Gets whether an array traversal has been added.
+        /// </summary>
+        public bool HasUnnest => _unnests.Count > 0;
+
+        /// <summary>
         /// Gets the number of <c>ORDER BY</c> keys.
         /// </summary>
         public int OrderByCount => _orderBy.Count;
@@ -237,12 +242,35 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
         }
 
         /// <summary>
+        /// Gets or sets the scoring function to rank by, emitting <c>ORDER BY RANK &lt;function&gt;</c>.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// A separate clause from <see cref="AddOrderBy"/>, not a kind of sort key. It takes a scoring
+        /// function — <c>FullTextScore</c>, <c>VectorDistance</c> or <c>RRF</c> over them — and has no
+        /// direction, the ranking being the function's own.
+        /// </para>
+        /// <para>
+        /// It cannot be combined with an ordinary <c>ORDER BY</c>; the reference says so of <c>RRF</c>
+        /// explicitly, and there is one <c>ORDER BY</c> clause either way. <see cref="Build"/> enforces
+        /// that rather than emitting both.
+        /// </para>
+        /// </remarks>
+        public string? RankBy { get; set; }
+
+        /// <summary>
+        /// Gets whether a scoring function has been set.
+        /// </summary>
+        public bool HasOrderByRank => string.IsNullOrEmpty(RankBy) == false;
+
+        /// <summary>
         /// Renders the statement.
         /// </summary>
         /// <returns>The Cosmos SQL text.</returns>
         /// <exception cref="InvalidOperationException">
         /// The accumulated clauses form a statement Cosmos does not accept: <c>GROUP BY</c>
-        /// combined with <c>ORDER BY</c>, or <c>TOP</c> combined with <c>OFFSET</c>/<c>LIMIT</c>.
+        /// combined with <c>ORDER BY</c>, <c>TOP</c> combined with <c>OFFSET</c>/<c>LIMIT</c>, or
+        /// <c>ORDER BY RANK</c> combined with an ordinary <c>ORDER BY</c> or with <c>GROUP BY</c>.
         /// </exception>
         public string Build()
         {
@@ -250,6 +278,13 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
             // rules are expected to prevent this pairing; reaching here means one let it through.
             if (HasGroupBy && HasOrderBy)
                 throw new InvalidOperationException("Cosmos SQL does not support GROUP BY and ORDER BY in the same query.");
+
+            // A statement has one ORDER BY clause, and ranking by a scoring function is a form of it.
+            if (HasOrderByRank && HasOrderBy)
+                throw new InvalidOperationException("Cosmos SQL does not support ORDER BY RANK together with an ordinary ORDER BY.");
+
+            if (HasOrderByRank && HasGroupBy)
+                throw new InvalidOperationException("Cosmos SQL does not support ORDER BY RANK together with GROUP BY.");
 
             if (Top is not null && (Offset is not null || Fetch is not null))
                 throw new InvalidOperationException("Cosmos SQL does not support TOP together with OFFSET/LIMIT.");
@@ -353,6 +388,13 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
 
         void WriteOrderBy(StringBuilder builder)
         {
+            if (HasOrderByRank)
+            {
+                // No direction: the scoring function defines the ranking, highest relevance first.
+                builder.Append(" ORDER BY RANK ").Append(RankBy);
+                return;
+            }
+
             if (_orderBy.Count == 0)
                 return;
 

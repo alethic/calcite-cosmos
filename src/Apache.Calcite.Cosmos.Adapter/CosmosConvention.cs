@@ -63,6 +63,11 @@ namespace Apache.Calcite.Cosmos.Adapter
         /// <summary>
         /// Gets the container this convention is bound to.
         /// </summary>
+        /// <remarks>
+        /// Metadata only. What executes a statement belongs to the table rather than to the convention,
+        /// and a plan reaches it through the schema when it runs — see <see cref="CosmosTable.Executor"/>.
+        /// A convention is a planning-time trait, and a client is not a planning-time fact.
+        /// </remarks>
         public CosmosContainerMetadata Container => _container;
 
         /// <inheritdoc />

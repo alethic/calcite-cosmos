@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 
 using Apache.Calcite.Cosmos.Adapter.Metadata;
 using Apache.Calcite.Cosmos.Adapter.Rel;
@@ -140,9 +140,9 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             var implementor = Implementor();
             Scan().Implement(implementor);
 
-            implementor.Fields[0].ToString().Should().Be("c");
-            implementor.Fields[1].ToString().Should().Be("c.id");
-            implementor.Fields[4].ToString().Should().Be("c.category");
+            implementor.Fields[0]!.ToString().Should().Be("c");
+            implementor.Fields[1]!.ToString().Should().Be("c.id");
+            implementor.Fields[4]!.ToString().Should().Be("c.category");
         }
 
         // ── Filter ────────────────────────────────────────────────────────────────
@@ -437,8 +437,8 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             return builder.build();
         }
 
-        CosmosUnnest UnnestOver(RelNode input, RexNode array, string name = "t")
-            => new(_cluster, Traits(), input, array, UnnestRowType(input, name));
+        CosmosUnnest UnnestOver(RelNode input, RexNode array, string name = "t", org.apache.calcite.rel.core.CorrelationId? correlationId = null)
+            => new(_cluster, Traits(), input, array, UnnestRowType(input, name), correlationId ?? _cluster.createCorrel());
 
         RexNode MapItem(string property) => _rex.makeCall(SqlStdOperatorTable.ITEM, Ref(0), Str(property));
 
@@ -457,7 +457,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             UnnestOver(Scan(), MapItem("tags")).Implement(implementor);
 
             implementor.Fields.Should().HaveCount(6);
-            implementor.Fields[5].ToString().Should().Be("t0");
+            implementor.Fields[5]!.ToString().Should().Be("t0");
         }
 
         [TestMethod]
@@ -490,7 +490,37 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             var correlated = _rex.makeCorrel(_table.getRowType(), correlationId);
             var array = _rex.makeCall(SqlStdOperatorTable.ITEM, _rex.makeFieldAccess(correlated, 0), Str("tags"));
 
-            Sql(UnnestOver(Scan(), array), Implementor()).Should().Be("SELECT VALUE c FROM products c JOIN t0 IN c.tags");
+            Sql(UnnestOver(Scan(), array, correlationId: correlationId), Implementor()).Should().Be("SELECT VALUE c FROM products c JOIN t0 IN c.tags");
+        }
+
+        /// <summary>
+        /// A correlation variable standing for some other row does not resolve against these bindings.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// The same shape of expression means opposite things depending on what the variable stands
+        /// for. A lateral traversal correlates an input on itself, so <c>$cor0._MAP['tags']</c> under
+        /// one is a path of the document being scanned — the test above. A join correlates it on the
+        /// <em>other</em> side, and there the identical expression is a value of a row this statement
+        /// knows nothing about.
+        /// </para>
+        /// <para>
+        /// Resolving it anyway would emit <c>c.tags</c>: a real path, of the wrong document, in a
+        /// statement the service would run without complaint. So the variable is checked rather than
+        /// the shape.
+        /// </para>
+        /// </remarks>
+        [TestMethod]
+        public void AForeignCorrelationVariableDoesNotResolve()
+        {
+            var correlated = _rex.makeCorrel(_table.getRowType(), _cluster.createCorrel());
+            var array = _rex.makeCall(SqlStdOperatorTable.ITEM, _rex.makeFieldAccess(correlated, 0), Str("tags"));
+
+            // A different variable from the one the traversal declares as its own.
+            var unnest = UnnestOver(Scan(), array, correlationId: _cluster.createCorrel());
+
+            var implement = () => Sql(unnest, Implementor());
+            implement.Should().Throw<CosmosTranslationException>();
         }
 
         [TestMethod]

@@ -188,10 +188,10 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
             for (var i = 0; i < groupKeys.size(); i++)
             {
                 var index = ((java.lang.Integer)groupKeys.get(i)).intValue();
-                if (index < 0 || index >= fields.Count)
+                if (index < 0 || index >= fields.Count || fields[index] is null)
                     throw new CosmosTranslationException("A grouping key does not resolve to a document path.");
 
-                var path = fields[index].ToString();
+                var path = fields[index]!.ToString();
                 implementor.Query.AddGroupBy(path);
                 implementor.Query.SelectProperty((string)names.get(output++), path);
             }
@@ -206,11 +206,14 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
                 implementor.Query.SelectProperty((string)names.get(output++), Render(call, fields));
             }
 
-            // Aggregated output is computed, so nothing downstream can address it as a path.
-            implementor.Fields = Array.Empty<CosmosPath>();
+            // Aggregated output is computed, so nothing downstream can address it as a path. Bound
+            // per ordinal rather than emptied, so a downstream reference is declined for naming a
+            // computed column rather than for being out of range.
+            var aggregated = new CosmosPath?[names.size()];
+            implementor.Fields = aggregated;
         }
 
-        string Render(AggregateCall call, IReadOnlyList<CosmosPath> fields)
+        string Render(AggregateCall call, IReadOnlyList<CosmosPath?> fields)
         {
             var arguments = call.getArgList();
 
@@ -219,7 +222,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
                 return FunctionName(call) + "(1)";
 
             var index = ((java.lang.Integer)arguments.get(0)).intValue();
-            if (index < 0 || index >= fields.Count)
+            if (index < 0 || index >= fields.Count || fields[index] is null)
                 throw new CosmosTranslationException("An aggregate argument does not resolve to a document path.");
 
             return $"{FunctionName(call)}({fields[index]})";

@@ -1,4 +1,4 @@
-using Apache.Calcite.Cosmos.Adapter.Metadata;
+﻿using Apache.Calcite.Cosmos.Adapter.Metadata;
 using Apache.Calcite.Cosmos.Adapter.Rel.Convert;
 using Apache.Calcite.Cosmos.Adapter.Sql;
 
@@ -146,10 +146,16 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             var array = CosmosUnnestRule.GetArrayExpression(correlate)!;
 
             var fields = CosmosImplementor.BindFields(correlate.getLeft().getRowType());
-            var translator = new CosmosRexTranslator(correlate.getCluster().getRexBuilder(), fields, new CosmosParameterList());
+            // The correlate's own id, which is what makes this variable stand for the row being
+            // scanned rather than the other side of a join.
+            var translator = new CosmosRexTranslator(correlate.getCluster().getRexBuilder(), fields, new CosmosParameterList(), correlate.getCorrelationId());
 
             translator.TryResolvePath(array, out var path).Should().BeTrue();
             path!.ToString().Should().Be("c.tags");
+
+            // And without that declaration it does not resolve at all.
+            var unaware = new CosmosRexTranslator(correlate.getCluster().getRexBuilder(), fields, new CosmosParameterList());
+            unaware.TryResolvePath(array, out _).Should().BeFalse();
         }
 
     }

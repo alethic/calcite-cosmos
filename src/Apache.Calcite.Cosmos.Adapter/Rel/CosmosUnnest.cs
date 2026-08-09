@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 
 using Apache.Calcite.Cosmos.Adapter.Sql;
@@ -31,6 +31,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
 
         readonly RexNode _array;
         readonly RelDataType _rowType;
+        readonly org.apache.calcite.rel.core.CorrelationId _correlationId;
 
         /// <summary>
         /// Initializes a new instance.
@@ -40,12 +41,19 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
         /// <param name="input">The input node.</param>
         /// <param name="array">The expression producing the array, addressed against the input's row type.</param>
         /// <param name="rowType">The output row type: the input's fields plus the element field.</param>
-        /// <exception cref="ArgumentNullException"><paramref name="array"/> or <paramref name="rowType"/> is <c>null</c>.</exception>
-        public CosmosUnnest(RelOptCluster cluster, RelTraitSet traitSet, RelNode input, RexNode array, RelDataType rowType) :
+        /// <param name="correlationId">
+        /// The variable <paramref name="array"/> addresses the input by. A lateral traversal is
+        /// correlated on its own input, so this names the row being scanned rather than some other
+        /// side of a join — which is the distinction that decides whether the expression resolves to a
+        /// document path or to nothing.
+        /// </param>
+        /// <exception cref="ArgumentNullException">Any of <paramref name="array"/>, <paramref name="rowType"/> or <paramref name="correlationId"/> is <c>null</c>.</exception>
+        public CosmosUnnest(RelOptCluster cluster, RelTraitSet traitSet, RelNode input, RexNode array, RelDataType rowType, org.apache.calcite.rel.core.CorrelationId correlationId) :
             base(cluster, traitSet, input)
         {
             _array = array ?? throw new ArgumentNullException(nameof(array));
             _rowType = rowType ?? throw new ArgumentNullException(nameof(rowType));
+            _correlationId = correlationId ?? throw new ArgumentNullException(nameof(correlationId));
         }
 
         /// <summary>
@@ -62,7 +70,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
         /// <inheritdoc />
         public override RelNode copy(RelTraitSet traitSet, java.util.List inputs)
         {
-            return new CosmosUnnest(getCluster(), traitSet, (RelNode)inputs.get(0), _array, _rowType);
+            return new CosmosUnnest(getCluster(), traitSet, (RelNode)inputs.get(0), _array, _rowType, _correlationId);
         }
 
         /// <inheritdoc />
@@ -85,14 +93,14 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
             if (implementor.Query.HasRowLimit || implementor.Query.HasOrderBy || implementor.Query.HasGroupBy)
                 throw new CosmosTranslationException("An array traversal cannot be applied above a sort, grouping, or row limit.");
 
-            if (implementor.CreateTranslator().TryResolvePath(_array, out var path) == false)
+            if (implementor.CreateTranslator(_correlationId).TryResolvePath(_array, out var path) == false)
                 throw new CosmosTranslationException("The traversed array does not resolve to a document path.");
 
             var alias = implementor.CreateUnnestAlias();
             implementor.Query.AddUnnest(alias, path!.ToString());
 
             // The element is addressed by its alias; the input's bindings carry through unchanged.
-            var fields = new List<CosmosPath>(implementor.Fields) { CosmosPath.Root(alias) };
+            var fields = new List<CosmosPath?>(implementor.Fields) { CosmosPath.Root(alias) };
             implementor.Fields = fields;
         }
 

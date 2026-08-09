@@ -35,7 +35,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
         /// <param name="keys">On success, the resolved keys in order.</param>
         /// <param name="paths">On success, the resolved paths in order.</param>
         /// <returns><c>true</c> if every key resolved; otherwise <c>false</c>.</returns>
-        public static bool TryResolveSortKeys(RelCollation collation, IReadOnlyList<CosmosPath> fields, org.apache.calcite.rel.type.RelDataType rowType, string rootAlias, out IReadOnlyList<CosmosSortKey> keys, out IReadOnlyList<CosmosPath> paths)
+        public static bool TryResolveSortKeys(RelCollation collation, IReadOnlyList<CosmosPath?> fields, org.apache.calcite.rel.type.RelDataType rowType, string rootAlias, out IReadOnlyList<CosmosSortKey> keys, out IReadOnlyList<CosmosPath> paths)
         {
             keys = System.Array.Empty<CosmosSortKey>();
             paths = System.Array.Empty<CosmosPath>();
@@ -60,13 +60,18 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
                 if (TryGetDescending(field, nullable, out var descending) == false)
                     return false;
 
+                // A key over a computed projection has no path to sort by. Cosmos cannot order by a
+                // projection alias, so there is nothing to fall back to and the sort is declined.
                 var path = fields[index];
+                if (path is null)
+                    return false;
 
-                // A path rooted at an array-traversal alias is relative to the element, not the
-                // container, so its policy form is not comparable with the container's index
-                // paths. Sorting on one is still legal with a single key, which needs no index;
-                // with more than one it cannot be checked and so is refused.
-                if (string.Equals(path.Alias, rootAlias, StringComparison.Ordinal) == false && collations.size() > 1)
+                // A path rooted at an array-traversal alias is relative to the element rather than the
+                // container, and the service refuses to order by one at all — measured against Azure,
+                // which rejects both `ORDER BY t0` and `ORDER BY t0.x` with a 400 while accepting the
+                // same JOIN ordered by a container path. The emulator accepts all three, which is why
+                // this stood as a single-key allowance for so long.
+                if (string.Equals(path.Alias, rootAlias, StringComparison.Ordinal) == false)
                     return false;
 
                 resolvedPaths[i] = path;

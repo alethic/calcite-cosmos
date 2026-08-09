@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -32,7 +32,105 @@ namespace Apache.Calcite.Cosmos.Adapter.Metadata
                 throw new ArgumentNullException(nameof(container));
 
             var response = await container.ReadContainerAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
-            return FromProperties(response.Resource);
+            var metadata = FromProperties(response.Resource);
+
+            // Attached rather than fetched. A schema exposes every container of a database, and at the
+            // account level every container of every database, so reading the size of all of them to
+            // plan against one is the wrong trade — and it is two more round trips each.
+            return metadata.WithStatisticsProvider(() => ReadStatisticsAsync(container, CancellationToken.None).GetAwaiter().GetResult());
+        }
+
+        /// <summary>
+        /// Reads what the service says about a container's size and spread.
+        /// </summary>
+        /// <param name="container">The container to measure.</param>
+        /// <param name="cancellationToken">Cancels the read.</param>
+        /// <returns>The statistics, or <c>null</c> where the account did not answer.</returns>
+        /// <exception cref="ArgumentNullException"><paramref name="container"/> is <c>null</c>.</exception>
+        public static async Task<CosmosContainerStatistics?> ReadStatisticsAsync(Container container, CancellationToken cancellationToken = default)
+        {
+            if (container is null)
+                throw new ArgumentNullException(nameof(container));
+
+            try
+            {
+                var response = await container.ReadContainerAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
+                return await ReadStatisticsAsync(container, response, cancellationToken).ConfigureAwait(false);
+            }
+            catch (CosmosException)
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// The header a container read carries its usage in.
+        /// </summary>
+        /// <remarks>
+        /// Semicolon-separated <c>name=value</c> pairs — <c>documentsCount</c>, <c>documentsSize</c> in
+        /// kilobytes, <c>collectionSize</c> — and the only route to a row count that does not cost a
+        /// query over the container.
+        /// </remarks>
+        const string ResourceUsageHeader = "x-ms-resource-usage";
+
+        /// <summary>
+        /// Reads what the service says about the container's size and spread.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Returns <c>null</c> rather than throwing where any of it is unavailable. These are an
+        /// optimisation: a planner with no row count compares plans as it did before, and a schema that
+        /// fails to build because a header was missing is a worse outcome than a plan costed coarsely.
+        /// </para>
+        /// <para>
+        /// The partition count comes from the feed ranges, one per physical partition. It is a second
+        /// round trip, taken once when the schema is built.
+        /// </para>
+        /// </remarks>
+        static async Task<CosmosContainerStatistics?> ReadStatisticsAsync(Container container, ContainerResponse response, CancellationToken cancellationToken)
+        {
+            try
+            {
+                var usage = ParseResourceUsage(response.Headers?.GetValueOrDefault(ResourceUsageHeader));
+
+                if (usage.TryGetValue("documentsCount", out var count) == false)
+                    return null;
+
+                // Reported in kilobytes, and wanted in bytes: an average document size is the useful
+                // form and kilobytes would round most documents to nothing.
+                usage.TryGetValue("documentsSize", out var sizeInKilobytes);
+
+                var ranges = await container.GetFeedRangesAsync(cancellationToken).ConfigureAwait(false);
+
+                return new CosmosContainerStatistics(count, sizeInKilobytes * 1024L, ranges?.Count ?? 1);
+            }
+            catch (CosmosException)
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Parses the semicolon-separated <c>name=value</c> pairs of the resource usage header.
+        /// </summary>
+        static Dictionary<string, long> ParseResourceUsage(string? header)
+        {
+            var values = new Dictionary<string, long>(StringComparer.Ordinal);
+
+            if (string.IsNullOrEmpty(header))
+                return values;
+
+            foreach (var pair in header.Split(';', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var separator = pair.IndexOf('=');
+                if (separator <= 0)
+                    continue;
+
+                if (long.TryParse(pair.AsSpan(separator + 1), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var value))
+                    values[pair.Substring(0, separator).Trim()] = value;
+            }
+
+            return values;
         }
 
         /// <summary>

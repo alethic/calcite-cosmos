@@ -115,6 +115,34 @@ jobs:
       env:
         GITHUB_REPOS: https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    # The suite's most valuable test executes every emitted statement form against a service, and
+    # reports inconclusive without one — so on every other leg it proves nothing. Docker is available
+    # on the Linux x64 runner and nowhere else in this matrix, so that leg is the one that runs it.
+    #
+    # The emulator is not the service. It has been measured to accept statements Azure rejects (an
+    # ORDER BY over an unnest alias) and to reject features Azure implements (full text search), so
+    # this catches syntax the service would refuse and not much else. A job against a real account is
+    # what would close the rest; see TODO.md.
+    - name: Start Cosmos DB Emulator
+      if: matrix.sys == 'linux-x64'
+      run: |
+        docker run -d --name cosmos-emulator -p 8081:8081 \
+          mcr.microsoft.com/cosmosdb/linux/azure-cosmos-emulator:vnext-preview
+
+        # Ready when it answers, not when the container starts. The tests bound their own connection
+        # attempt, so a failure here would surface as every service test reporting inconclusive —
+        # which reads exactly like no emulator at all. Fail loudly instead.
+        for i in $(seq 1 60); do
+          if curl -ksf -o /dev/null http://localhost:8081/; then
+            echo "emulator ready after ${i}s"
+            exit 0
+          fi
+          sleep 1
+        done
+
+        echo "emulator did not become ready"
+        docker logs cosmos-emulator | tail -50
+        exit 1
     - name: Download Tests
       uses: actions/download-artifact@v5
       with:

@@ -1,7 +1,8 @@
-using System;
+﻿using System;
 
 using Apache.Calcite.Cosmos.Adapter.Metadata;
 using Apache.Calcite.Cosmos.Adapter.Rel;
+using Apache.Calcite.Cosmos.Adapter.Sql;
 
 using FluentAssertions;
 
@@ -74,8 +75,14 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
 
             var parsed = SqlParser.create(sql, SqlParser.config().withUnquotedCasing(Casing.UNCHANGED)).parseQuery();
 
+            // Chained so that a query can name the adapter's own functions. Calcite's standard table has
+            // nothing to resolve IS_DEFINED or FULLTEXTCONTAINS to, and this is the seam a caller wires
+            // the same way.
+            var operators = org.apache.calcite.sql.util.SqlOperatorTables.chain(
+                SqlStdOperatorTable.instance(), Apache.Calcite.Cosmos.Adapter.Sql.CosmosOperators.Instance);
+
             var validator = SqlValidatorUtil.newValidator(
-                SqlStdOperatorTable.instance(), catalogReader, typeFactory, SqlValidator.Config.DEFAULT);
+                operators, catalogReader, typeFactory, SqlValidator.Config.DEFAULT);
 
             var planner = new VolcanoPlanner();
             planner.addRelTraitDef(ConventionTraitDef.INSTANCE);
@@ -83,7 +90,13 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             var cluster = RelOptCluster.create(planner, new RexBuilder(typeFactory));
             var converter = new SqlToRelConverter(null, validator, catalogReader, cluster, StandardConvertletTable.INSTANCE, SqlToRelConverter.config());
 
-            return converter.convertQuery(validator.validate(parsed), false, true).rel;
+            // project(), not rel. Ordering by an expression outside the select list makes
+            // SqlToRelConverter carry it as an extra column and record in the RelRoot that it is not
+            // output; project() is what applies that, and is what a real consumer uses. Taking rel
+            // leaves the column at the root, which for a scoring function is the difference between a
+            // plan that can be implemented and one that cannot — Cosmos will not project a score.
+            // It is a no-op wherever the mapping is trivial, which is every other query here.
+            return converter.convertQuery(validator.validate(parsed), false, true).project();
         }
 
         /// <summary>
@@ -308,6 +321,499 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             var act = () => PlanToCosmos("SELECT * FROM products AS c ORDER BY c.\"id\", c.\"category\"");
 
             act.Should().Throw<Exception>();
+        }
+
+        // ── Binding through a projection ────────────────────────
+
+        /// <remarks>
+        /// The control for the two below. The key is <c>id</c> rather than <c>category</c> because a
+        /// nullable column is refused on its null placement, whatever the projection does.
+        /// </remarks>
+        [TestMethod]
+        public void SortPushesPastAnAllPathProjection()
+        {
+            var best = PlanToCosmos("SELECT c.\"id\" AS \"i\" FROM products AS c ORDER BY c.\"id\"");
+
+            Render(best).Should().Contain("ORDER BY c.id ASC");
+        }
+
+        /// <remarks>
+        /// A computed column has no document path, and the columns beside it still do. Binding per
+        /// ordinal is what lets this sort push: the key names <c>id</c>, a plain path, and never reads
+        /// the computed one. Bound all-or-nothing, as it was, the whole sort was declined.
+        /// </remarks>
+        [TestMethod]
+        public void SortOnAPlainColumnPushesPastAComputedProjection()
+        {
+            var best = PlanToCosmos("SELECT UPPER(c.\"id\") AS \"u\", c.\"id\" AS \"i\" FROM products AS c ORDER BY c.\"id\"");
+
+            Render(best).Should().Contain("ORDER BY c.id ASC");
+        }
+
+        /// <remarks>
+        /// The other half of the same rule: a sort that does read the computed column has nothing to
+        /// order by, Cosmos being unable to address a projection alias, so it is refused — <b>at the
+        /// rule</b>, which is what <c>CosmosConverterRule</c> requires. The rule derives its binding by
+        /// walking the input rather than reading alias names off the input row type, so it declines here
+        /// for the same reason implementation would, and no plan is produced to render.
+        /// </remarks>
+        [TestMethod]
+        public void SortOnAComputedColumnIsNotPushedDown()
+        {
+            var act = () => PlanToCosmos("SELECT UPPER(c.\"id\") AS \"u\", c.\"id\" AS \"i\" FROM products AS c ORDER BY UPPER(c.\"id\")");
+
+            act.Should().Throw<Exception>();
+        }
+
+
+        // ── Partial filter pushdown ───────────────────────────────
+
+        /// <summary>
+        /// Plans a statement, asking for the asynchronous convention so that a plan may legitimately
+        /// keep some work in Calcite rather than having to be Cosmos throughout.
+        /// </summary>
+        RelNode PlanToAsync(string sql)
+        {
+            var logical = PlanLogical(sql);
+            var planner = (VolcanoPlanner)logical.getCluster().getPlanner();
+
+            foreach (var rule in CosmosRules.GetRules(_table.Convention))
+                planner.addRule(rule);
+
+            foreach (var rule in Apache.Calcite.Extensions.Adapter.AsyncEnumerable.ClrAsyncEnumerableRules.Rules())
+                planner.addRule(rule);
+
+            var desired = logical.getTraitSet().replace(Apache.Calcite.Extensions.Adapter.AsyncEnumerable.ClrAsyncEnumerableConvention.Instance).simplify();
+            planner.setRoot(planner.changeTraits(logical, desired));
+
+            return planner.findBestExp();
+        }
+
+        /// <remarks>
+        /// INITCAP has no Cosmos form, so the whole predicate used to be declined and every document
+        /// crossed the wire. The renderable conjunct is pushed and the rest rechecked above it, which is
+        /// sound because dropping a conjunct only ever weakens: the service discards nothing the full
+        /// predicate would have kept.
+        /// </remarks>
+        [TestMethod]
+        public void RenderablePartOfAPredicateIsPushedAndTheRestRechecked()
+        {
+            var best = PlanToAsync("SELECT * FROM products AS c WHERE c.\"category\" = 'bikes' AND INITCAP(c.\"id\") = 'X'");
+            var plan = Plan(best);
+
+            plan.Should().Contain("CosmosFilter");
+            plan.Should().Contain("INITCAP");
+        }
+
+        /// <summary>
+        /// A sort above a pushed aggregate stays in Calcite, and the aggregate still pushes.
+        /// </summary>
+        /// <remarks>
+        /// Cosmos rejects <c>GROUP BY</c> and <c>ORDER BY</c> in one statement. <c>CosmosSort</c>
+        /// refuses the combination when it renders, but refusing only there is too late — the rule
+        /// would already have produced a node the planner cannot implement, which fails rather than
+        /// planning something slower. Declining in the rule is also the better plan: the sort then runs
+        /// over one row per group instead of over the container.
+        /// </remarks>
+        [TestMethod]
+        public void ASortAboveAPushedAggregateStaysInCalcite()
+        {
+            var best = PlanToAsync("SELECT c.\"category\", COUNT(*) FROM products AS c GROUP BY c.\"category\" ORDER BY c.\"category\"");
+            var plan = Plan(best);
+
+            plan.Should().Contain("CosmosAggregate", "the grouping is still worth pushing: " + plan);
+            plan.Should().NotContain("CosmosSort", "Cosmos will not take ORDER BY alongside GROUP BY: " + plan);
+        }
+
+        /// <summary>
+        /// The same split applies to a filter sitting above a projection.
+        /// </summary>
+        /// <remarks>
+        /// The argument does not depend on what the filter sits on — dropping a conjunct only ever
+        /// weakens, so the service discards nothing the full predicate would have kept. The rule used
+        /// to match a filter directly over the scan and nothing else, which meant a projection between
+        /// the two cost the whole pushdown rather than the untranslatable half of it.
+        /// </remarks>
+        [TestMethod]
+        public void APredicateAboveAProjectionIsSplitToo()
+        {
+            var best = PlanToAsync(
+                "SELECT * FROM (SELECT c.\"category\" AS cat, c.\"id\" AS ident FROM products AS c) AS t " +
+                "WHERE t.cat = 'bikes' AND INITCAP(t.ident) = 'X'");
+
+            var plan = Plan(best);
+
+            plan.Should().Contain("CosmosFilter");
+            plan.Should().Contain("INITCAP");
+        }
+
+        /// <remarks>
+        /// The pushed half is the renderable conjunct alone, and the partition key it pins is still
+        /// recovered from it.
+        /// </remarks>
+        [TestMethod]
+        public void ThePushedHalfCarriesOnlyTheRenderableConjunct()
+        {
+            var best = PlanToAsync("SELECT * FROM products AS c WHERE c.\"category\" = 'bikes' AND INITCAP(c.\"id\") = 'X'");
+            var cosmos = FindCosmos(best);
+
+            var query = Query(cosmos);
+            query.Sql.Should().Contain("WHERE (c.category = @p0)");
+            query.Sql.Should().NotContain("INITCAP");
+            query.PartitionKeyValues.Should().Equal("bikes");
+        }
+
+        /// <remarks>
+        /// A wholly renderable predicate is not split; there is nothing to leave behind.
+        /// </remarks>
+        [TestMethod]
+        public void AWhollyRenderablePredicateIsNotSplit()
+        {
+            var best = PlanToCosmos("SELECT * FROM products AS c WHERE c.\"category\" = 'bikes' AND c.\"id\" = 'x'");
+
+            Plan(best).Split("CosmosFilter").Length.Should().Be(2);
+        }
+
+        /// <summary>
+        /// Returns the root of the pushed-down Cosmos subtree — the highest node in the convention,
+        /// which is the one that renders the whole statement.
+        /// </summary>
+        static RelNode FindCosmos(RelNode node)
+        {
+            if (node is CosmosRel)
+                return node;
+
+            var inputs = node.getInputs();
+            for (var i = 0; i < inputs.size(); i++)
+                if (FindCosmos((RelNode)inputs.get(i)) is RelNode found)
+                    return found;
+
+            return null!;
+        }
+
+
+        // ── Navigating the document ───────────────────────────────────────────────
+
+        /// <remarks>
+        /// The map column's type is one level — MAP&lt;VARCHAR, ANY&gt; — and the document beneath it is
+        /// not. Depth still resolves because ITEM over ANY is ANY, so the chain type-checks, and the
+        /// translator folds the whole chain into one path rather than nesting accessors.
+        /// </remarks>
+        [TestMethod]
+        public void NestedPropertiesResolveToASinglePath()
+        {
+            var best = PlanToCosmos("SELECT c.\"_MAP\"['metadata']['sku'] AS \"sku\" FROM products AS c");
+
+            Render(best).Should().Be("SELECT VALUE { \"sku\": c.metadata.sku } FROM products c");
+        }
+
+        [TestMethod]
+        public void ThreeLevelsResolveJustAsFar()
+        {
+            var best = PlanToCosmos("SELECT c.\"_MAP\"['a']['b']['c'] AS \"deep\" FROM products AS c");
+
+            Render(best).Should().Be("SELECT VALUE { \"deep\": c.a.b.c } FROM products c");
+        }
+
+        /// <remarks>
+        /// An array index is a path segment like any other.
+        /// </remarks>
+        [TestMethod]
+        public void ArrayIndexingIsPartOfThePath()
+        {
+            var best = PlanToCosmos("SELECT c.\"_MAP\"['tags'][0] AS \"first\" FROM products AS c");
+
+            Render(best).Should().Be("SELECT VALUE { \"first\": c.tags[0] } FROM products c");
+        }
+
+        /// <remarks>
+        /// A non-constant key has no path form — the statement addresses a property by name, and the
+        /// name is not known until the row is read — so it is declined rather than guessed at.
+        /// </remarks>
+        [TestMethod]
+        public void ANonConstantKeyIsNotAPath()
+        {
+            var act = () => PlanToCosmos("SELECT c.\"_MAP\"[c.\"id\"] AS \"dynamic\" FROM products AS c");
+
+            act.Should().Throw<Exception>();
+        }
+
+
+        // ── Testing whether a property exists ─────────────────────────────────────
+
+        /// <remarks>
+        /// The SQL spelling. Cosmos distinguishes an absent property from one present and null and SQL
+        /// does not, so this renders as both tests — which is what makes it match a document that simply
+        /// lacks the property.
+        /// </remarks>
+        [TestMethod]
+        public void IsNotNullOnAMapPropertyTestsBothCosmosStates()
+        {
+            var best = PlanToCosmos("SELECT c.\"id\" FROM products AS c WHERE c.\"_MAP\"['metadata'] IS NOT NULL");
+
+            Render(best).Should().Contain("(IS_DEFINED(c.metadata) AND NOT IS_NULL(c.metadata))");
+        }
+
+        /// <remarks>
+        /// The exact spelling, for a query that needs to tell absent from null — which SQL cannot say and
+        /// this adapter's own operator can. It reaches the validator through the chained operator table.
+        /// </remarks>
+        [TestMethod]
+        public void IsDefinedTestsExistenceAlone()
+        {
+            var best = PlanToCosmos("SELECT c.\"id\" FROM products AS c WHERE IS_DEFINED(c.\"_MAP\"['metadata'])");
+
+            Render(best).Should().Contain("WHERE IS_DEFINED(c.metadata)");
+        }
+
+        /// <remarks>
+        /// Existence of a nested property, which is the same question one level down and the same path.
+        /// </remarks>
+        [TestMethod]
+        public void IsDefinedReachesANestedProperty()
+        {
+            var best = PlanToCosmos("SELECT c.\"id\" FROM products AS c WHERE IS_DEFINED(c.\"_MAP\"['metadata']['sku'])");
+
+            Render(best).Should().Contain("WHERE IS_DEFINED(c.metadata.sku)");
+        }
+
+
+        // ── Ranking by a scoring function ─────────────────────────────────────────
+
+        /// <remarks>
+        /// Calcite expresses this as three nodes — project the score, sort on it, project it away — and
+        /// the first is a statement Cosmos rejects, a scoring function not being projectable. The whole
+        /// shape collapses into one clause, and the score never appears in the select list.
+        /// </remarks>
+        [TestMethod]
+        public void OrderingByAScoreBecomesOrderByRank()
+        {
+            var best = PlanToCosmos("SELECT c.\"id\" FROM products AS c ORDER BY FULLTEXTSCORE(c.\"_MAP\"['name'], 'steel') FETCH FIRST 10 ROWS ONLY");
+            var sql = Render(best);
+
+            sql.Should().Be("SELECT TOP 10 VALUE { \"id\": c.id } FROM products c ORDER BY RANK FULLTEXTSCORE(c.name, @p0)");
+            sql.Should().NotContain("\"$f");
+        }
+
+        /// <remarks>
+        /// The keyword binds like any other literal, so the statement text does not vary with it.
+        /// </remarks>
+        [TestMethod]
+        public void TheRankKeywordIsBound()
+        {
+            var query = Query(PlanToCosmos("SELECT c.\"id\" FROM products AS c ORDER BY FULLTEXTSCORE(c.\"_MAP\"['name'], 'steel') FETCH FIRST 5 ROWS ONLY"));
+
+            query.Parameters.Should().ContainSingle().Which.Value.Should().Be("steel");
+        }
+
+        /// <remarks>
+        /// RRF fuses two scores, and its arguments are themselves scoring functions rather than paths.
+        /// </remarks>
+        [TestMethod]
+        public void RrfFusesTwoScores()
+        {
+            var best = PlanToCosmos(
+                "SELECT c.\"id\" FROM products AS c " +
+                "ORDER BY RRF(FULLTEXTSCORE(c.\"_MAP\"['name'], 'steel'), FULLTEXTSCORE(c.\"_MAP\"['tags'], 'frame')) " +
+                "FETCH FIRST 10 ROWS ONLY");
+
+            Render(best).Should().Contain("ORDER BY RANK RRF(FULLTEXTSCORE(c.name, @p0), FULLTEXTSCORE(c.tags, @p1))");
+        }
+
+        /// <remarks>
+        /// A scoring function anywhere but the rank clause is refused: the service will not project one,
+        /// and will not filter on one either.
+        /// </remarks>
+        [TestMethod]
+        public void AProjectedScoreIsNotPushedDown()
+        {
+            var act = () => PlanToCosmos("SELECT FULLTEXTSCORE(c.\"_MAP\"['name'], 'steel') AS \"s\" FROM products AS c");
+
+            act.Should().Throw<Exception>();
+        }
+
+        [TestMethod]
+        public void AScoreInAPredicateIsNotPushedDown()
+        {
+            var act = () => PlanToCosmos("SELECT c.\"id\" FROM products AS c WHERE FULLTEXTSCORE(c.\"_MAP\"['name'], 'steel') > 1");
+
+            act.Should().Throw<Exception>();
+        }
+
+
+        // ── Point lookup ──────────────────────────────────────────────────────────
+
+        /// <remarks>
+        /// A lookup by id and a complete partition key is a read, not a query: about 1 RU against the
+        /// 2.3 a query costs at best, and no query engine.
+        /// </remarks>
+        [TestMethod]
+        public void IdAndPartitionKeyBecomeAPointRead()
+        {
+            var query = Query(PlanToCosmos("SELECT * FROM products AS c WHERE c.\"id\" = 'x' AND c.\"category\" = 'bikes'"));
+
+            query.PointReadId.Should().Be("x");
+            query.PartitionKeyValues.Should().Equal("bikes");
+        }
+
+        /// <remarks>
+        /// <b>The predicate must say nothing else.</b> A point read applies no predicate of its own, so
+        /// under an extra conjunct it would return a document the query excludes — a wrong answer rather
+        /// than a slow one. The statement is still rendered and still executed; it is just executed as a
+        /// query.
+        /// </remarks>
+        [TestMethod]
+        public void AResidualPredicateRulesOutAPointRead()
+        {
+            var query = Query(PlanToCosmos("SELECT * FROM products AS c WHERE c.\"id\" = 'x' AND c.\"category\" = 'bikes' AND c.\"_ts\" > 100"));
+
+            query.PointReadId.Should().BeNull();
+            query.PartitionKeyValues.Should().Equal("bikes");
+        }
+
+        [TestMethod]
+        public void AnIdWithoutThePartitionKeyIsNotAPointRead()
+        {
+            Query(PlanToCosmos("SELECT * FROM products AS c WHERE c.\"id\" = 'x'")).PointReadId.Should().BeNull();
+        }
+
+        [TestMethod]
+        public void APartitionKeyWithoutAnIdIsNotAPointRead()
+        {
+            Query(PlanToCosmos("SELECT * FROM products AS c WHERE c.\"category\" = 'bikes'")).PointReadId.Should().BeNull();
+        }
+
+        /// <remarks>
+        /// A read returns one document whole. A row limit and an ordering describe a result set rather
+        /// than a document, so either rules it out even though the predicate would allow it.
+        /// </remarks>
+        [TestMethod]
+        public void ARowLimitRulesOutAPointRead()
+        {
+            var query = Query(PlanToCosmos("SELECT * FROM products AS c WHERE c.\"id\" = 'x' AND c.\"category\" = 'bikes' FETCH FIRST 1 ROWS ONLY"));
+
+            query.PointReadId.Should().BeNull();
+        }
+
+        /// <remarks>
+        /// Under a disjunction an equality does not constrain the whole predicate, so it pins nothing —
+        /// the same reason the partition key is not recovered from one.
+        /// </remarks>
+        [TestMethod]
+        public void ADisjunctionIsNotAPointRead()
+        {
+            var query = Query(PlanToCosmos("SELECT * FROM products AS c WHERE (c.\"id\" = 'x' AND c.\"category\" = 'bikes') OR c.\"id\" = 'y'"));
+
+            query.PointReadId.Should().BeNull();
+        }
+
+        /// <remarks>
+        /// A projection of plain paths still reads: the converter walks each path in the returned
+        /// document rather than naming a property of an object the statement never constructed.
+        /// </remarks>
+        [TestMethod]
+        public void AProjectionOfPathsStillPointReads()
+        {
+            var query = Query(PlanToCosmos("SELECT c.\"id\", c.\"category\" FROM products AS c WHERE c.\"id\" = 'x' AND c.\"category\" = 'bikes'"));
+
+            query.PointReadId.Should().Be("x");
+        }
+
+
+        // ── Hierarchical partition keys ───────────────────────────────────────────
+
+        static readonly CosmosContainerMetadata Tenanted = new("products", new[] { "/tenant", "/user" });
+
+        /// <summary>
+        /// Plans against a container whose partition key is hierarchical.
+        /// </summary>
+        CosmosQuery TenantedQuery(string sql)
+        {
+            _table = new CosmosTable(Tenanted);
+
+            var logical = PlanLogical(sql);
+            var planner = (VolcanoPlanner)logical.getCluster().getPlanner();
+
+            foreach (var rule in CosmosRules.GetRules(_table.Convention))
+                planner.addRule(rule);
+
+            planner.setRoot(planner.changeTraits(logical, logical.getTraitSet().replace(_table.Convention).simplify()));
+            var best = planner.findBestExp();
+
+            var implementor = new CosmosImplementor(best.getCluster().getRexBuilder(), Tenanted);
+            implementor.Visit(best);
+            return implementor.Build();
+        }
+
+        /// <remarks>
+        /// Cosmos routes on any prefix of a hierarchical key, so pinning the outermost path reaches the
+        /// partitions under that tenant rather than every partition in the container. Recovering only a
+        /// complete key threw that away.
+        /// </remarks>
+        [TestMethod]
+        public void APinnedOutermostPathRoutesOnThePrefix()
+        {
+            var query = TenantedQuery("SELECT * FROM products AS c WHERE c.\"tenant\" = 'acme'");
+
+            query.PartitionKeyValues.Should().Equal("acme");
+            query.PartitionKeyIsComplete.Should().BeFalse();
+        }
+
+        [TestMethod]
+        public void PinningEveryPathIsACompleteKey()
+        {
+            var query = TenantedQuery("SELECT * FROM products AS c WHERE c.\"tenant\" = 'acme' AND c.\"user\" = 'kim'");
+
+            query.PartitionKeyValues.Should().Equal("acme", "kim");
+            query.PartitionKeyIsComplete.Should().BeTrue();
+        }
+
+        /// <remarks>
+        /// Prefix means prefix. Routing is on the leading components, so pinning an inner path without
+        /// the one above it narrows nothing and must not be presented as though it did.
+        /// </remarks>
+        [TestMethod]
+        public void AnInnerPathWithoutTheOuterRoutesNothing()
+        {
+            var query = TenantedQuery("SELECT * FROM products AS c WHERE c.\"user\" = 'kim'");
+
+            query.PartitionKeyValues.Should().BeNull();
+        }
+
+        /// <remarks>
+        /// A prefix routes to a set of partitions and does not identify a document, so it cannot carry
+        /// a point read however much of the predicate is an id.
+        /// </remarks>
+        [TestMethod]
+        public void APrefixCannotCarryAPointRead()
+        {
+            var query = TenantedQuery("SELECT * FROM products AS c WHERE c.\"tenant\" = 'acme' AND c.\"id\" = 'x'");
+
+            query.PartitionKeyValues.Should().Equal("acme");
+            query.PointReadId.Should().BeNull();
+        }
+
+
+        // ── What the table claims about ordering ──────────────────────────────────
+
+        /// <remarks>
+        /// A probe, not a specification. RelOptTableImpl.getCollationList returns the statistic's
+        /// collations, and RelMdCollation reports them as the collation <em>of a scan</em> — that is,
+        /// the order rows already arrive in. Whether the planner is being told that is what this asks.
+        /// </remarks>
+        [TestMethod]
+        public void AScanIsNotClaimedToBeSorted()
+        {
+            var best = PlanToCosmos("SELECT * FROM products");
+            var mq = best.getCluster().getMetadataQuery();
+
+            var collations = mq.collations(best);
+
+            // The container declares a composite index over (/id, /_ts). An index permits an ORDER BY;
+            // it does not order a query that has none, and Cosmos guarantees no order without one. A
+            // scan claiming a collation would licence the planner to drop a Sort that asked for it.
+            collations.Should().NotBeNull();
+            collations.size().Should().Be(0, "a Cosmos scan returns rows in no guaranteed order");
         }
 
     }

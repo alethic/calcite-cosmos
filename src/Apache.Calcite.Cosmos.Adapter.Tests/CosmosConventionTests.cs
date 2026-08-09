@@ -1,4 +1,4 @@
-using System.Linq;
+﻿using System.Linq;
 
 using Apache.Calcite.Cosmos.Adapter.Metadata;
 
@@ -47,21 +47,55 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests
             CosmosRules.GetRules(convention).Should().NotBeEmpty();
         }
 
+        /// <summary>
+        /// Nothing is converted <em>into</em> the Cosmos convention that Cosmos cannot express.
+        /// </summary>
         /// <remarks>
-        /// Joins, set operations, and values have no Cosmos equivalent. Their absence is a design
-        /// commitment, not an omission.
+        /// <para>
+        /// Joins, set operations and values have no Cosmos equivalent, and their absence is a design
+        /// commitment rather than an omission. The check is on the out-convention rather than on the
+        /// rule's name, because a name says what a rule is about and the convention says what it
+        /// promises the service can run.
+        /// </para>
+        /// <para>
+        /// <c>CosmosLookupJoinRule</c> is the reason that distinction now matters. It is a join rule,
+        /// and it converts into <c>ClrAsyncEnumerableConvention</c> — the join is still performed
+        /// outside the service, and what reaches the statement is only a restriction to the keys the
+        /// other side has. A rule converting a join <em>into</em> the Cosmos convention would be
+        /// claiming the service can join, which it cannot.
+        /// </para>
         /// </remarks>
         [TestMethod]
-        public void NoJoinOrSetOperationRulesAreRegistered()
+        public void NothingInexpressibleIsConvertedIntoTheConvention()
         {
             var convention = CosmosConvention.Create(new CosmosContainerMetadata("products"));
-            var names = CosmosRules.GetRules(convention).Select(x => x.GetType().Name).ToList();
 
-            names.Should().NotContain(x => x.Contains("Join"));
-            names.Should().NotContain(x => x.Contains("Union"));
-            names.Should().NotContain(x => x.Contains("Intersect"));
-            names.Should().NotContain(x => x.Contains("Minus"));
-            names.Should().NotContain(x => x.Contains("Values"));
+            var into = CosmosRules.GetRules(convention)
+                .OfType<org.apache.calcite.rel.convert.ConverterRule>()
+                .Where(x => ReferenceEquals(x.getOutConvention(), convention))
+                .Select(x => x.GetType().Name)
+                .ToList();
+
+            into.Should().NotBeEmpty("the convention is reached by rules, so an empty list would mean the check is vacuous");
+
+            foreach (var forbidden in new[] { "Join", "Union", "Intersect", "Minus", "Values" })
+                into.Should().NotContain(x => x.Contains(forbidden), "{0} has no Cosmos equivalent", forbidden);
+        }
+
+        /// <remarks>
+        /// The lookup join leaves the convention, exactly as the converter does, and for the same
+        /// reason: below it is a statement, above it are rows.
+        /// </remarks>
+        [TestMethod]
+        public void TheLookupJoinConvertsOutOfTheConvention()
+        {
+            var convention = CosmosConvention.Create(new CosmosContainerMetadata("products"));
+
+            var rule = CosmosRules.GetRules(convention)
+                .OfType<Adapter.Rel.Convert.CosmosLookupJoinRule>()
+                .Should().ContainSingle().Subject;
+
+            rule.getOutConvention().Should().BeSameAs(Apache.Calcite.Extensions.Adapter.AsyncEnumerable.ClrAsyncEnumerableConvention.Instance);
         }
 
     }
