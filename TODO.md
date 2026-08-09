@@ -6,6 +6,11 @@ rather than a list.
 **Sizes.** *Small* is a translator case and a test. *Medium* is a node, a rule, or an SDK surface.
 *Large* needs a design decision recorded in `DESIGN.md` before any code.
 
+**On finishing.** When an item is done, remove it — the entry, its rationale, and any *done* marker
+elsewhere in this file. This file holds only work still to be done; what was decided belongs in
+`DESIGN.md`, what was built is visible in the code and its tests, and history lives in git. A *done*
+paragraph kept here is a second copy of one of those, aging independently.
+
 **On testing a change.** Before believing a test covers what it claims, check that it *fails without
 the change*. This caught two things in one session: a filter-split test that genuinely depended on
 its fix, and a guard added to `CosmosSortRule` that turned out to be dead code — the case it guarded
@@ -110,10 +115,10 @@ nothing exercised the model path.
 Everything small is done. Each of these is larger, and each has a stated prerequisite rather than an
 open question:
 
-1. **`UPDATE` as a patch** (section 3) — the adapter now writes, and this is the hole left in that.
-   The planner already supplies the `SET` list separately from the rows, so the work is the
-   translation and the one decision it turns on: what `SET "_MAP" = …` means, a patch having no
-   operation that replaces a whole document.
+1. **The declared-columns decision** (section 6) — not work but a call to make, and three items
+   queue behind it: the `UPDATE` patch tier, the nullable-aggregate rewrite, and a temporal basis.
+   The implementation is parked on `declared-columns-parked`; the design is in `DESIGN.md` under
+   *Declared columns* on that branch.
 2. **Shuffle the build side by partition key** (section 11) — the biggest remaining win for the lookup
    join, but measure first: routing per key means one request per distinct key, and whether that beats
    one cross-partition query depends on key count against partition count. Grouping by feed range is
@@ -308,27 +313,19 @@ Still open: the whole-partition case. A predicate pinning only the partition key
 `DeleteAllItemsByPartitionKeyStreamAsync`, which is not a query at all — `SupportsDeletePushDown` in
 section 11.
 
-### `UPDATE` — *large, and the next thing here*
+### `UPDATE` — *replace is done; the patch tier waits on declared columns*
 
-Cosmos has patch operations (`PatchItemAsync`) that map onto a targeted `SET`, and replace for the
-rest. A patch is far cheaper than a read-modify-write and expresses a bounded set of operations, so the
-translation from `SET` clauses to patch operations is the interesting part.
+`SET "_MAP" = …` — whole-document assignment, which is what SQL's whole-value semantics say — now
+executes as a replace: the scan identifies the target, the trailing `SET` value is the new
+document, and a `SET` naming `id` or a partition key column is declined at planning, identity and
+placement not being the statement's to change. The design ladder — replace, patch, static
+decomposition via a mutation operator, and the diff/blind-patch optimizations — is recorded in
+`DESIGN.md` under *Updating*.
 
-**The planner already hands over what a patch needs**, which is the part worth knowing before
-starting: the node carries `updateColumnList` and `sourceExpressionList` — named columns and their new
-values — separately from the rows. Observed, and pinned by a test:
-
-```
-LogicalTableModify(operation=[UPDATE], updateColumnList=[[category]], sourceExpressionList=[[$5]])
-  LogicalProject(_MAP=[$0], id=[$1], _ts=[$2], _etag=[$3], category=[$4], EXPR$0=['x'])
-```
-
-The question to settle first is what `SET "_MAP" = …` means. A patch expresses a bounded set of
-operations over paths, and setting the whole document is not one of them — so the map column is either
-refused as a patch target or falls back to a replace, and those are different costs rather than
-different spellings. Until then `UPDATE` is declined outright and the plan fails, which is the right
-answer for a statement the adapter cannot carry out: a replace standing in for a patch would work, and
-would silently cost a read-modify-write per row.
+What remains is the cheap tier: a targeted `SET` of a plain document property as `PatchItemAsync`.
+Its targets are declared columns, which are designed, built, and **parked on
+`declared-columns-parked` pending the owner's decision** — the patch tier is one rule-and-writer
+step once that lands.
 
 ### Transactional batch — *medium*
 
@@ -559,6 +556,14 @@ which is declined — but they now at least reduce to something implementable.
 
 ## 6. Row model and types
 
+- **Declared columns — *built, and parked pending the owner's decision*.** A caller-declared, typed
+  document path promoted to a real column, via a `columns` operand — trusted the way a partition
+  key path is, never inferred. Three items converge on it: the `UPDATE` patch tier (section 3), the
+  nullable-aggregate rewrite (section 5), and a temporal basis (section 4). The implementation —
+  operand, metadata, row typing, the `CAST`-folding the typed columns forced, and tests — sits on
+  the `declared-columns-parked` branch, held there deliberately: it is a new public surface, and
+  whether the adapter should have it, and in this shape, is the owner's call. Take the branch, ask
+  for a different shape, or drop it; nothing else depends on it yet.
 - **Type coverage** — done and verified against a live account: strings, whole and fractional numbers,
   booleans, nulls, objects, arrays, to arbitrary depth, as declared types and as `ANY`.
 - **Binary** — *small.* `BINARY`/`VARBINARY` read base64 from a JSON string. Unverified against the

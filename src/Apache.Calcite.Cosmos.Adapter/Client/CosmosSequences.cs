@@ -130,12 +130,74 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
                             break;
                         }
 
+                    case CosmosWriteOperation.Update:
+                        {
+                            // The document just built is the OLD one — the row's table columns hold
+                            // what the scan read — and it is what identifies the target: the id, and
+                            // the partition key, which a replace cannot change.
+                            if (CosmosDocument.Read(document.RootElement, "/" + Metadata.CosmosContainerMetadata.IdPropertyName) is not string id)
+                                throw new CosmosExecutionException("A row being updated carries no 'id', so the document it names cannot be identified.");
+
+                            var replacement = CosmosDocument.Build(write.ColumnNames, ApplySets(write, fields(row)));
+
+                            if (await writer.ReplaceItemAsync(replacement, id, partitionKey, cancellationToken).ConfigureAwait(false))
+                                affected++;
+
+                            break;
+                        }
+
                     default:
                         throw new CosmosExecutionException($"No write is defined for operation '{write.Operation}'.");
                 }
             }
 
             yield return result(affected);
+        }
+
+        /// <summary>
+        /// Produces the values describing the replacement document: the old row with each
+        /// <c>SET</c> column's value substituted from the trailing positions the planner appends.
+        /// </summary>
+        /// <remarks>
+        /// Where the map column is itself being set, the other columns' old values are withheld
+        /// rather than substituted: the document builder lets a non-null promoted column override
+        /// the map's entry, which is right for an insert describing one document, and wrong here —
+        /// it would silently write old values over whatever the new map says. The one deliberate
+        /// exception is <c>id</c>: identity is not the statement's to change, and keeping the old
+        /// value makes a new map that omits it still describe the same document — while a new map
+        /// that <em>contradicts</em> it produces a body the service rejects loudly, which is the
+        /// correct fate for an update trying to rename a document.
+        /// </remarks>
+        static object?[] ApplySets(CosmosWrite write, object?[] values)
+        {
+            var updates = write.UpdateColumnNames
+                ?? throw new CosmosExecutionException("An update carries no SET columns.");
+
+            var count = write.ColumnNames.Length;
+            var updated = new object?[count];
+            Array.Copy(values, updated, Math.Min(count, values.Length));
+
+            var mapSet = Array.IndexOf(updates, CosmosImplementor.MapColumnName) >= 0;
+            if (mapSet)
+                for (var i = 0; i < count; i++)
+                    if (i != CosmosImplementor.MapColumnOrdinal &&
+                        Array.IndexOf(updates, write.ColumnNames[i]) < 0 &&
+                        string.Equals(write.ColumnNames[i], Metadata.CosmosContainerMetadata.IdPropertyName, StringComparison.Ordinal) == false)
+                        updated[i] = null;
+
+            for (var j = 0; j < updates.Length; j++)
+            {
+                var ordinal = Array.IndexOf(write.ColumnNames, updates[j]);
+                if (ordinal < 0)
+                    throw new CosmosExecutionException($"The SET column '{updates[j]}' is not a column of the table.");
+
+                if (count + j >= values.Length)
+                    throw new CosmosExecutionException($"The row carries no value for the SET column '{updates[j]}'.");
+
+                updated[ordinal] = values[count + j];
+            }
+
+            return updated;
         }
 
         /// <summary>

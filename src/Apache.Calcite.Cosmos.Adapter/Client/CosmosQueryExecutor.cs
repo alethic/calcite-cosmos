@@ -289,6 +289,31 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
             return true;
         }
 
+        /// <inheritdoc />
+        public async Task<bool> ReplaceItemAsync(byte[] document, string id, PartitionKey partitionKey, CancellationToken cancellationToken = default)
+        {
+            if (document is null)
+                throw new ArgumentNullException(nameof(document));
+            if (id is null)
+                throw new ArgumentNullException(nameof(id));
+
+            using var stream = new System.IO.MemoryStream(document, writable: false);
+            using var response = await _container.ReplaceItemStreamAsync(stream, id, partitionKey, cancellationToken: cancellationToken).ConfigureAwait(false);
+
+            Report(response.Headers.RequestCharge, CosmosInstrumentation.Kinds.Write);
+
+            // As for a delete: the rows were read before they were replaced, so a document that is
+            // gone by the time the replace arrives was deleted by someone else, and a smaller count
+            // is the honest answer rather than an error.
+            if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+                return false;
+
+            if (response.IsSuccessStatusCode == false)
+                throw new CosmosExecutionException($"Replacing document '{id}' in '{_container.Id}' failed with {(int)response.StatusCode} {response.StatusCode}. {response.ErrorMessage}".TrimEnd());
+
+            return true;
+        }
+
     }
 
 }

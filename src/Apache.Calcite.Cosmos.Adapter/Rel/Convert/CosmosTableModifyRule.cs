@@ -1,3 +1,5 @@
+using System;
+
 using Apache.Calcite.Cosmos.Adapter.Client;
 
 using Apache.Calcite.Extensions.Adapter.AsyncEnumerable;
@@ -26,11 +28,13 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
     /// <see cref="CosmosColumnStrategies"/>.
     /// </para>
     /// <para>
-    /// <c>INSERT</c> and <c>DELETE</c> only. <c>UPDATE</c> and <c>MERGE</c> are declined rather than
-    /// approximated: an update maps onto <c>PatchItemAsync</c>, whose translation from <c>SET</c> clauses
-    /// is real work, and a replace standing in for it would silently cost a read-modify-write per row.
-    /// A declined modify has no other implementation, so the plan fails rather than doing something
-    /// else — which is the correct outcome for a statement the adapter cannot carry out.
+    /// <c>INSERT</c>, <c>DELETE</c>, and <c>UPDATE</c> — the last carried as a whole-document
+    /// replace, which is what SQL's whole-value assignment says, priced as what it is. What is
+    /// declined is an <c>UPDATE</c> whose <c>SET</c> names the <c>id</c> or a partition key column:
+    /// identity and placement are not the statement's to change — the service forbids both — and a
+    /// declined modify has no other implementation, so the plan fails rather than doing something
+    /// else. <c>MERGE</c> is declined whole. The cheaper carriage of a targeted <c>SET</c> as a
+    /// patch is recorded in <c>DESIGN.md</c> under <em>Updating</em> and not yet taken.
     /// </para>
     /// </remarks>
     public class CosmosTableModifyRule : ConverterRule
@@ -50,6 +54,9 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
             if (operation == TableModify.Operation.DELETE)
                 return CosmosWriteOperation.Delete;
 
+            if (operation == TableModify.Operation.UPDATE)
+                return CosmosWriteOperation.Update;
+
             return null;
         }
 
@@ -58,8 +65,46 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
         /// </summary>
         static bool IsWritable(TableModify modify)
         {
-            return GetWrite(modify) is not null
-                && modify.getTable()?.unwrap(typeof(CosmosTable)) is CosmosTable;
+            if (modify.getTable()?.unwrap(typeof(CosmosTable)) is not CosmosTable table)
+                return false;
+
+            if (GetWrite(modify) is not CosmosWriteOperation write)
+                return false;
+
+            return write != CosmosWriteOperation.Update || SetsOnlyMutableColumns(modify, table);
+        }
+
+        /// <summary>
+        /// Determines whether every column an <c>UPDATE</c> sets is one a replace may change.
+        /// </summary>
+        /// <remarks>
+        /// <c>id</c> is identity and a partition key is placement; the service forbids changing
+        /// either on an existing document, so a <c>SET</c> naming one is refused here, where the
+        /// refusal is a plan that fails, rather than at the service, where it would be a request
+        /// that fails per row. The map column may still <em>carry</em> a different identity or
+        /// placement inside its value — that cannot be seen at plan time, and the service rejects
+        /// the resulting request loudly.
+        /// </remarks>
+        static bool SetsOnlyMutableColumns(TableModify modify, CosmosTable table)
+        {
+            var columns = modify.getUpdateColumnList();
+            if (columns is null || columns.size() == 0)
+                return false;
+
+            for (var i = 0; i < columns.size(); i++)
+            {
+                if (columns.get(i)?.ToString() is not string name)
+                    return false;
+
+                if (string.Equals(name, Metadata.CosmosContainerMetadata.IdPropertyName, StringComparison.Ordinal))
+                    return false;
+
+                foreach (var path in table.Container.PartitionKeyPaths)
+                    if (string.Equals(path.TrimStart('/'), name, StringComparison.Ordinal))
+                        return false;
+            }
+
+            return true;
         }
 
         /// <summary>
