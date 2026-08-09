@@ -484,20 +484,23 @@ only the calls, so an aggregate above another aggregate — reachable by plain S
 — converted and then threw at `Implement` time, after the plan was chosen. The rule now binds its
 input with `TryBindOutput` the way `CosmosSortRule` does and requires every grouping key and argument
 to resolve to a document path, so an unbindable input — another aggregate, a computed projection, an
-unnested element — declines at match time. **Still open, same shape, narrower:** `TryBindOutput`
-passes through `Sort`, so an aggregate above a pushed row limit
-(`SELECT COUNT(*) FROM (… LIMIT 5)`) still converts and still throws at `Implement` rather than
-declining — *small*, needs the binding walk to report the limit or the rule to check for one.
+unnested element — declines at match time. The narrower shape is closed too: binding passes through
+`Sort`, so the rule checks for one on the same walk and declines an aggregate above a pushed row
+limit or ordering — probed first, and the planner did choose the invalid plan before the check.
 
 **Which built-in rules belong in `CosmosRules` at all.** The registration principle the expansion
 settled: a Calcite core rewrite is registered per convention only when it produces a shape that
 unlocks a pushdown this convention could not otherwise reach, and a bare Volcano host — the
 documented integration mode — would silently lack. General logical optimisation belongs to the host.
-By that test `AGGREGATE_EXPAND_DISTINCT_AGGREGATES` qualifies; `FILTER_AGGREGATE_TRANSPOSE` is the
-one other candidate — a `HAVING` on a grouping key is a filter above the aggregate, which the filter
-rule cannot bind, and transposing it below would let it push as a `WHERE` — *small, unmeasured*;
-`AGGREGATE_REDUCE_FUNCTIONS` does not qualify yet, because decomposing `AVG` buys nothing (native)
-and decomposing `STDDEV`/`VAR` needs a computed projection below the aggregate, which is declined.
+By that test `AGGREGATE_EXPAND_DISTINCT_AGGREGATES` qualifies, and `FILTER_AGGREGATE_TRANSPOSE` —
+now registered too — turns a `HAVING` on a grouping key into a `WHERE` at the service, partition-key
+recovery included. Taking it surfaced that `CosmosFilter` refused every filter above a pushed
+projection, which contradicted the per-ordinal binding `CosmosProject` records: the refusal is now
+per-reference — a predicate over plain paths renders, one reading a computed column is declined by
+the translation — and the `WHERE` + `GROUP BY` combination joined the acceptance forms the emulator
+executes. `AGGREGATE_REDUCE_FUNCTIONS` does not qualify yet, because decomposing `AVG` buys nothing
+(native) and decomposing `STDDEV`/`VAR` needs a computed projection below the aggregate, which is
+declined.
 
 ### Smaller rules
 

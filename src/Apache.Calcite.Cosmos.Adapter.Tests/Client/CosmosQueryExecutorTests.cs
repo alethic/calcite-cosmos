@@ -391,6 +391,14 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
                     b.SelectProperty("category", "c.category");
                     b.AddGroupBy("c.category");
                 }),
+                ("group by with where", b =>
+                {
+                    b.FlatProjection = true;
+                    b.SelectProperty("category", "c.category");
+                    b.SelectProperty("n", "COUNT(1)");
+                    b.AddGroupBy("c.category");
+                    b.Where = "c.category = \"bikes\"";
+                }),
                 ("unnest", b => { b.AddUnnest("t0", "c.tags"); b.SelectValue("t0"); }),
                 ("unnest with filter", b => { b.AddUnnest("t0", "c.tags"); b.SelectValue("t0"); b.Where = "t0 = \"steel\""; }),
                 ("unnest ordered by root", b => { b.AddUnnest("t0", "c.tags"); b.SelectValue("t0"); b.AddOrderBy("c.id", false); }),

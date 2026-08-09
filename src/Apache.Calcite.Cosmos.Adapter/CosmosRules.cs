@@ -73,6 +73,13 @@ namespace Apache.Calcite.Cosmos.Adapter
             // A static instance, so registering it once per convention registers it once.
             yield return org.apache.calcite.rel.rules.CoreRules.AGGREGATE_EXPAND_DISTINCT_AGGREGATES;
 
+            // The same reasoning: a HAVING on a grouping key is a filter above the aggregate, which
+            // the filter rule cannot bind — aggregate output has no document paths. Transposed
+            // below, it is an ordinary WHERE the service applies before grouping. A condition on an
+            // aggregated value does not transpose and stays outside, which is correct: Cosmos has
+            // no HAVING.
+            yield return org.apache.calcite.rel.rules.CoreRules.FILTER_AGGREGATE_TRANSPOSE;
+
             yield return CosmosFilterRule.Create(convention);
 
             // Partial pushdown: where only some of a predicate renders, the service still evaluates

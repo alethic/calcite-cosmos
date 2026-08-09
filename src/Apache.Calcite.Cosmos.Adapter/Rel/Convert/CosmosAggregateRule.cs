@@ -38,6 +38,13 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
             if (CosmosImplementor.TryBindOutput(aggregate.getInput(), out var fields) == false)
                 return false;
 
+            // Binding passes through a sort, but an aggregate cannot: Cosmos rejects GROUP BY with
+            // ORDER BY in one statement, and applies GROUP BY before OFFSET/LIMIT, so grouping above
+            // a pushed row restriction would group the container rather than the restriction. The
+            // same conditions implementation refuses, decided here instead.
+            if (ReadsThroughASort(aggregate.getInput()))
+                return false;
+
             var groupKeys = aggregate.getGroupSet().asList();
             for (var i = 0; i < groupKeys.size(); i++)
                 if (Resolves(fields, (java.lang.Integer)groupKeys.get(i)) == false)
@@ -65,6 +72,28 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
         {
             var index = ordinal.intValue();
             return index >= 0 && index < fields.Count && fields[index] is not null;
+        }
+
+        /// <summary>
+        /// Determines whether a sort lies on the path the aggregate's input binds through.
+        /// </summary>
+        /// <remarks>
+        /// The traversal mirrors <see cref="CosmosImplementor.TryBindOutput"/>: the same nodes are
+        /// passed through, so a sort this walk cannot see is a sort binding cannot see either.
+        /// </remarks>
+        static bool ReadsThroughASort(RelNode? node)
+        {
+            if (node is org.apache.calcite.plan.volcano.RelSubset subset)
+                node = subset.getOriginal() ?? subset.getBest();
+
+            return node switch
+            {
+                Sort => true,
+                Filter filter => ReadsThroughASort(filter.getInput()),
+                Project project => ReadsThroughASort(project.getInput()),
+                Correlate correlate => ReadsThroughASort(correlate.getLeft()),
+                _ => false,
+            };
         }
 
         /// <summary>

@@ -145,6 +145,22 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
         }
 
         /// <remarks>
+        /// <c>GROUP BY</c> is applied before <c>OFFSET</c>/<c>LIMIT</c> in Cosmos, so an aggregate
+        /// above a pushed row limit would group the whole container rather than the five rows. The
+        /// rule must decline and leave the count outside — before it did, the plan converted and
+        /// failed at implementation, after it was chosen.
+        /// </remarks>
+        [TestMethod]
+        public void AnAggregateAboveAPushedRowLimitIsNotPushed()
+        {
+            var plan = Plan("SELECT COUNT(*) AS n FROM (SELECT * FROM products LIMIT 5) AS g");
+
+            Find<CosmosAggregate>(plan).Should().BeNull("grouping happens before the limit at the service");
+            Find<CosmosSort>(plan).Should().NotBeNull("the limit itself is still pushed");
+            plan.getConvention().Should().Be(ClrAsyncEnumerableConvention.Instance);
+        }
+
+        /// <remarks>
         /// The guard the expansion depends on: aggregate output is not addressable as document
         /// paths, so an aggregate above a pushed aggregate must not itself convert — before the
         /// guard it passed the rule's predicate, which inspected only the calls, and failed at
