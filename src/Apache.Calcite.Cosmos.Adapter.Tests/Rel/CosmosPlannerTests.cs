@@ -449,6 +449,29 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
         }
 
         /// <summary>
+        /// SQL's own null tests observe absence, and a branch using one is not weakened either.
+        /// </summary>
+        /// <remarks>
+        /// <c>x IS NULL</c> renders as <c>(NOT IS_DEFINED(x) OR IS_NULL(x))</c>, so it is true where
+        /// the path is missing — but its Rex operator belongs to the standard table rather than to the
+        /// Cosmos family, so checking only the latter let it through. A branch containing one can be
+        /// true with the path absent, and weakening it to <c>IS_DEFINED</c> would have discarded
+        /// exactly those rows.
+        /// </remarks>
+        [TestMethod]
+        public void ABranchUsingSqlNullTestsIsNotWeakened()
+        {
+            var best = PlanToAsync(
+                "SELECT * FROM products AS c " +
+                "WHERE c.\"id\" = 'x' OR (c.\"category\" IS NULL AND INITCAP(c.\"_etag\") = 'X')");
+
+            var plan = Plan(best);
+
+            plan.Should().NotContain("CosmosFilter",
+                "a branch that can be true with the path absent implies nothing about definedness: " + plan);
+        }
+
+        /// <summary>
         /// A sort above a pushed aggregate stays in Calcite, and the aggregate still pushes.
         /// </summary>
         /// <remarks>

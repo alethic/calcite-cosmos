@@ -335,8 +335,12 @@ needlessly narrow — refusing every negated comparison.
 
 Also settled on the way: `= null` is a comparison, not a definedness test. Undefined is not null.
 
-Left open: whether any operator outside the `IS_*` family observes absence. Nothing else in the
-translated set looks like it, but it has not been enumerated.
+Enumerated after the fact, and it found one: **SQL's own null tests observe absence** and are not in
+the Cosmos family, because they are not Cosmos functions. `x IS NULL` renders as
+`(NOT IS_DEFINED(x) OR IS_NULL(x))`, true where the path is missing, and the `IS_TRUE` family
+collapses unknown to a definite boolean. Both are refused now, along with `IS DISTINCT FROM`. This
+was a live hole in the first version of the rule — a branch using one can be true with the path
+absent, so weakening it would have discarded exactly those rows.
 
 ### Smaller rules
 

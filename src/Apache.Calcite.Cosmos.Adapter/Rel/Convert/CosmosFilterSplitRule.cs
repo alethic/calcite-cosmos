@@ -7,6 +7,7 @@ using org.apache.calcite.plan;
 using org.apache.calcite.rel;
 using org.apache.calcite.rel.core;
 using org.apache.calcite.rex;
+using org.apache.calcite.sql;
 
 namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
 {
@@ -201,6 +202,26 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
 
             if (CosmosOperators.IsAbsenceObserving(call.getOperator()))
                 return true;
+
+            // SQL's own three-valued tests observe absence too, and they are not in the Cosmos family
+            // because they are not Cosmos functions. `x IS NULL` renders as
+            // `(NOT IS_DEFINED(x) OR IS_NULL(x))` -- true where the path is missing -- and the IS_TRUE
+            // family collapses unknown to a definite boolean, which is the same thing wearing a
+            // different hat. Missing these was a live soundness hole: a branch using one can be true
+            // with the path absent, so weakening it to IS_DEFINED would have lost exactly those rows.
+            switch (call.getKind()?.name())
+            {
+                case nameof(SqlKind.IS_NULL):
+                case nameof(SqlKind.IS_NOT_NULL):
+                case nameof(SqlKind.IS_TRUE):
+                case nameof(SqlKind.IS_NOT_TRUE):
+                case nameof(SqlKind.IS_FALSE):
+                case nameof(SqlKind.IS_NOT_FALSE):
+                case nameof(SqlKind.IS_UNKNOWN):
+                case nameof(SqlKind.IS_DISTINCT_FROM):
+                case nameof(SqlKind.IS_NOT_DISTINCT_FROM):
+                    return true;
+            }
 
             var operands = call.getOperands();
             for (var i = 0; i < operands.size(); i++)
