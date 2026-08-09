@@ -288,9 +288,13 @@ often such a thing.
 ### Smaller rules
 
 - **Filter splitting above a projection** — *done.* The rule matched `Filter` over `TableScan` only, so a projection between the two cost the whole pushdown rather than the untranslatable half of it. It now matches any input and finds the container by walking, which is what `Split` already did to bind the fields.
-- **Sorting above an aggregate** — *small.* `GROUP BY` and `ORDER BY` cannot coexist, so a sorted
-  aggregate declines entirely. The aggregate could push and the sort stay in Calcite, over what is by
-  then a small result.
+- **Sorting above an aggregate** — *already handled, now covered.* Cosmos rejects `GROUP BY` and
+  `ORDER BY` together, and it turns out the rule never could produce the combination:
+  `TryBindOutput` has no `Aggregate` case, so a sort over a pushed aggregate fails to bind and
+  `CosmosSortRule` declines. A guard added to the rule for this was dead code and was dropped —
+  probed by removing it, and the behaviour did not change. The aggregate pushes and the sort
+  stays in Calcite, which is the better plan anyway: it sorts one row per group rather than the
+  container. There is now a test saying so, which there was not.
 - **Unique key policy** — *small.* Declared unique keys are keys `getStatistic` does not report.
 - **Computed properties** — *medium.* A container can declare named, queryable, indexable computed
   paths. Declared metadata is the one kind this adapter trusts, so they should promote to real columns

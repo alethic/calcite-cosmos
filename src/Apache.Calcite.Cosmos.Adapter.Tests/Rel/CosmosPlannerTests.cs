@@ -406,6 +406,26 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
         }
 
         /// <summary>
+        /// A sort above a pushed aggregate stays in Calcite, and the aggregate still pushes.
+        /// </summary>
+        /// <remarks>
+        /// Cosmos rejects <c>GROUP BY</c> and <c>ORDER BY</c> in one statement. <c>CosmosSort</c>
+        /// refuses the combination when it renders, but refusing only there is too late — the rule
+        /// would already have produced a node the planner cannot implement, which fails rather than
+        /// planning something slower. Declining in the rule is also the better plan: the sort then runs
+        /// over one row per group instead of over the container.
+        /// </remarks>
+        [TestMethod]
+        public void ASortAboveAPushedAggregateStaysInCalcite()
+        {
+            var best = PlanToAsync("SELECT c.\"category\", COUNT(*) FROM products AS c GROUP BY c.\"category\" ORDER BY c.\"category\"");
+            var plan = Plan(best);
+
+            plan.Should().Contain("CosmosAggregate", "the grouping is still worth pushing: " + plan);
+            plan.Should().NotContain("CosmosSort", "Cosmos will not take ORDER BY alongside GROUP BY: " + plan);
+        }
+
+        /// <summary>
         /// The same split applies to a filter sitting above a projection.
         /// </summary>
         /// <remarks>
