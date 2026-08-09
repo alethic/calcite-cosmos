@@ -1,30 +1,31 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Data.Common;
 using System.Diagnostics;
 using System.Diagnostics.Metrics;
-using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 
 using Apache.Calcite.Cosmos.Adapter.Client;
 using Apache.Calcite.Data;
 
+using Spectre.Console;
+
 namespace Apache.Cosmos.Sample
 {
 
     /// <summary>
-    /// Joins a Cosmos DB container to a SQL Server table, through a view, in one SQL statement.
+    /// Joins a Cosmos DB container to a CSV file, through a view, in one SQL statement.
     /// </summary>
     /// <remarks>
     /// <para>
     /// Cosmos has no relational join — its <c>JOIN</c> cross-products a document with its own nested
     /// arrays — so a query spanning it and anything else has to be joined outside the service. The
-    /// interesting part is what that costs: the adapter takes the join keys from the SQL side and
+    /// interesting part is what that costs: the adapter takes the join keys from the other side and
     /// sends them with the statement, so only the documents that could match come back.
     /// </para>
     /// <para>
-    /// The sample prints every statement Cosmos was given, so the difference is visible rather than
-    /// claimed.
+    /// Every statement Cosmos is given is printed, so the difference is visible rather than claimed.
     /// </para>
     /// </remarks>
     static class Program
@@ -41,11 +42,11 @@ namespace Apache.Cosmos.Sample
                 // Printed as a chain, because the useful sentence is usually several causes down: a
                 // model failure surfaces as "error instantiating schema", and what actually went wrong
                 // is underneath it, sometimes on the Java side of the bridge.
-                Console.WriteLine();
-                Console.WriteLine("Failed:");
+                AnsiConsole.WriteLine();
+                AnsiConsole.Write(new Rule("[red]Failed[/]").LeftJustified().RuleStyle("red"));
 
                 for (var cause = e; cause is not null; cause = Next(cause))
-                    Console.WriteLine("  " + cause.GetType().Name + ": " + FirstLine(cause.Message));
+                    AnsiConsole.MarkupLine("  [red]{0}[/]: {1}", cause.GetType().Name, Markup.Escape(FirstLine(cause.Message)));
 
                 return 1;
             }
@@ -74,31 +75,49 @@ namespace Apache.Cosmos.Sample
 
         static async Task<int> RunAsync()
         {
-            Console.WriteLine("Apache Calcite — two adapters, one join");
-            Console.WriteLine(new string('=', 64));
-            Console.WriteLine();
+            AnsiConsole.Write(new FigletText("Calcite + Cosmos").Color(Color.Teal));
+            AnsiConsole.MarkupLine("[dim]Two adapters, one join, through a view.[/]");
+            AnsiConsole.WriteLine();
 
             if (await Sources.WhatIsMissingAsync() is string missing)
             {
-                Console.WriteLine(missing);
+                AnsiConsole.Write(new Panel(Markup.Escape(missing))
+                    .Header("[yellow]Not ready[/]")
+                    .BorderColor(Color.Yellow));
+
                 return 1;
             }
 
-            // A model names its schema factories by type name, resolved through IKVM. A .NET type
-            // needs the assembly-qualified form -- the bare namespace-qualified name does not resolve,
-            // and neither does the cli.-prefixed one Calcite's own loader would otherwise find.
-            // And a factory is only found if its assembly is loaded, which for a name that appears
-            // nowhere but in a JSON string means touching it. A discarded typeof() is not enough — the
-            // compiler can elide it — so both are reached through something with a runtime effect.
+            // A model names its schema factories by type name, resolved through IKVM, and a factory is
+            // only found if its assembly is loaded — which for a name appearing nowhere but in a JSON
+            // string means touching it here. A discarded typeof() is not enough, since the compiler can
+            // elide it, so both are reached through something with a runtime effect.
             _ = new Apache.Calcite.Cosmos.Adapter.CosmosSchemaFactory();
             _ = org.apache.calcite.adapter.csv.CsvSchemaFactory.INSTANCE;
 
-            var suppliers = Sources.EnsureCsv();
-            var documents = await Sources.EnsureCosmosAsync();
+            int suppliers = 0, documents = 0;
 
-            Console.WriteLine($"CSV       : {Sources.CsvDirectory} — {suppliers} supplier rows");
-            Console.WriteLine($"Cosmos DB : {Sources.Database}/products — {documents} documents");
-            Console.WriteLine();
+            await AnsiConsole.Status()
+                .Spinner(Spinner.Known.Dots)
+                .StartAsync("Seeding both sources…", async _ =>
+                {
+                    suppliers = Sources.EnsureCsv();
+                    documents = await Sources.EnsureCosmosAsync();
+                });
+
+            var sources = new Table()
+                .Border(TableBorder.Rounded)
+                .BorderColor(Color.Grey)
+                .AddColumn(new TableColumn("[bold]Source[/]"))
+                .AddColumn(new TableColumn("[bold]Adapter[/]"))
+                .AddColumn(new TableColumn("[bold]Holds[/]"));
+
+            sources.AddRow("[teal]SUPPLIERS[/]", "Calcite CSV", $"{suppliers} rows");
+            sources.AddRow("[teal]COSMOS[/]", "Apache.Calcite.Cosmos.Adapter", $"{documents} documents");
+            sources.AddRow("[teal]SALES[/]", "[dim]a view over both[/]", "[dim]PRODUCT_SUPPLIERS[/]");
+
+            AnsiConsole.Write(sources);
+            AnsiConsole.WriteLine();
 
             using var watcher = new CosmosWatcher();
 
@@ -119,7 +138,7 @@ namespace Apache.Cosmos.Sample
                 """SELECT "id", "category" FROM "COSMOS"."products" ORDER BY "id" """);
 
             await Section(connection, watcher,
-                "The view, joined across both engines",
+                "The view — joined across both adapters",
                 """SELECT * FROM "SALES"."PRODUCT_SUPPLIERS" ORDER BY "PRODUCT" """);
 
             await Section(connection, watcher,
@@ -127,87 +146,91 @@ namespace Apache.Cosmos.Sample
                 """SELECT "PRODUCT", "SUPPLIER", "PRICE" FROM "SALES"."PRODUCT_SUPPLIERS" WHERE "PRICE" > 1000""");
 
             await Section(connection, watcher,
-                "An aggregate, grouped by a column each side contributes to",
+                "An aggregate over columns both sides contribute to",
                 """SELECT "SUPPLIER", COUNT(*) AS "LINES", SUM("PRICE") AS "TOTAL" FROM "SALES"."PRODUCT_SUPPLIERS" GROUP BY "SUPPLIER" ORDER BY "SUPPLIER" """);
 
-            Console.WriteLine();
-            Console.WriteLine($"Cosmos was asked {watcher.Statements} time(s) for {watcher.Charge:0.##} RU in total.");
-            Console.WriteLine("The container holds six documents; the supplier table names three of them.");
+            AnsiConsole.Write(new Panel(new Markup(
+                    $"Cosmos was asked [bold]{watcher.Statements}[/] time(s) for [bold]{watcher.Charge:0.##}[/] RU in total.\n" +
+                    $"The container holds [bold]{documents}[/] documents; the supplier file names [bold]{suppliers}[/] of them.\n\n" +
+                    "[dim]Every statement above carries the other side's keys, so the service filters\n" +
+                    "the container instead of handing it over to be filtered here.[/]"))
+                .Header("[teal]What it cost[/]")
+                .BorderColor(Color.Teal)
+                .Padding(1, 0));
 
             return 0;
         }
 
         /// <summary>
-        /// Runs one query, printing its rows and whatever it caused Cosmos to be asked.
+        /// Runs one query, showing its rows and whatever it caused Cosmos to be asked.
         /// </summary>
         static async Task Section(DbConnection connection, CosmosWatcher watcher, string title, string sql)
         {
-            Console.WriteLine(title);
-            Console.WriteLine(new string('-', title.Length));
-            Console.WriteLine(sql.Trim());
-            Console.WriteLine();
+            AnsiConsole.WriteLine();
+            AnsiConsole.Write(new Rule($"[bold teal]{title}[/]").LeftJustified().RuleStyle("grey"));
+            AnsiConsole.WriteLine();
+
+            AnsiConsole.Write(new Panel(new Markup($"[silver]{Markup.Escape(sql.Trim())}[/]"))
+                .Border(BoxBorder.None)
+                .Padding(2, 0));
+
+            AnsiConsole.WriteLine();
 
             watcher.Clear();
 
             await using var command = connection.CreateCommand();
             command.CommandText = sql;
 
+            var table = new Table()
+                .Border(TableBorder.Rounded)
+                .BorderColor(Color.Grey);
+
+            var count = 0;
+
             await using (var reader = await command.ExecuteReaderAsync())
             {
-                var widths = new int[reader.FieldCount];
-                var rows = new List<string[]>();
-                var header = new string[reader.FieldCount];
-
                 for (var i = 0; i < reader.FieldCount; i++)
-                {
-                    header[i] = reader.GetName(i);
-                    widths[i] = header[i].Length;
-                }
+                    table.AddColumn(new TableColumn($"[bold]{Markup.Escape(reader.GetName(i))}[/]"));
 
                 while (await reader.ReadAsync())
                 {
                     var row = new string[reader.FieldCount];
                     for (var i = 0; i < reader.FieldCount; i++)
-                    {
-                        row[i] = reader.IsDBNull(i) ? "" : reader.GetValue(i)?.ToString() ?? "";
-                        widths[i] = Math.Max(widths[i], row[i].Length);
-                    }
+                        row[i] = reader.IsDBNull(i) ? "[dim]∅[/]" : Markup.Escape(reader.GetValue(i)?.ToString() ?? "");
 
-                    rows.Add(row);
+                    table.AddRow(row);
+                    count++;
                 }
-
-                Console.WriteLine("  " + Row(header, widths));
-                Console.WriteLine("  " + Rule(widths));
-
-                foreach (var row in rows)
-                    Console.WriteLine("  " + Row(row, widths));
-
-                Console.WriteLine();
-                Console.WriteLine($"  {rows.Count} row(s)");
             }
 
+            AnsiConsole.Write(table);
+            AnsiConsole.MarkupLine("  [dim]{0} row(s)[/]", count);
+
             foreach (var statement in watcher.Drain())
-                Console.WriteLine("  cosmos ▸ " + statement);
-
-            Console.WriteLine();
+            {
+                AnsiConsole.WriteLine();
+                AnsiConsole.Write(new Panel(new Markup($"[green]{Markup.Escape(Abbreviate(statement))}[/]"))
+                    .Header("[dim]sent to Cosmos[/]")
+                    .BorderColor(Color.Grey35)
+                    .Padding(1, 0));
+            }
         }
 
-        static string Row(string[] values, int[] widths)
+        /// <summary>
+        /// Collapses the lookup join's key parameters, which are numerous and all alike.
+        /// </summary>
+        /// <remarks>
+        /// The statement carries one parameter per batch slot because it is rendered once and run per
+        /// batch. A hundred of them says nothing a reader does not learn from the first and the last,
+        /// and the count is kept so the abbreviation is not mistaken for the statement.
+        /// </remarks>
+        static string Abbreviate(string sql)
         {
-            var parts = new string[values.Length];
-            for (var i = 0; i < values.Length; i++)
-                parts[i] = values[i].PadRight(widths[i]);
-
-            return string.Join("  ", parts);
-        }
-
-        static string Rule(int[] widths)
-        {
-            var parts = new string[widths.Length];
-            for (var i = 0; i < widths.Length; i++)
-                parts[i] = new string('-', widths[i]);
-
-            return string.Join("  ", parts);
+            return Regex.Replace(sql, @"@k0(, @k\d+){3,}", match =>
+            {
+                var count = match.Value.Split(',').Length;
+                return $"@k0, … , @k{count - 1}   /* {count} keys */";
+            });
         }
 
         /// <summary>
@@ -215,9 +238,15 @@ namespace Apache.Cosmos.Sample
         /// </summary>
         /// <remarks>
         /// <para>
-        /// <c>SQL</c> reaches SQL Server through ADO.NET and <c>COSMOS</c> reaches the emulator.
-        /// <c>SALES</c> is an ordinary schema holding nothing but a view, which is where the two meet —
-        /// a caller querying <c>PRODUCT_SUPPLIERS</c> never names either source.
+        /// <c>SUPPLIERS</c> is Calcite's CSV adapter over a directory and <c>COSMOS</c> is this adapter
+        /// over the emulator. <c>SALES</c> is an ordinary schema holding nothing but a view, which is
+        /// where the two meet — a caller querying <c>PRODUCT_SUPPLIERS</c> never names either source.
+        /// </para>
+        /// <para>
+        /// <b>Both factories are named assembly-qualified, and that is not optional.</b> The names are
+        /// resolved through IKVM, where a bare namespace-qualified name finds nothing — for the .NET
+        /// factory and for the Java one alike, since the CSV adapter lives in its own assembly rather
+        /// than in calcite-core.
         /// </para>
         /// <para>
         /// The join is on the product id rather than the category, and that is not incidental. The id

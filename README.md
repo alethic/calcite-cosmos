@@ -13,6 +13,12 @@ dotnet add package Apache.Calcite.Cosmos.Adapter
 dotnet add package Apache.Calcite.Data
 ```
 
+**The factory must be named assembly-qualified.** `Apache.Calcite.Cosmos.Adapter.CosmosSchemaFactory` on its own does not resolve — the name is looked up through IKVM, where a bare namespace-qualified .NET name finds nothing, and the failure reads `ClassNotFoundException` on a type your project plainly references. The assembly must also be loaded by the time the model is read; if nothing in your program mentions the adapter except that string, touch it first:
+
+```csharp
+_ = new Apache.Calcite.Cosmos.Adapter.CosmosSchemaFactory();
+```
+
 ## Signing in
 
 Give an `endpoint` and a `key` for key authentication, or **give the endpoint alone to authenticate with Microsoft Entra ID**:
@@ -46,7 +52,7 @@ const string model = """
   "schemas": [{
     "name": "COSMOS",
     "type": "custom",
-    "factory": "Apache.Calcite.Cosmos.Adapter.CosmosSchemaFactory",
+    "factory": "Apache.Calcite.Cosmos.Adapter.CosmosSchemaFactory, Apache.Calcite.Cosmos.Adapter",
     "operand": {
       "endpoint": "https://account.documents.azure.com:443/",
       "key": "…",

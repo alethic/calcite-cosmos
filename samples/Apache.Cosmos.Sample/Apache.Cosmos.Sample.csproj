@@ -17,6 +17,7 @@
     <ItemGroup>
         <!-- The ADO.NET provider: what turns a model into a DbConnection. -->
         <PackageReference Include="Apache.Calcite.Data" Version="2.0.0-pre.1" />
+        <PackageReference Include="Spectre.Console" Version="0.49.1" />
     </ItemGroup>
 
     <ItemGroup>

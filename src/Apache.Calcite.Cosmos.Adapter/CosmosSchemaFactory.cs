@@ -26,7 +26,7 @@ namespace Apache.Calcite.Cosmos.Adapter
     /// {
     ///   "name": "COSMOS",
     ///   "type": "custom",
-    ///   "factory": "Apache.Calcite.Cosmos.Adapter.CosmosSchemaFactory",
+    ///   "factory": "Apache.Calcite.Cosmos.Adapter.CosmosSchemaFactory, Apache.Calcite.Cosmos.Adapter",
     ///   "operand": {
     ///     "endpoint": "https://account.documents.azure.com:443/",
     ///     "key": "…",
