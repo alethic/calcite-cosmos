@@ -176,10 +176,10 @@ namespace Apache.Cosmos.Sample
 
             AnsiConsole.WriteLine();
 
-            if (Explain(connection, sql) is (string plan, string kind))
+            if (await Explain(connection, sql) is string plan)
             {
                 AnsiConsole.Write(new Panel(new Markup($"[blue]{Markup.Escape(plan)}[/]"))
-                    .Header($"[dim]{kind}[/]")
+                    .Header("[dim]how it will be answered[/]")
                     .BorderColor(Color.Grey35)
                     .Padding(1, 0));
 
@@ -240,60 +240,34 @@ namespace Apache.Cosmos.Sample
         /// Returns <c>null</c> rather than throwing where a statement cannot be explained, since a
         /// sample that dies describing a query it could have run would be a poor trade.
         /// </para>
-        /// </remarks>
-        /// <remarks>
         /// <para>
-        /// Anything touching Cosmos gets the logical plan, and the reason is a corner the provider has
-        /// not got an answer for. The convention a statement is planned into follows the method used to
-        /// run it — <c>ExecuteReader</c> asks for <c>ClrEnumerableConvention</c> and
-        /// <c>ExecuteReaderAsync</c> for <c>ClrAsyncEnumerableConvention</c> — and neither works here:
+        /// This showed the <em>logical</em> plan for anything touching Cosmos until
+        /// Apache.Calcite 2.0.0-pre.2, and the reason was a corner with no answer on either path. The
+        /// convention a statement is planned into follows the method used to run it —
+        /// <c>ExecuteReader</c> asks for <c>ClrEnumerableConvention</c> and <c>ExecuteReaderAsync</c>
+        /// for <c>ClrAsyncEnumerableConvention</c> — and neither worked: read asynchronously the
+        /// <c>EXPLAIN</c> was refused, its own result being the plan text rather than an asynchronous
+        /// node; read synchronously the <em>explained</em> query was planned into the synchronous
+        /// convention, which a Cosmos table had no converter into.
         /// </para>
-        /// <list type="bullet">
-        /// <item><description>
-        /// Read asynchronously, the <c>EXPLAIN</c> is refused, because its own result is the plan text —
-        /// a constant relation, not an asynchronous node.
-        /// </description></item>
-        /// <item><description>
-        /// Read synchronously, the <em>explained</em> query is planned into the synchronous convention,
-        /// which a Cosmos table has no converter into. "Not enough rules to produce a node with desired
-        /// properties: convention=CLR_ENUMERABLE."
-        /// </description></item>
-        /// </list>
         /// <para>
-        /// <c>WITHOUT IMPLEMENTATION</c> asks for no physical plan and so needs no convention, which is
-        /// why it is the fallback rather than the first choice. The statement printed after each result
-        /// is what the physical plan did — for a join, the more telling artefact anyway.
+        /// Both halves landed together: <c>ClrExplainBindable</c> now binds on either path, and the two
+        /// Clr conventions have a converter each way, so a Cosmos table reached from the synchronous
+        /// side converts rather than failing to plan. The physical tree is what prints now, and naming
+        /// <c>CosmosLookupJoin</c> is the whole point of printing it.
         /// </para>
         /// </remarks>
-        static (string Plan, string Kind)? Explain(DbConnection connection, string sql)
-        {
-            // The physical plan first, since that is the one that names CosmosLookupJoin. Where it
-            // cannot be had, the logical one still shows the shape of the query.
-            if (RunExplain(connection, "EXPLAIN PLAN FOR " + sql) is string physical)
-                return (physical, "how it will be answered");
-
-            if (RunExplain(connection, "EXPLAIN PLAN WITHOUT IMPLEMENTATION FOR " + sql) is string logical)
-                return (logical, "what was asked for [dim](logical plan only — see below)[/]");
-
-            return null;
-        }
-
-        /// <summary>
-        /// Runs one form of <c>EXPLAIN</c>, or returns <c>null</c> where it is refused.
-        /// </summary>
-        static string? RunExplain(DbConnection connection, string statement)
+        static async Task<string?> Explain(DbConnection connection, string sql)
         {
             try
             {
-                using var command = connection.CreateCommand();
-                command.CommandText = statement;
+                await using var command = connection.CreateCommand();
+                command.CommandText = "EXPLAIN PLAN FOR " + sql;
 
-                // Synchronously, because an EXPLAIN read asynchronously is refused: its rows are the
-                // plan text rather than anything an asynchronous plan produces.
-                using var reader = command.ExecuteReader();
+                await using var reader = await command.ExecuteReaderAsync();
 
                 var lines = new List<string>();
-                while (reader.Read())
+                while (await reader.ReadAsync())
                     lines.Add(reader.GetValue(0)?.ToString()?.TrimEnd() ?? "");
 
                 var plan = string.Join(Environment.NewLine, lines).Trim();
@@ -301,6 +275,8 @@ namespace Apache.Cosmos.Sample
             }
             catch (Exception)
             {
+                // Still swallowed, for the reason above: describing the query is worth less than
+                // running it, so a sample that cannot explain one should go on to answer it.
                 return null;
             }
         }

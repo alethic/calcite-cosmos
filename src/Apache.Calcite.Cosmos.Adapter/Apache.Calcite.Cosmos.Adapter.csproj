@@ -15,10 +15,14 @@
     </ItemGroup>
 
     <ItemGroup>
-        <PackageReference Include="Microsoft.Azure.Cosmos" Version="3.62.0" />
-        <PackageReference Include="Azure.Identity" Version="1.13.2" />
+        <PackageReference Include="Microsoft.Azure.Cosmos" Version="3.62.1" />
+        <!-- 1.21.0 is a facade: every type moved to Azure.Core and comes back through
+             TypeForwardedTo, which is why the package is 18KB and its only dependency is
+             Azure.Core. Nothing here changes — DefaultAzureCredential and its options are
+             among the forwarded types. -->
+        <PackageReference Include="Azure.Identity" Version="1.21.0" />
         <!-- Required by Microsoft.Azure.Cosmos, which fails the build without an explicit reference. -->
-        <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+        <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
     </ItemGroup>
 
     <ItemGroup>

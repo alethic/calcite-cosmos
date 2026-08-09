@@ -34,6 +34,21 @@ PR #2 and [PR #3](https://github.com/ikvmnet/calcite-cosmos/pull/3). The reposit
 statistics work, the Entra support and now `INSERT` and `DELETE` are complete and covered. What
 remains below is not started.
 
+**One thing here has not been built, and the next session should build it first.** The dependency
+update — Apache.Calcite to 2.0.0-pre.2, MSTest.Sdk to 4, Azure.Identity to 1.21.0, Spectre.Console to
+0.57.2, and the `EXPLAIN` rework the first of those allowed — was made in a container with no .NET SDK
+and no route to one, so every claim about it comes from reading package metadata rather than from a
+compile. What was checked that way: the whole public surface of Apache.Calcite pre.1 against pre.2,
+finding two removals and neither of them named here; `Assert.Inconclusive` is the only MSTest assertion
+this suite uses and it survives v4; `TestingPlatformShowTestsFailure` still exists in the testing
+platform v4 pins; `Color` moved to a new `Spectre.Console.Ansi` assembly but arrives transitively; and
+Azure.Identity 1.21.0 is a facade that forwards every type to `Azure.Core`. What that cannot tell
+anyone is whether it compiles and whether the sample now prints a physical plan. Two places to look
+first if something is wrong: the workflow's `dotnet test <dll> --logger:trx`, which is the VSTest
+command line and now needs the `Microsoft.NET.Test.Sdk` reference named in the test project because
+MSTest.Sdk 4 stopped supplying it; and `Explain` in the sample, which returns null on any exception
+and so would go quiet rather than fail loudly.
+
 ### Running the sample
 
 ```
@@ -45,17 +60,22 @@ seeds both sources and is safe to re-run. What it demonstrates is the lookup joi
 the CSV side's three product ids are pushed into Cosmos, so the container is filtered at the service
 rather than read whole.
 
-### Two things waiting on `ikvmnet/calcite-dotnet`
+### One thing still waiting on `ikvmnet/calcite-dotnet`
 
 - **[#24](https://github.com/ikvmnet/calcite-dotnet/issues/24) — the ADO.NET adapter cannot read SQL
   Server.** Its metadata read calls `GetInt32` on columns SQL Server types as `tinyint`, so every
   query against every table throws. The sample uses the CSV adapter instead; SQL Server is the better
   demonstration and switching back is a one-line change.
-- **`EXPLAIN` over an async-only table.** A pull request is open. Until it lands, the sample shows the
-  *logical* plan for anything touching Cosmos and says so. `EXPLAIN` produces a `ClrExplainResult`
-  rather than a plan, which the provider's async path rejects; the synchronous path plans the explained
-  query into `ClrEnumerableConvention`, which this adapter deliberately has no converter into. Once
-  fixed, the sample should show the physical tree — `CosmosLookupJoin` and all — and drop the fallback.
+
+**`EXPLAIN` over an async-only table is fixed**, by
+[PR #27](https://github.com/ikvmnet/calcite-dotnet/pull/27), released as Apache.Calcite
+2.0.0-pre.2 and taken here. Both halves of the corner closed at once: `ClrExplainBindable` binds on
+either path, so the asynchronous read no longer refuses a result that is plan text rather than an
+asynchronous node; and the two Clr conventions gained a converter each way, so the explained query
+planned into `ClrEnumerableConvention` converts instead of failing with *"not enough rules to produce
+a node with desired properties"*. The sample now asks for `EXPLAIN PLAN FOR` on the asynchronous path
+and prints the physical tree — `CosmosLookupJoin` and all — and the `WITHOUT IMPLEMENTATION` fallback
+is gone. Not run: see the note under *Resuming*.
 
 ### The one integration requirement this adapter adds
 
