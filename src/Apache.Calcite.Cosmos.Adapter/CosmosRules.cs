@@ -63,6 +63,16 @@ namespace Apache.Calcite.Cosmos.Adapter
                 throw new ArgumentNullException(nameof(convention));
 
             yield return CosmosAggregateRule.Create(convention);
+
+            // Not a conversion, and not Cosmos's: Calcite's own rewrite of COUNT(DISTINCT x) into an
+            // aggregate over an aggregate, registered because a bare Volcano planner has no logical
+            // rewrites at all. Its inner half is a plain GROUP BY the rule above can push, so the
+            // dedup happens at the service and one row per distinct value crosses the wire; the
+            // count finishes wherever the outer aggregate is implemented, which is never here — the
+            // aggregate rule declines an input it cannot bind, and aggregate output binds nothing.
+            // A static instance, so registering it once per convention registers it once.
+            yield return org.apache.calcite.rel.rules.CoreRules.AGGREGATE_EXPAND_DISTINCT_AGGREGATES;
+
             yield return CosmosFilterRule.Create(convention);
 
             // Partial pushdown: where only some of a predicate renders, the service still evaluates

@@ -289,8 +289,15 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             act.Should().Throw<Exception>();
         }
 
+        /// <remarks>
+        /// Not pushed <em>whole</em>: the registered expansion rewrites this into an aggregate over
+        /// an aggregate whose inner <c>GROUP BY</c> is pushable, but the finishing count has no
+        /// Cosmos rendering, and a planner asked for a wholly-Cosmos plan cannot produce one. The
+        /// partial form is covered in <see cref="CosmosPartialAggregatePlannerTests"/>, where there
+        /// is somewhere outside the convention for the count to live.
+        /// </remarks>
         [TestMethod]
-        public void DistinctAggregateIsNotPushedDown()
+        public void DistinctAggregateIsNotPushedDownWhole()
         {
             var act = () => PlanToCosmos("SELECT COUNT(DISTINCT c.\"id\") FROM products AS c");
 
