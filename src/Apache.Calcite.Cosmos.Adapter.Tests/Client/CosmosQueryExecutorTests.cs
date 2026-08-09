@@ -1155,6 +1155,71 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
                 "an IN over a hundred keys should use the index on the path it restricts: " + metrics);
         }
 
+        // ── Three-valued logic, which decides what a disjunction may be weakened to ──
+
+        /// <summary>Runs a predicate and returns the ids it matched.</summary>
+        static async Task<List<string>> Matching(string where)
+        {
+            var builder = Builder();
+            builder.Where = where;
+            builder.SelectValue("c.id");
+
+            var ids = new List<string>();
+            foreach (var element in await Execute(Query(builder)))
+                ids.Add(element.GetString()!);
+
+            ids.Sort(StringComparer.Ordinal);
+            return ids;
+        }
+
+        /// <summary>
+        /// What the service does with an undefined property, which decides which expressions imply a
+        /// path is defined.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// The prerequisite for weakening a disjunction. `a OR b` with `b` untranslatable can push
+        /// `a OR w` for any `w` that `b` implies, and `IS_DEFINED` of the paths `b` mentions is the
+        /// candidate — but only for expressions that cannot be true when the path is absent.
+        /// </para>
+        /// <para>
+        /// Document 4 has no <c>price</c>. Everything below turns on whether it comes back.
+        /// </para>
+        /// </remarks>
+        [TestMethod]
+        public async Task AnUndefinedPropertyIsNotReachedByAComparisonEvenUnderNot()
+        {
+            // The baseline: IS_DEFINED answers about absence, so its negation finds the absent one.
+            (await Matching("NOT IS_DEFINED(c.price)")).Should().Contain("4");
+
+            // A comparison on an absent property is undefined rather than false — so negating it does
+            // not make it true, and document 4 is not matched either way.
+            (await Matching("c.price > 5")).Should().NotContain("4");
+            (await Matching("NOT (c.price > 5)")).Should().NotContain("4",
+                "if NOT of an undefined comparison were true, negation would break the implication");
+
+            // Which is the finding: it is not polarity that decides, but whether the expression can
+            // observe absence. A comparison cannot, at either polarity; IS_DEFINED can.
+        }
+
+        /// <summary>
+        /// Whether <c>= null</c> is a comparison or a test for absence.
+        /// </summary>
+        /// <remarks>
+        /// The second thing a weakening needs to know. If <c>c.price = null</c> matched the document
+        /// without a <c>price</c>, it would be observing absence and could not imply the path is
+        /// defined.
+        /// </remarks>
+        [TestMethod]
+        public async Task NullIsNotUndefined()
+        {
+            (await Matching("c.price = null")).Should().NotContain("4",
+                "an absent property is undefined, which is not null");
+
+            (await Matching("NOT (c.price = null)")).Should().NotContain("4",
+                "and negating it does not reach the absent one either");
+        }
+
         // ── The composite index requirement ───────────────────────────────────────
 
         /// <summary>
