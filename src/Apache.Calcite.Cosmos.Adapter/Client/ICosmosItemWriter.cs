@@ -1,0 +1,50 @@
+using System.Threading;
+using System.Threading.Tasks;
+
+using Microsoft.Azure.Cosmos;
+
+namespace Apache.Calcite.Cosmos.Adapter.Client
+{
+
+    /// <summary>
+    /// Writes documents to a container.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Separate from <see cref="ICosmosQueryExecutor"/> rather than added to it, because they are
+    /// different capabilities and a deployment may have only the first. Something that can read a
+    /// container and cannot write one is a coherent thing to hand the adapter, and a caller that never
+    /// writes should not have to implement this to plan a query.
+    /// </para>
+    /// <para>
+    /// Item-at-a-time, and streaming. The SDK's bulk mode is a client option rather than an API, so a
+    /// client factory that sets <c>AllowBulkExecution</c> changes the throughput profile of these calls
+    /// without any of them changing.
+    /// </para>
+    /// </remarks>
+    public interface ICosmosItemWriter
+    {
+
+        /// <summary>
+        /// Creates a document.
+        /// </summary>
+        /// <param name="document">The document, as UTF-8 JSON.</param>
+        /// <param name="partitionKey">The partition key the document belongs to.</param>
+        /// <param name="cancellationToken">Cancels the request.</param>
+        /// <returns>A task that completes when the document has been written.</returns>
+        /// <exception cref="CosmosExecutionException">The service refused the document.</exception>
+        Task CreateItemAsync(byte[] document, PartitionKey partitionKey, CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Deletes a document.
+        /// </summary>
+        /// <param name="id">The document's <c>id</c>.</param>
+        /// <param name="partitionKey">The partition key the document belongs to.</param>
+        /// <param name="cancellationToken">Cancels the request.</param>
+        /// <returns><c>true</c> if a document was deleted, <c>false</c> if there was none to delete.</returns>
+        /// <exception cref="CosmosExecutionException">The service refused the request.</exception>
+        Task<bool> DeleteItemAsync(string id, PartitionKey partitionKey, CancellationToken cancellationToken = default);
+
+    }
+
+}

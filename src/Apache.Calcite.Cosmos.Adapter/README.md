@@ -89,7 +89,7 @@ Add `"indexMetrics": true` to the operand to have the service report which index
 
 ## Status
 
-Under development. Statement generation, container metadata, the schema and table layer, the scan/filter/project/sort/unnest/aggregate/rank nodes, and execution inside a Calcite plan are in place and tested. Every emitted statement form is executed against a live service, and the suite runs against a real account when `COSMOS_TEST_ENDPOINT` and `COSMOS_TEST_KEY` name one — which the emulator is not a substitute for, it having been found to accept statements the service rejects and reject features the service implements. See [DESIGN.md](DESIGN.md), including its record of assumptions still to be settled.
+Under development. Statement generation, container metadata, the schema and table layer, the scan/filter/project/sort/unnest/aggregate/rank nodes, and execution inside a Calcite plan are in place and tested. `INSERT` and `DELETE` are supported — Cosmos SQL has no DML, so a write is item CRUD over the rows a `TableModify` supplies rather than generated text; `UPDATE` is declined until it can be a patch rather than a read-modify-write. What an insert writes when the map column and a promoted column describe the same document is recorded in [DESIGN.md](DESIGN.md) under *What an insert writes*. Every emitted statement form is executed against a live service, and the suite runs against a real account when `COSMOS_TEST_ENDPOINT` and `COSMOS_TEST_KEY` name one — which the emulator is not a substitute for, it having been found to accept statements the service rejects and reject features the service implements. See [DESIGN.md](DESIGN.md), including its record of assumptions still to be settled.
 
 ## Further reading
 

@@ -70,6 +70,28 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
                 ?? throw new CosmosExecutionException($"Table '{name}' has no query executor, so its rows cannot be read. It was created from container metadata alone, without a Cosmos client.");
         }
 
+        /// <summary>
+        /// Returns what writes documents to the named table.
+        /// </summary>
+        /// <remarks>
+        /// The same walk as <see cref="GetExecutor"/>, asking for the other capability. They are separate
+        /// interfaces, so a table may be readable and not writable — an executor supplied by a caller who
+        /// implemented only <see cref="ICosmosQueryExecutor"/> is exactly that, and this is where it says
+        /// so rather than failing on the first document.
+        /// </remarks>
+        /// <param name="root">The context the statement is executing against.</param>
+        /// <param name="qualifiedName">The table's qualified name, schemas outermost first.</param>
+        /// <returns>The writer.</returns>
+        /// <exception cref="ArgumentNullException"><paramref name="root"/> or <paramref name="qualifiedName"/> is <c>null</c>.</exception>
+        /// <exception cref="CosmosExecutionException">The table is not reachable, or cannot be written to.</exception>
+        public static ICosmosItemWriter GetWriter(DataContext root, string[] qualifiedName)
+        {
+            var executor = GetExecutor(root, qualifiedName);
+
+            return executor as ICosmosItemWriter
+                ?? throw new CosmosExecutionException($"Table '{string.Join(".", qualifiedName)}' has a query executor that cannot write documents: {executor.GetType().Name} does not implement {nameof(ICosmosItemWriter)}.");
+        }
+
     }
 
 }

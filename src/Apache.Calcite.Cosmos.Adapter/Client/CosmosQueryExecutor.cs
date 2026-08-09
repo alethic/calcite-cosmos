@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Threading;
+using System.Threading.Tasks;
 
 using Apache.Calcite.Cosmos.Adapter.Sql;
 
@@ -14,7 +15,11 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
     /// <summary>
     /// An <see cref="ICosmosQueryExecutor"/> bound to a single container.
     /// </summary>
-    public sealed class CosmosQueryExecutor : ICosmosQueryExecutor
+    /// <remarks>
+    /// Also an <see cref="ICosmosItemWriter"/>. The two are separate interfaces because they are
+    /// separate capabilities, and one class because they are the same container.
+    /// </remarks>
+    public sealed class CosmosQueryExecutor : ICosmosQueryExecutor, ICosmosItemWriter
     {
 
         readonly Container _container;
@@ -242,6 +247,46 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
             // that the caller stopped reading.
             activity?.SetTag("cosmos.request_charge", charge);
             activity?.SetTag("cosmos.pages", pages);
+        }
+
+        /// <inheritdoc />
+        public async Task CreateItemAsync(byte[] document, PartitionKey partitionKey, CancellationToken cancellationToken = default)
+        {
+            if (document is null)
+                throw new ArgumentNullException(nameof(document));
+
+            using var stream = new System.IO.MemoryStream(document, writable: false);
+            using var response = await _container.CreateItemStreamAsync(stream, partitionKey, cancellationToken: cancellationToken).ConfigureAwait(false);
+
+            Report(response.Headers.RequestCharge, CosmosInstrumentation.Kinds.Write);
+
+            // Surfaced rather than let through as a raw SDK exception, because a conflict is the one
+            // failure a caller is likely to be handling deliberately: it is what INSERT means when a
+            // document with that id is already in the partition.
+            if (response.IsSuccessStatusCode == false)
+                throw new CosmosExecutionException($"Creating a document in '{_container.Id}' failed with {(int)response.StatusCode} {response.StatusCode}. {response.ErrorMessage}".TrimEnd());
+        }
+
+        /// <inheritdoc />
+        public async Task<bool> DeleteItemAsync(string id, PartitionKey partitionKey, CancellationToken cancellationToken = default)
+        {
+            if (id is null)
+                throw new ArgumentNullException(nameof(id));
+
+            using var response = await _container.DeleteItemStreamAsync(id, partitionKey, cancellationToken: cancellationToken).ConfigureAwait(false);
+
+            Report(response.Headers.RequestCharge, CosmosInstrumentation.Kinds.Write);
+
+            // Nothing to delete is not a failure. The rows were read before they were deleted, so a
+            // document that is gone by the time the delete arrives was deleted by someone else — and
+            // reporting a smaller count is the honest answer to that, rather than an error.
+            if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+                return false;
+
+            if (response.IsSuccessStatusCode == false)
+                throw new CosmosExecutionException($"Deleting document '{id}' from '{_container.Id}' failed with {(int)response.StatusCode} {response.StatusCode}. {response.ErrorMessage}".TrimEnd());
+
+            return true;
         }
 
     }

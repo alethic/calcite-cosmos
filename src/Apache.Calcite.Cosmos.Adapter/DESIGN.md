@@ -603,10 +603,14 @@ src/
     CosmosSchema.cs                   ✔ Calcite Schema over a database
     CosmosTable.cs                    ✔ Calcite Table over a container; Statistic
     CosmosSchemaFactory.cs            ✔ SchemaFactory for JSON model registration
+    CosmosColumnStrategies.cs         ✔ Which columns an INSERT may omit, and which it may not name
     Client/
-      CosmosQueryExecutor.cs          ✔ Executes a rendered statement via the Cosmos SDK
-      CosmosSequences.cs              ✔ The IAsyncEnumerable a compiled plan reads rows from
+      CosmosQueryExecutor.cs          ✔ Executes a rendered statement via the Cosmos SDK; writes items
+      CosmosSequences.cs              ✔ The IAsyncEnumerable a compiled plan reads rows from, and writes through
       CosmosJson.cs                   ✔ JSON value → the representation Calcite holds a value in
+      CosmosDocument.cs               ✔ The reverse: a row → the JSON document it describes
+      CosmosWrite.cs                  ✔ What a write does, decided while the plan is built
+      ICosmosItemWriter.cs            ✔ Creating and deleting documents
       CosmosSchemas.cs                ✔ Resolves the table's executor from the DataContext
       CosmosExecutionException.cs     ✔ The plan cannot reach what would execute it
       CosmosMaterializationException.cs ✔ A document does not hold what the query assumed
@@ -623,6 +627,8 @@ src/
       CosmosUnnest.cs                 ✔
       CosmosAggregate.cs              ✔
       CosmosRank.cs                   ✔ ORDER BY RANK, which subsumes the projection
+      CosmosLookupJoin.cs             ✔ Fetches only the documents another side's keys could match
+      CosmosTableModify.cs            ✔ INSERT and DELETE; not in the convention, having no statement
       Convert/                        ✔ One converter rule per node, and the one way out
     Sql/
       CosmosSql.cs                    ✔ Lexical primitives: identifiers, paths, JSON literals
@@ -710,6 +716,167 @@ A `CosmosTable` may hold no executor at all, which is what a table built from co
 alone is. Planning is unaffected — nothing about a statement or its cost depends on who runs it —
 and enumerating such a plan is what fails, saying so. Most of the test suite plans against tables in
 exactly that state.
+
+---
+
+## Writing
+
+**Cosmos SQL has no DML, and that is not a reason the adapter cannot write.** The query language has
+no `INSERT`, `UPDATE` or `DELETE`, but the SDK has item CRUD, and Calcite expresses a write as a
+`TableModify` node consuming rows rather than as generated SQL. So the write path shares nothing with
+the read path below the plan: no implementor, no statement, no `CosmosQuery`. Nothing here renders
+text.
+
+Which settles where the node lives. A subtree in `CosmosConvention` *is* a statement, and a write is
+not one, so `CosmosTableModify` is in `ClrAsyncEnumerableConvention` — a node whose input is rows and
+whose effect is a sequence of SDK calls. That makes it the same shape as `CosmosLookupJoin`: a node
+that knows about a container without being inside the convention that renders one.
+
+Two consequences worth stating because neither is obvious.
+
+**Neither Clr convention has a modify node**, so this is the first. Calcite's own
+`EnumerableTableModify` is not a model to copy: it writes through
+`ModifiableTable.getModifiableCollection()`, calling `Collection.add` and `Collection.remove` on
+whatever the table hands back. For Cosmos that collection would have to block on `CreateItemAsync`
+per element, which is the sync-over-async pull the asynchronous convention exists to keep out of a
+plan — at the leaf, where it is worst.
+
+**`ModifiableTable` is therefore not implemented, and is not needed.** Measured:
+`SqlToRelConverter.createModify` falls back to `LogicalTableModify.create` when the target unwraps to
+no `ModifiableTable`, and `DELETE` and `UPDATE` plan through that fallback unchanged. A rule matching
+`LogicalTableModify` over a Cosmos table is the whole entry point.
+
+### What an insert writes
+
+The row model makes this the real question. A document *is* the map column, and the promoted columns
+are paths within the same document, so an insert naming columns is describing one document twice over.
+
+**The document is `_MAP`. A promoted column sets the property it projects.** Where both are supplied
+the promoted column wins, which is the projection that produced it run backwards —
+`{…map, id: …}`. Refusing the overlap instead was considered and rejected: it would refuse
+`INSERT INTO t (_MAP, "id") SELECT doc, key FROM …`, which is the natural way to write a document
+whose id comes from somewhere else.
+
+**Promoted columns alone cannot describe a useful document, and that is why the map column is
+primary.** The promoted set is `id`, `_ts`, `_etag` and the partition key paths — nothing else is
+declared, so nothing else can be promoted. An insert restricted to them could only ever write
+`{id, category}`. Every real document has properties that are not promoted columns, and the map
+column is the only route to them.
+
+**A promoted column contributes its property only when the value is not null.** This is forced. An
+unmentioned column arrives as SQL `NULL`, so without this rule `INSERT INTO t (_MAP) VALUES (m)` would
+write `{…m, id: null, category: null}` and destroy the document it was given. The cost is that a
+promoted column cannot write a JSON null; the map column can, because a map distinguishes an absent
+key from a present one holding null. That is *undefined ≠ null* from the row model, resolved in the
+only direction that leaves the primary route working.
+
+**`_ts` and `_etag` cannot be written at all.** They are service-maintained, so a supplied value would
+be ignored. They are declared `ColumnStrategy.STORED`, and the validator then refuses to let one be
+named — `Cannot INSERT into generated column '_ts'` — rather than the adapter discovering it later or
+dropping it without comment.
+
+> **`STORED`, not `VIRTUAL`, and the difference is not cosmetic.** Both refuse a write. `VIRTUAL`
+> additionally means *not stored*: measured, it makes `RelOptTableImpl.toRel` drop the column from the
+> scan and project a literal null in its place, so `SELECT _ts` returns nothing the service holds.
+> Forty tests failed on it at once. The row type is identical either way, which is why the regression
+> guard asserts the *plan* rather than the type.
+
+**Nothing invents an `id`.** A document reaching the service without one is the service's business to
+accept or refuse, and guessing here would make the adapter the author of a key the caller did not
+choose.
+
+**The service's own properties are stripped from the document, wherever in it they appear.** `_ts`
+cannot be *named*, but it arrives inside the map column whenever one document is copied to another —
+which is what `INSERT INTO t (_MAP) SELECT "_MAP" FROM t2` hands over, and the obvious use of that
+statement. **Measured, and this is a decision rather than a requirement:** with the stripping removed
+a document carrying a bogus `_ts`, `_etag` and `_rid` was still accepted, and still came back with
+values the service had assigned. What stripping buys is that the document written is the document
+described — a new item does not silently carry another item's identity.
+
+### A map literal cannot be inserted
+
+`INSERT INTO t (_MAP) VALUES (MAP['id', 'x'])` fails in the validator, and the limitation is Calcite's:
+
+```
+java.lang.UnsupportedOperationException: Unsupported type when convertTypeToSpec: ANY
+```
+
+Implicit coercion casts the source row to the target row type, and building a `SqlDataTypeSpec` for
+`MAP<VARCHAR, ANY>` is unimplemented. An explicit `CAST` fails identically, for the same reason.
+
+Recorded rather than worked around, because the shape that does work is the more useful one: a source
+column already typed `MAP<VARCHAR, ANY>` needs no coercion at all, and a scan of another container is
+exactly that. Copying documents between containers — the case the map column exists for — is
+unaffected.
+
+### Why the table declares column strategies
+
+`INSERT` does not reach a rule without this, and the failure is at validation:
+
+```
+Column '_MAP' has no default value and does not allow NULLs
+```
+
+`SqlValidatorImpl.checkFieldCount` requires every column that is neither nullable nor defaulted to be
+supplied. `_MAP` and `id` are both `NOT NULL` and both true — every document has an id, and the map
+column is the document. The row type is not going to be weakened to admit a write; a row type that
+bends to what a caller wants to omit is a suggestion rather than a declaration.
+
+`ColumnStrategy` says the right thing instead, separating *not null in the table* from *optional in an
+insert*. `CosmosTable` supplies an `InitializerExpressionFactory` reporting `DEFAULT` for `_MAP`, `id`
+and the partition key columns — defaulting to `NULL`, which the rules above read as "not supplied" —
+and `STORED` for `_ts` and `_etag`.
+
+The columns a modify's input carries are unaffected by any of this: the input row type is always the
+table's whole row type, with the omitted columns as typed null literals. Only the *arity* an `INSERT`
+without a column list expects changes, the two `STORED` columns dropping out of it.
+
+### The write rule is the one rule not bound to a convention
+
+Every other rule here is created per `CosmosConvention`, because a convention is bound to a container
+and some rules must consult that container's metadata. The write rule cannot be, and the reason is a
+property of `ConverterRule`: its description is derived from the traits it converts between. This one
+converts `NONE` to `CLR_ASYNC_ENUMERABLE`, neither of which names a container, so every per-container
+instance carries the same description — and rules compare by description, so a planner given two
+containers' rule sets keeps one and discards the rest.
+
+**Measured.** With a second container's rules registered, an insert into the first stopped planning
+entirely: the surviving instance was checking for the wrong convention and declined. There is nothing
+for the binding to do anyway, the container being named by the modify rather than scanned beneath it.
+
+### Deleting, and reading first
+
+`DeleteItemAsync` takes an `id` and a partition key, so a delete needs both per row, and a `WHERE`
+clause that pins neither has to read the rows before it can delete them.
+
+**Read-then-delete is allowed rather than refused, because the plan shows it.** The scan feeding the
+modify is right there in the tree, and refusing would make `DELETE … WHERE price > 100` impossible
+rather than expensive — a container is not less deletable for lacking a predicate over its key. Where
+the predicate does pin `id` and a complete partition key the scan is already a point read, so the
+cheap case falls out of work that is done.
+
+What this does *not* do is the whole-partition case: a predicate pinning only the partition key could
+be `DeleteAllItemsByPartitionKeyStreamAsync`, which is not a query at all. That is
+`SupportsDeletePushDown` in the Flink table and is not attempted here.
+
+**A delete needs the partition key as a value, and the promoted columns are where it comes from.** A
+nested partition key path is not promoted, so it is read out of the map column instead; a container
+whose key is nested is not therefore undeletable.
+
+One more thing the rule must do, which nothing else here has needed: **simplify the input's trait
+set.** A `Values` node advertises several collations at once — every ordering a single row trivially
+satisfies — and asking such a trait set for its one collation throws. An `INSERT` whose source is
+`VALUES` is the first statement anyone writes, so without it the rule fails immediately; a `DELETE`
+never shows it, its input being a scan, which claims no collation at all.
+
+### Updating
+
+`UPDATE` is not implemented. The shape is recorded because the planner already supplies what it needs:
+the node carries `updateColumnList` and `sourceExpressionList`, which is a list of named columns and
+their new values — exactly the input `PatchItemAsync` wants, and far cheaper than the
+read-modify-write a replace would be. The translation from `SET` clauses to patch operations is the
+work, and the interesting part of it is that a patch over promoted columns cannot express what the
+`SET` of a whole map column would mean.
 
 ---
 
