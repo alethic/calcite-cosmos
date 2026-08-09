@@ -287,8 +287,7 @@ often such a thing.
 
 ### Smaller rules
 
-- **Filter splitting above a projection** — *small.* `CosmosFilterSplitRule` matches `Filter` over
-  `TableScan` only; a filter over a projection is the same split and the same argument.
+- **Filter splitting above a projection** — *done.* The rule matched `Filter` over `TableScan` only, so a projection between the two cost the whole pushdown rather than the untranslatable half of it. It now matches any input and finds the container by walking, which is what `Split` already did to bind the fields.
 - **Sorting above an aggregate** — *small.* `GROUP BY` and `ORDER BY` cannot coexist, so a sorted
   aggregate declines entirely. The aggregate could push and the sort stay in Calcite, over what is by
   then a small result.

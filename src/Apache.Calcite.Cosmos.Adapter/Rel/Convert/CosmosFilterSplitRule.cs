@@ -3,6 +3,7 @@
 using Apache.Calcite.Cosmos.Adapter.Sql;
 
 using org.apache.calcite.plan;
+using org.apache.calcite.rel;
 using org.apache.calcite.rel.core;
 using org.apache.calcite.rex;
 
@@ -66,21 +67,42 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
 #pragma warning disable CS0612
         public CosmosFilterSplitRule(CosmosConvention convention) :
             base(
-                operand((java.lang.Class)typeof(Filter), operand((java.lang.Class)typeof(TableScan), none())),
+                operand((java.lang.Class)typeof(Filter), any()),
                 "CosmosFilterSplitRule." + convention.getName())
         {
             _convention = convention;
         }
 #pragma warning restore CS0612
 
+        /// <summary>
+        /// Returns the container a subtree reads, or <c>null</c> where it does not read one.
+        /// </summary>
+        /// <remarks>
+        /// Walked rather than read off a fixed operand position, because the filter may sit above a
+        /// projection or a traversal as easily as above the scan — the split is the same argument
+        /// either way, and <see cref="Split"/> already binds through them.
+        /// </remarks>
+        static CosmosTable? FindTable(RelNode? node)
+        {
+            if (node is org.apache.calcite.plan.volcano.RelSubset subset)
+                node = subset.getOriginal() ?? subset.getBest();
+
+            return node switch
+            {
+                TableScan scan => scan.getTable()?.unwrap(typeof(CosmosTable)) as CosmosTable,
+                Filter filter => FindTable(filter.getInput()),
+                Project project => FindTable(project.getInput()),
+                Correlate correlate => FindTable(correlate.getLeft()),
+                _ => null,
+            };
+        }
+
         /// <inheritdoc />
         public override bool matches(RelOptRuleCall call)
         {
-            var scan = (TableScan)call.rel(1);
-
             // Scoped to this convention's own container. A rule set is registered per container, and a
             // filter over somebody else's table is not this rule's business.
-            if (scan.getTable()?.unwrap(typeof(CosmosTable)) is not CosmosTable table || ReferenceEquals(table.Convention, _convention) == false)
+            if (FindTable(((Filter)call.rel(0)).getInput()) is not CosmosTable table || ReferenceEquals(table.Convention, _convention) == false)
                 return false;
 
             var (pushable, residual) = Split((Filter)call.rel(0));
@@ -92,7 +114,6 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
         public override void onMatch(RelOptRuleCall call)
         {
             var filter = (Filter)call.rel(0);
-            var scan = (TableScan)call.rel(1);
 
             var (pushable, residual) = Split(filter);
             if (pushable.Count == 0 || residual.Count == 0)
@@ -100,7 +121,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
 
             var rexBuilder = filter.getCluster().getRexBuilder();
 
-            var inner = filter.copy(filter.getTraitSet(), scan, Compose(rexBuilder, pushable));
+            var inner = filter.copy(filter.getTraitSet(), filter.getInput(), Compose(rexBuilder, pushable));
             var outer = filter.copy(filter.getTraitSet(), inner, Compose(rexBuilder, residual));
 
             call.transformTo(outer);

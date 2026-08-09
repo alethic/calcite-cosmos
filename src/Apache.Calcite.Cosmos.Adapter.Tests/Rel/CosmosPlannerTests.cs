@@ -405,6 +405,28 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             plan.Should().Contain("INITCAP");
         }
 
+        /// <summary>
+        /// The same split applies to a filter sitting above a projection.
+        /// </summary>
+        /// <remarks>
+        /// The argument does not depend on what the filter sits on — dropping a conjunct only ever
+        /// weakens, so the service discards nothing the full predicate would have kept. The rule used
+        /// to match a filter directly over the scan and nothing else, which meant a projection between
+        /// the two cost the whole pushdown rather than the untranslatable half of it.
+        /// </remarks>
+        [TestMethod]
+        public void APredicateAboveAProjectionIsSplitToo()
+        {
+            var best = PlanToAsync(
+                "SELECT * FROM (SELECT c.\"category\" AS cat, c.\"id\" AS ident FROM products AS c) AS t " +
+                "WHERE t.cat = 'bikes' AND INITCAP(t.ident) = 'X'");
+
+            var plan = Plan(best);
+
+            plan.Should().Contain("CosmosFilter");
+            plan.Should().Contain("INITCAP");
+        }
+
         /// <remarks>
         /// The pushed half is the renderable conjunct alone, and the partition key it pins is still
         /// recovered from it.
