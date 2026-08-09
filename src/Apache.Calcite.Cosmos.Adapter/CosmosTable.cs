@@ -42,6 +42,7 @@ namespace Apache.Calcite.Cosmos.Adapter
         readonly CosmosContainerMetadata _container;
         readonly CosmosConvention _convention;
         readonly ICosmosQueryExecutor? _executor;
+        readonly CosmosColumnStrategies _strategies;
 
         /// <summary>
         /// Initializes a new instance.
@@ -54,6 +55,23 @@ namespace Apache.Calcite.Cosmos.Adapter
             _container = container ?? throw new ArgumentNullException(nameof(container));
             _convention = CosmosConvention.Create(container);
             _executor = executor;
+            _strategies = new CosmosColumnStrategies(this);
+        }
+
+        /// <inheritdoc />
+        /// <remarks>
+        /// Overridden for one class only. <see cref="AbstractTable"/> answers by asking whether the
+        /// table <em>is</em> what was requested, and an <c>INSERT</c> needs the table to supply an
+        /// <c>InitializerExpressionFactory</c> — which this is not and should not become, the two
+        /// having nothing to do with each other beyond both being facts about the same columns.
+        /// Without it a write does not reach a rule; see <see cref="CosmosColumnStrategies"/>.
+        /// </remarks>
+        public override object? unwrap(java.lang.Class clazz)
+        {
+            if (clazz is not null && clazz.isInstance(_strategies))
+                return _strategies;
+
+            return base.unwrap(clazz);
         }
 
         /// <summary>

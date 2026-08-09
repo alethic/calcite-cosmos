@@ -85,6 +85,12 @@ namespace Apache.Calcite.Cosmos.Adapter
             // converter does — the join happens here, not at the service — so it is registered last,
             // alongside it.
             yield return CosmosLookupJoinRule.Create(convention);
+
+            // Writing, which never enters this convention at all: Cosmos SQL has no DML, so a write is
+            // item CRUD over rows rather than a statement. Alone among these it takes no convention —
+            // it reads the container from the modify, because a converter rule between two
+            // container-independent conventions cannot have one instance per container. See the rule.
+            yield return CosmosTableModifyRule.Create();
         }
 
     }
