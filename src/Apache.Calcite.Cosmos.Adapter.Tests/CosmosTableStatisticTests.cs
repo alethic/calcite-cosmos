@@ -1,4 +1,4 @@
-using Apache.Calcite.Cosmos.Adapter.Metadata;
+﻿using Apache.Calcite.Cosmos.Adapter.Metadata;
 
 using FluentAssertions;
 
@@ -138,6 +138,42 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests
         {
             var table = new CosmosTable(new CosmosContainerMetadata("products", new[] { "/category" }));
             table.getStatistic().getRowCount().Should().BeNull();
+        }
+
+
+        // ── Statistics from the service ───────────────────────────────────────────
+
+        /// <remarks>
+        /// A container built from a definition alone has no row count, and the planner compares plans
+        /// without one exactly as it did before. Nothing here samples documents.
+        /// </remarks>
+        [TestMethod]
+        public void WithoutStatisticsTheRowCountIsUnknown()
+        {
+            new CosmosTable(new CosmosContainerMetadata("products")).getStatistic().getRowCount().Should().BeNull();
+        }
+
+        [TestMethod]
+        public void AMeasuredRowCountIsReported()
+        {
+            var container = new CosmosContainerMetadata("products").WithStatistics(new CosmosContainerStatistics(4200, 8_400_000, 4));
+
+            new CosmosTable(container).getStatistic().getRowCount().doubleValue().Should().Be(4200d);
+        }
+
+        /// <remarks>
+        /// What a row costs to move, which for a row model carrying whole documents dominates.
+        /// </remarks>
+        [TestMethod]
+        public void AverageDocumentSizeIsDerivedFromTheTotal()
+        {
+            new CosmosContainerStatistics(100, 50_000, 2).AverageDocumentSizeInBytes.Should().Be(500d);
+        }
+
+        [TestMethod]
+        public void AnEmptyContainerHasNoAverageDocumentSize()
+        {
+            new CosmosContainerStatistics(0, 0, 1).AverageDocumentSizeInBytes.Should().Be(0d);
         }
 
     }

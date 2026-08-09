@@ -19,21 +19,20 @@ Today `getStatistic` reports keys and collations derived from declared metadata,
 cost model is pure inference. The service will answer far more than that, and every item here is a
 read of something it already knows.
 
-### Row count and document size — *small*
+### Row count and document size — *done*
 
-`ReadContainerAsync().Headers.Get("x-ms-resource-usage")` carries `documentsCount`, `documentsSize`
-and `collectionSize`. A row count is the single most load-bearing number a planner has, and this one
-is free, approximate and lagging — which is exactly what a planner row count is allowed to be.
-Document size feeds the other half: what a row *costs to move*, which for a map row model carrying
-whole documents is the dominant term and is currently not modelled at all.
+Read from the container's `x-ms-resource-usage` header into `CosmosContainerStatistics`, and reported
+as `getStatistic().getRowCount()`. Measured: the count lags badly enough to report zero immediately
+after documents are written, which is what a planner row count is allowed to be. Average document size
+is derived and not yet used — it is what a row costs to move, which for a map row model carrying whole
+documents dominates, and wiring it into the cost model is the next step.
 
-### Physical partition count — *small*
+### Physical partition count — *done*
 
-`GetFeedRangesAsync` returns one feed range per physical partition. That is the fan-out factor: a
-cross-partition query costs roughly that many single-partition queries, and nothing prices it. It is
-also what makes the partition-key discount meaningful rather than a constant — pinning the key on a
-two-partition container saves little, and on a two-hundred-partition container saves nearly
-everything.
+`GetFeedRangesAsync` returns one feed range per physical partition, and `CosmosFilter` now discounts
+by it: a complete key divides the work by the partition count, and a prefix takes the square root of
+that, which is a guess about cost and cannot affect which rows come back. Where the service was not
+asked the old constant stands.
 
 ### Provisioned throughput — *small*
 

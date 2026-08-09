@@ -791,6 +791,45 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
                 $"a point read ({readCharge} RU) should cost less than the equivalent query ({queryCharge} RU)");
         }
 
+        // ── Statistics read back from the service ─────────────────────────────────
+
+        /// <summary>
+        /// Reads what the service reports about the container's size and spread.
+        /// </summary>
+        /// <remarks>
+        /// The row count and size come from a semicolon-separated header, which is a format worth
+        /// measuring rather than assuming. Inconclusive where the account does not report it, so that
+        /// what is being claimed stays visible.
+        /// </remarks>
+        [TestMethod]
+        public async Task StatisticsAreReadFromTheContainer()
+        {
+            var metadata = await CosmosContainerMetadataReader.ReadAsync(Container());
+
+            if (metadata.Statistics is null)
+                Assert.Inconclusive("This account reports no resource usage for the container.");
+
+            var statistics = metadata.Statistics!.Value;
+
+            // At least one physical partition, whatever the container's spread. This one the service
+            // answers immediately, because it is a fact about the container rather than its contents.
+            statistics.PartitionCount.Should().BeGreaterThan(0);
+
+            // The count is NOT asserted against the four documents seeded moments earlier. Measured:
+            // the service reports 0 right after they are written, because the usage statistic is
+            // computed in the background and lags. That is what a planner row count is allowed to be —
+            // approximate and stale — and asserting the seeded count here would be asserting a promise
+            // the service does not make.
+            statistics.DocumentCount.Should().BeGreaterThanOrEqualTo(0);
+
+            // Whenever it has caught up, the two agree: documents that exist occupy space.
+            if (statistics.DocumentCount > 0)
+            {
+                statistics.DocumentSizeInBytes.Should().BeGreaterThan(0);
+                statistics.AverageDocumentSizeInBytes.Should().BeGreaterThan(0);
+            }
+        }
+
         // ── Metadata read back from the service ───────────────────────────────────
 
         /// <remarks>

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 
 using Apache.Calcite.Cosmos.Adapter.Client;
@@ -189,7 +189,10 @@ namespace Apache.Calcite.Cosmos.Adapter
         /// ordinals. A nested partition key path yields no key at all rather than a wrong one.
         /// </para>
         /// <para>
-        /// Row count is left unknown; nothing here samples the container.
+        /// Row count comes from the service where the container was read from one, and is left unknown
+        /// otherwise. It is a measurement rather than a sample: the rule against inferring from
+        /// documents is about the <em>shape</em> of the data, where a wrong guess costs correctness. A
+        /// wrong row count costs speed.
         /// </para>
         /// </remarks>
         public override Statistic getStatistic()
@@ -248,7 +251,14 @@ namespace Apache.Calcite.Cosmos.Adapter
                     collations.add(RelCollations.of(fields));
             }
 
-            return Statistics.of(null, keys, java.util.Collections.emptyList(), collations);
+            // A row count where the service gave one. It is approximate and lags, which is what a
+            // planner row count is allowed to be; what it must not be is invented, and this is read
+            // rather than sampled. Without it the planner compares plans with no sense of scale.
+            var rowCount = _container.Statistics is CosmosContainerStatistics statistics
+                ? java.lang.Double.valueOf(statistics.DocumentCount)
+                : null;
+
+            return Statistics.of(rowCount, keys, java.util.Collections.emptyList(), collations);
         }
 
         /// <inheritdoc />

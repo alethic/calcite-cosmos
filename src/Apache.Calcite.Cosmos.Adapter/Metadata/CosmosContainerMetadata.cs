@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 
 namespace Apache.Calcite.Cosmos.Adapter.Metadata
@@ -54,13 +54,15 @@ namespace Apache.Calcite.Cosmos.Adapter.Metadata
         /// <param name="compositeIndexes">The composite indexes declared by the indexing policy.</param>
         /// <param name="includedPaths">The indexing policy's included path patterns.</param>
         /// <param name="excludedPaths">The indexing policy's excluded path patterns.</param>
+        /// <param name="statistics">What the service reports about the container's size, or <c>null</c> where it was not asked.</param>
         /// <exception cref="ArgumentException"><paramref name="name"/> is <c>null</c> or empty.</exception>
         public CosmosContainerMetadata(
             string name,
             IEnumerable<string>? partitionKeyPaths = null,
             IEnumerable<CosmosCompositeIndex>? compositeIndexes = null,
             IEnumerable<string>? includedPaths = null,
-            IEnumerable<string>? excludedPaths = null)
+            IEnumerable<string>? excludedPaths = null,
+            CosmosContainerStatistics? statistics = null)
         {
             if (string.IsNullOrEmpty(name))
                 throw new ArgumentException($"'{nameof(name)}' cannot be null or empty.", nameof(name));
@@ -69,6 +71,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Metadata
             _partitionKeyPaths = partitionKeyPaths is null ? Array.Empty<string>() : new List<string>(partitionKeyPaths).ToArray();
             _compositeIndexes = compositeIndexes is null ? Array.Empty<CosmosCompositeIndex>() : new List<CosmosCompositeIndex>(compositeIndexes).ToArray();
             _includedPaths = includedPaths is null ? Array.Empty<string>() : new List<string>(includedPaths).ToArray();
+            Statistics = statistics;
             _excludedPaths = excludedPaths is null ? Array.Empty<string>() : new List<string>(excludedPaths).ToArray();
 
             if (_partitionKeyPaths.Length > 3)
@@ -195,6 +198,33 @@ namespace Apache.Calcite.Cosmos.Adapter.Metadata
         /// Gets the composite indexes declared by the indexing policy.
         /// </summary>
         public IReadOnlyList<CosmosCompositeIndex> CompositeIndexes => _compositeIndexes;
+
+        /// <summary>
+        /// Gets what the service reports about the container's size, or <c>null</c> where nothing asked.
+        /// </summary>
+        /// <remarks>
+        /// A measurement rather than a declaration, and optional for that reason: a container built from
+        /// a definition alone — which is what every test that does not need a service uses — has none,
+        /// and the planner falls back to comparing plans without a row count exactly as it did before.
+        /// </remarks>
+        public CosmosContainerStatistics? Statistics { get; }
+
+        /// <summary>
+        /// Returns the same metadata carrying the given statistics.
+        /// </summary>
+        /// <remarks>
+        /// The declaration and the measurement are read from different places — the definition and a
+        /// response header — so they are attached in two steps rather than threaded through every
+        /// constructor call.
+        /// </remarks>
+        /// <param name="statistics">What the service reports, or <c>null</c>.</param>
+        /// <returns>The metadata.</returns>
+        public CosmosContainerMetadata WithStatistics(CosmosContainerStatistics? statistics)
+        {
+            return statistics is null
+                ? this
+                : new CosmosContainerMetadata(_name, _partitionKeyPaths, _compositeIndexes, _includedPaths, _excludedPaths, statistics);
+        }
 
         /// <summary>
         /// Determines whether an <c>ORDER BY</c> over the given keys is legal against this container.

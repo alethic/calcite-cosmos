@@ -128,6 +128,16 @@ documentation.
 > allowance stood for a long time on the emulator's word, and emitted a statement Azure will not
 > run. `ORDER BY t0.x` is rejected too, so it is the alias and not the arity.
 
+**The document count lags, and by more than a moment.** A container read reports `documentsCount` in
+its `x-ms-resource-usage` header, and immediately after writing four documents it reports **zero** —
+the statistic is computed in the background. That is what the row count in `getStatistic` is, and it
+is what a planner row count is allowed to be: approximate and stale. It is not what the rule against
+inferring from documents forbids, which is about the *shape* of the data — a wrong shape yields an
+incorrect plan, a wrong row count yields a slow one.
+
+The partition count is answered immediately, being a fact about the container rather than its
+contents.
+
 **Out-of-domain arithmetic fails the whole query.** `ASIN(2)`, `ACOS(2)`, `SQRT(-1)` and `LOG(0)`
 each return a 400 rather than yielding undefined for the offending row. Calcite evaluates all four
 as NaN, so pushing any of them down trades a row of NaN for a failed statement — over data no schema

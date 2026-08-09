@@ -75,8 +75,12 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
 
             var multiplier = CosmosConvention.CostMultiplier;
 
-            if (CosmosPartitionKeyExtractor.TryExtract(getCondition(), fields, container, CosmosImplementor.DefaultRootAlias, out _))
-                multiplier *= SinglePartitionDiscount;
+            // How much pinning the key is worth is a fact about the container, not a constant. A
+            // cross-partition query costs roughly one single-partition query per physical partition, so
+            // on a two-partition container this saves little and on a two-hundred-partition container it
+            // saves nearly everything. Where the service was not asked, the old constant stands.
+            if (CosmosPartitionKeyExtractor.TryExtractPrefix(getCondition(), fields, container, CosmosImplementor.DefaultRootAlias, out var prefix, out var complete))
+                multiplier *= PartitionDiscount(container, prefix.Count, complete);
 
             if (ReferencesUnindexedPath(getCondition(), fields, container))
                 multiplier *= UnindexedPathPenalty;
@@ -85,9 +89,41 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
         }
 
         /// <summary>
-        /// Applied when the predicate confines the query to one logical partition.
+        /// Applied when the predicate confines the query to one logical partition and the container's
+        /// spread is unknown.
         /// </summary>
         public const double SinglePartitionDiscount = .25d;
+
+        /// <summary>
+        /// Returns the discount for confining a query to part of the container.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// A complete key reaches one partition out of however many there are, so the work is divided by
+        /// that count. A prefix of a hierarchical key reaches a subset, and how large a subset is not
+        /// knowable from anything declared — it depends on how the values are distributed. Half the
+        /// benefit of a complete key is a guess, and it is a guess about <em>cost</em>: it can make the
+        /// planner prefer the wrong plan and cannot make it return the wrong rows.
+        /// </para>
+        /// <para>
+        /// Bounded below so that an enormous container does not drive a filter's cost to nothing and
+        /// make every plan containing one look free.
+        /// </para>
+        /// </remarks>
+        static double PartitionDiscount(CosmosContainerMetadata container, int pinned, bool complete)
+        {
+            if (container.Statistics is not CosmosContainerStatistics statistics || statistics.PartitionCount <= 1)
+                return complete ? SinglePartitionDiscount : 1d;
+
+            var whole = 1d / statistics.PartitionCount;
+
+            return System.Math.Max(complete ? whole : System.Math.Sqrt(whole), MinimumPartitionDiscount);
+        }
+
+        /// <summary>
+        /// The floor on <see cref="PartitionDiscount"/>.
+        /// </summary>
+        public const double MinimumPartitionDiscount = .001d;
 
         /// <summary>
         /// Applied when the predicate touches a path the container does not index.
