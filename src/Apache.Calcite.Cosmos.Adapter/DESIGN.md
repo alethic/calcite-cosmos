@@ -939,6 +939,39 @@ Two decisions the patch tier inherits when it lands:
 
 ---
 
+## The lookup join's caches
+
+Two caches with two jobs, after Flink's `LookupOptions`, whose names these deliberately echo.
+
+**Within one execution** (built in from the start): a bounded map of built rows, keyed by the join
+key, filled to its bound and never evicted — nothing knows which key is worth keeping, so the simple
+rule is the honest one — remembering absence too, since a key the container has nothing for is the
+case a cache most needs to hold. It answers for no staleness the join did not already have, which is
+why it needs no configuration and is always on.
+
+**Across executions** (`lookupCacheMaxRows` and `lookupCacheExpireSeconds`, off unless both are
+given): reference data is looked up repeatedly by different queries, and a remembered answer costs
+no request units at all. Its decisions:
+
+- **The schema owns it, one instance per container, and the model states the freshness policy.**
+  The earlier objection — two connections disagreeing about freshness — dissolves once the policy is
+  an operand: connections sharing a schema share its declaration, the way they share its containers.
+- **Entries are JSON rows keyed by statement and key, not built rows.** A plan's row builder is the
+  plan's own; caching beneath it makes an entry serve every plan that renders the same statement,
+  and the statement identity includes the non-key parameter values, so two filters over the same
+  shape cannot cross. Rows are rebuilt from JSON per execution, which is the price of sharing.
+- **Expire-after-write, and expiry is the only eviction.** A full cache purges what has expired and
+  otherwise declines new entries — the same fill-to-bound honesty as the inner cache, with the TTL
+  providing turnover. The bound counts rows, with an absence entry counting as one.
+- **Half a configuration is a model error.** `lookupCacheMaxRows` without
+  `lookupCacheExpireSeconds`, or the reverse, is refused: a cache without a bound or without a
+  freshness policy is not something to guess into existence.
+- **A write through the adapter clears the container's cache.** `INSERT`, `DELETE` and `UPDATE` all
+  go through the same tables the cache hangs off, and goodwill is cheap there. A write from outside
+  the process is the TTL's problem, and saying so is the point of requiring one.
+
+---
+
 ## Design Constraints
 
 - **Generate only what Cosmos accepts.** Declining to push down is always correct; emitting a

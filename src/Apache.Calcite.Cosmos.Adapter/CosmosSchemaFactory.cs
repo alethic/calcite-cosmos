@@ -101,6 +101,22 @@ namespace Apache.Calcite.Cosmos.Adapter
         public const string ConnectionModeOperand = "connectionMode";
 
         /// <summary>
+        /// The operand bounding the lookup join's cache across executions, in rows.
+        /// </summary>
+        /// <remarks>
+        /// Off unless both this and <see cref="LookupCacheExpireSecondsOperand"/> are given — a cache
+        /// without a bound or without a freshness policy is not something to guess into existence.
+        /// The names follow Flink's <c>LookupOptions</c>; see <c>DESIGN.md</c> under <em>The lookup
+        /// join's caches</em>.
+        /// </remarks>
+        public const string LookupCacheMaxRowsOperand = "lookupCacheMaxRows";
+
+        /// <summary>
+        /// The operand stating how long a cached lookup answer may be believed, in seconds.
+        /// </summary>
+        public const string LookupCacheExpireSecondsOperand = "lookupCacheExpireSeconds";
+
+        /// <summary>
         /// The operand asking the service which indexes each statement used.
         /// </summary>
         /// <remarks>
@@ -133,10 +149,12 @@ namespace Apache.Calcite.Cosmos.Adapter
             var indexMetrics = GetBoolean(operand, IndexMetricsOperand);
 
             // Naming a database gives a schema whose tables are its containers. Omitting it gives the
+            var lookupCache = ReadLookupCache(operand);
+
             // account: one subschema per database, which is how Cosmos nests and how Calcite nests, and
             // which needs one client rather than one per database.
             if (GetString(operand, DatabaseOperand) is not string database || database.Length == 0)
-                return CreateAccountSchema(client, containers, indexMetrics);
+                return CreateAccountSchema(client, containers, indexMetrics, lookupCache);
 
             var db = client.GetDatabase(database);
 
@@ -145,7 +163,41 @@ namespace Apache.Calcite.Cosmos.Adapter
             // so binding one per table costs nothing.
             return new CosmosSchema(
                 ReadContainers(db, containers),
-                container => new CosmosQueryExecutor(db.GetContainer(container.Name), indexMetrics));
+                container => new CosmosQueryExecutor(db.GetContainer(container.Name), indexMetrics),
+                lookupCache is null ? null : _ => new CosmosLookupCache(lookupCache.Value.MaxRows, lookupCache.Value.ExpireAfterWrite));
+        }
+
+        /// <summary>
+        /// Reads the lookup cache policy, or <c>null</c> where none is declared.
+        /// </summary>
+        /// <remarks>
+        /// Both operands or neither: a cache without a bound or without a freshness policy is not
+        /// something to guess into existence, so half a configuration is a model mistake and says so.
+        /// </remarks>
+        /// <param name="operand">The model's operand map.</param>
+        /// <returns>The bound and time-to-live, or <c>null</c>.</returns>
+        /// <exception cref="ArgumentException">One operand is given without the other, or a value is not a positive integer.</exception>
+        public static (int MaxRows, TimeSpan ExpireAfterWrite)? ReadLookupCache(java.util.Map operand)
+        {
+            if (operand is null)
+                throw new ArgumentNullException(nameof(operand));
+
+            var rows = GetString(operand, LookupCacheMaxRowsOperand);
+            var seconds = GetString(operand, LookupCacheExpireSecondsOperand);
+
+            if (string.IsNullOrEmpty(rows) && string.IsNullOrEmpty(seconds))
+                return null;
+
+            if (string.IsNullOrEmpty(rows) || string.IsNullOrEmpty(seconds))
+                throw new ArgumentException($"Operands '{LookupCacheMaxRowsOperand}' and '{LookupCacheExpireSecondsOperand}' come together: a cache needs both a bound and a freshness policy.");
+
+            if (int.TryParse(rows, out var maxRows) == false || maxRows < 1)
+                throw new ArgumentException($"Operand '{LookupCacheMaxRowsOperand}' must be a positive integer; '{rows}' is not.");
+
+            if (int.TryParse(seconds, out var expire) == false || expire < 1)
+                throw new ArgumentException($"Operand '{LookupCacheExpireSecondsOperand}' must be a positive integer; '{seconds}' is not.");
+
+            return (maxRows, TimeSpan.FromSeconds(expire));
         }
 
         /// <summary>
@@ -156,7 +208,7 @@ namespace Apache.Calcite.Cosmos.Adapter
         /// useful where they share container names. Omitting it, which is the ordinary case here,
         /// exposes every container of every database.
         /// </remarks>
-        static Schema CreateAccountSchema(CosmosClient client, IReadOnlyList<string> containers, bool indexMetrics)
+        static Schema CreateAccountSchema(CosmosClient client, IReadOnlyList<string> containers, bool indexMetrics, (int MaxRows, TimeSpan ExpireAfterWrite)? lookupCache)
         {
             var databases = new List<KeyValuePair<string, IReadOnlyList<CosmosContainerMetadata>>>();
 
@@ -174,7 +226,8 @@ namespace Apache.Calcite.Cosmos.Adapter
 
             return new CosmosAccountSchema(
                 databases,
-                (database, container) => new CosmosQueryExecutor(client.GetDatabase(database).GetContainer(container.Name), indexMetrics));
+                (database, container) => new CosmosQueryExecutor(client.GetDatabase(database).GetContainer(container.Name), indexMetrics),
+                lookupCache is null ? null : (_, _) => new CosmosLookupCache(lookupCache.Value.MaxRows, lookupCache.Value.ExpireAfterWrite));
         }
 
         /// <summary>

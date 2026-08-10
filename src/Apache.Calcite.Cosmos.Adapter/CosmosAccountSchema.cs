@@ -44,10 +44,14 @@ namespace Apache.Calcite.Cosmos.Adapter
         /// Returns what executes statements against a container of a named database. Omit it to expose
         /// databases that can be planned against but not read.
         /// </param>
+        /// <param name="lookupCacheFactory">
+        /// Returns a container's lookup cache across executions, or <c>null</c> for none.
+        /// </param>
         /// <exception cref="ArgumentNullException"><paramref name="databases"/> is <c>null</c>.</exception>
         public CosmosAccountSchema(
             IEnumerable<KeyValuePair<string, IReadOnlyList<CosmosContainerMetadata>>> databases,
-            Func<string, CosmosContainerMetadata, ICosmosQueryExecutor>? executorFactory = null)
+            Func<string, CosmosContainerMetadata, ICosmosQueryExecutor>? executorFactory = null,
+            Func<string, CosmosContainerMetadata, CosmosLookupCache?>? lookupCacheFactory = null)
         {
             if (databases is null)
                 throw new ArgumentNullException(nameof(databases));
@@ -58,7 +62,8 @@ namespace Apache.Calcite.Cosmos.Adapter
 
                 _subSchemas.put(database, new CosmosSchema(
                     containers,
-                    executorFactory is null ? null : container => executorFactory(database, container)));
+                    executorFactory is null ? null : container => executorFactory(database, container),
+                    lookupCacheFactory is null ? null : container => lookupCacheFactory(database, container)));
             }
         }
 

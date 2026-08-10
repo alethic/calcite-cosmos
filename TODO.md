@@ -77,9 +77,7 @@ carries both with the reasoning.
    queue behind it: the `UPDATE` patch tier (section 3), the nullable-aggregate rewrite (section 5),
    and a temporal basis (section 4). The implementation is parked on `declared-columns-parked`; the
    design is in `DESIGN.md` under *Declared columns* on that branch.
-2. **A cache across executions** (section 11) — the within-execution one is done; this one needs a TTL,
-   a bound shared between queries, and something that owns it.
-3. **Differential testing** (section 9) — the highest-value test work, and gated on nothing.
+2. **Differential testing** (section 9) — the highest-value test work, and gated on nothing.
 
 ---
 
@@ -377,9 +375,7 @@ project references.
 
 | Flink | Here |
 |---|---|
-| `PartialCachingLookupProvider` | The within-execution cache is done; the open part is a cache *across* executions, which needs a TTL and an owner. |
-| `FullCachingLookupProvider` | **worth considering** for small containers: load the whole thing once and never call the service on a miss, with a reload strategy. A lookup table of a few thousand documents is exactly this. |
-| `LookupOptions` | The options that go with the above — cache type, maximum rows, TTL, reload strategy. Worth copying the *names* so anyone who knows Flink knows these. |
+| `FullCachingLookupProvider` | **worth considering** for small containers: load the whole thing once and never call the service on a miss, with a reload strategy. A lookup table of a few thousand documents is exactly this. The partial cache — per execution and, by declared policy, across them — is done; see `DESIGN.md` under *The lookup join's caches*. |
 | Lookup retry (FLIP-234) | **probably not.** Flink retries a lookup that comes back empty, for late-arriving reference data. The SDK already retries throttling, which is the failure that actually happens here. |
 
 ### Sink abilities

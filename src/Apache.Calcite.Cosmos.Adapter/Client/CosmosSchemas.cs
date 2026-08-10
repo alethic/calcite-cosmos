@@ -36,6 +36,28 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
         /// <exception cref="CosmosExecutionException">The table is not reachable, or has no executor.</exception>
         public static ICosmosQueryExecutor GetExecutor(DataContext root, string[] qualifiedName)
         {
+            var cosmos = GetTable(root, qualifiedName);
+
+            // A table built from metadata alone plans perfectly well and cannot be read from. This is
+            // where that shows, and it is the first point at which it could have.
+            return cosmos.Executor
+                ?? throw new CosmosExecutionException($"Table '{string.Join(".", qualifiedName)}' has no query executor, so its rows cannot be read. It was created from container metadata alone, without a Cosmos client.");
+        }
+
+        /// <summary>
+        /// Returns the named table's lookup cache across executions, or <c>null</c> where none is
+        /// configured — which unlike a missing executor is not an error, a cache being an option.
+        /// </summary>
+        /// <param name="root">The context the query is executing against.</param>
+        /// <param name="qualifiedName">The table's qualified name, schemas outermost first.</param>
+        /// <returns>The cache, or <c>null</c>.</returns>
+        public static CosmosLookupCache? GetLookupCache(DataContext root, string[] qualifiedName)
+        {
+            return GetTable(root, qualifiedName).LookupCache;
+        }
+
+        static CosmosTable GetTable(DataContext root, string[] qualifiedName)
+        {
             if (root is null)
                 throw new ArgumentNullException(nameof(root));
             if (qualifiedName is null)
@@ -64,10 +86,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
             if (table is not CosmosTable cosmos)
                 throw new CosmosExecutionException($"Table '{name}' resolved to a {table.GetType().Name} rather than a {nameof(CosmosTable)}.");
 
-            // A table built from metadata alone plans perfectly well and cannot be read from. This is
-            // where that shows, and it is the first point at which it could have.
-            return cosmos.Executor
-                ?? throw new CosmosExecutionException($"Table '{name}' has no query executor, so its rows cannot be read. It was created from container metadata alone, without a Cosmos client.");
+            return cosmos;
         }
 
         /// <summary>

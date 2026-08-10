@@ -124,6 +124,11 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
         /// data is looked up repeatedly by definition, and a remembered key costs no request units at
         /// all.
         /// </param>
+        /// <param name="shared">
+        /// The container's cache across executions, or <c>null</c> where none is configured. Consulted
+        /// beneath the per-join cache and populated by every fetch; see <c>DESIGN.md</c> under
+        /// <em>The lookup join's caches</em>.
+        /// </param>
         /// <param name="cancellationToken">Cancels the enumeration.</param>
         /// <returns>The joined rows.</returns>
         /// <exception cref="ArgumentNullException">Any required argument is <c>null</c>.</exception>
@@ -138,6 +143,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
             Func<TProbe, object?> probeKey,
             Func<TBuild, TProbe, TResult> resultSelector,
             int cacheSize = 0,
+            CosmosLookupCache? shared = null,
             [EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
             if (build is null)
@@ -163,20 +169,24 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
             // answer makes the result more self-consistent rather than less.
             var cache = cacheSize > 0 ? new Dictionary<object, List<TProbe>>() : null;
 
+            // The identity the shared cache remembers this statement's answers under, computed once:
+            // the batches differ only in their keys.
+            var statement = shared is null ? null : CosmosLookupCache.Statement(query);
+
             await foreach (var row in build.WithCancellation(cancellationToken).ConfigureAwait(false))
             {
                 batch.Add(row);
                 if (batch.Count < batchSize)
                     continue;
 
-                await foreach (var joined in RunAsync(batch, executor, query, prefix, batchSize, buildKey, rowBuilder, probeKey, resultSelector, cache, cacheSize, cancellationToken).ConfigureAwait(false))
+                await foreach (var joined in RunAsync(batch, executor, query, prefix, batchSize, buildKey, rowBuilder, probeKey, resultSelector, cache, cacheSize, shared, statement, cancellationToken).ConfigureAwait(false))
                     yield return joined;
 
                 batch.Clear();
             }
 
             if (batch.Count > 0)
-                await foreach (var joined in RunAsync(batch, executor, query, prefix, batchSize, buildKey, rowBuilder, probeKey, resultSelector, cache, cacheSize, cancellationToken).ConfigureAwait(false))
+                await foreach (var joined in RunAsync(batch, executor, query, prefix, batchSize, buildKey, rowBuilder, probeKey, resultSelector, cache, cacheSize, shared, statement, cancellationToken).ConfigureAwait(false))
                     yield return joined;
         }
 
@@ -200,6 +210,8 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
             Func<TBuild, TProbe, TResult> resultSelector,
             Dictionary<object, List<TProbe>>? cache,
             int cacheSize,
+            CosmosLookupCache? shared,
+            string? statement,
             [EnumeratorCancellation] CancellationToken cancellationToken)
         {
             // Distinct, because the keys are data here rather than a predicate: a hundred build rows
@@ -216,14 +228,37 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
                     continue;
 
                 if (cache is not null && cache.TryGetValue(key, out var remembered))
+                {
                     lookup[key] = remembered;
-                else
-                    keys.Add(key);
+                    continue;
+                }
+
+                // Beneath the per-join cache: an answer another execution fetched, rebuilt through
+                // this plan's own row builder.
+                if (shared is not null && shared.TryGet(statement!, key, out var held))
+                {
+                    var rows = new List<TProbe>(held.Count);
+                    foreach (var element in held)
+                        rows.Add(rowBuilder(element));
+
+                    lookup[key] = rows;
+
+                    if (cache is not null && cache.Count < cacheSize)
+                        cache[key] = rows;
+
+                    continue;
+                }
+
+                keys.Add(key);
             }
 
             if (keys.Count > 0)
             {
                 var fetched = new Dictionary<object, List<TProbe>>();
+
+                // What crossed the wire for each key, kept only where a shared cache will remember
+                // it. The elements are already standalone: the executor clones what it yields.
+                var elements = shared is null ? null : new Dictionary<object, List<JsonElement>>();
 
                 await foreach (var element in executor.ExecuteAsync(Bind(query, prefix, batchSize, keys), cancellationToken: cancellationToken).ConfigureAwait(false))
                 {
@@ -235,6 +270,14 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
                         fetched[key] = rows = new List<TProbe>();
 
                     rows.Add(probe);
+
+                    if (elements is not null)
+                    {
+                        if (elements.TryGetValue(key, out var held) == false)
+                            elements[key] = held = new List<JsonElement>();
+
+                        held.Add(element);
+                    }
                 }
 
                 foreach (var key in keys)
@@ -255,6 +298,9 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
                     // being remembered whole.
                     if (cache is not null && cache.Count < cacheSize)
                         cache[key] = rows;
+
+                    if (shared is not null)
+                        shared.Set(statement!, key, elements!.TryGetValue(key, out var held) ? held : Array.Empty<JsonElement>());
                 }
             }
 

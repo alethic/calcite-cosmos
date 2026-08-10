@@ -189,6 +189,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
                     KeySelector(probePhysType, probeType, _probeKey),
                     ResultSelector(physType, buildResult.PhysType, buildType, probePhysType, probeType),
                     Expression.Constant(DefaultCacheSize),
+                    CosmosConverters.LookupCacheExpression(probe, implementor.Root),
                     // As for the converter: Calcite's cancellation is a flag on the DataContext rather
                     // than a token, and a batch in flight would not observe one. Not asking for the next
                     // batch is what stops this.

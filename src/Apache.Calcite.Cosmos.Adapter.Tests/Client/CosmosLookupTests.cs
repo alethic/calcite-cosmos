@@ -78,7 +78,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
             }
         }
 
-        static Task<List<string>> Join(IAsyncEnumerable<string> build, RecordingExecutor executor, int batchSize = 3, CosmosQuery? query = null, int cacheSize = 0)
+        static Task<List<string>> Join(IAsyncEnumerable<string> build, RecordingExecutor executor, int batchSize = 3, CosmosQuery? query = null, int cacheSize = 0, CosmosLookupCache? shared = null)
         {
             return Collect(CosmosLookup.JoinAsync(
                 build,
@@ -90,7 +90,8 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
                 element => element.GetProperty("category").GetString()!,
                 p => p,
                 (b, p) => b + "/" + p,
-                cacheSize));
+                cacheSize,
+                shared));
         }
 
         static async Task<List<string>> Collect(IAsyncEnumerable<string> rows)
@@ -312,6 +313,79 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
             asked.Should().BeEquivalentTo(new object?[] { "a", "b" });
 
             executor.Executed.Should().HaveCount(3, "a is remembered after the first batch; b never is");
+        }
+
+        // ── The cache across executions ───────────────────────────────────────────
+
+        /// <remarks>
+        /// The point of the whole feature: a second execution over the same keys and the same
+        /// statement asks the service nothing.
+        /// </remarks>
+        [TestMethod]
+        public async Task ASecondExecutionIsServedFromTheSharedCache()
+        {
+            var shared = new CosmosLookupCache(100, TimeSpan.FromMinutes(5));
+
+            var first = new RecordingExecutor("""{"category":"bikes"}""");
+            var one = await Join(Async("bikes"), first, shared: shared);
+
+            var second = new RecordingExecutor("""{"category":"bikes"}""");
+            var two = await Join(Async("bikes"), second, shared: shared);
+
+            first.Executed.Should().ContainSingle();
+            second.Executed.Should().BeEmpty("the answer was remembered across executions");
+            two.Should().Equal(one);
+        }
+
+        [TestMethod]
+        public async Task AbsenceIsSharedAcrossExecutions()
+        {
+            var shared = new CosmosLookupCache(100, TimeSpan.FromMinutes(5));
+
+            await Join(Async("missing"), new RecordingExecutor(), shared: shared);
+
+            var second = new RecordingExecutor();
+            var rows = await Join(Async("missing"), second, shared: shared);
+
+            second.Executed.Should().BeEmpty("nothing was remembered as the answer, and remembered is remembered");
+            rows.Should().BeEmpty();
+        }
+
+        /// <remarks>
+        /// Two plans rendering different statements must not share answers: the entries are keyed by
+        /// the statement as well as the key.
+        /// </remarks>
+        [TestMethod]
+        public async Task DifferentStatementsDoNotShareTheCache()
+        {
+            var shared = new CosmosLookupCache(100, TimeSpan.FromMinutes(5));
+
+            await Join(Async("bikes"), new RecordingExecutor("""{"category":"bikes"}"""), shared: shared);
+
+            var other = new CosmosQuery("SELECT VALUE c FROM archive c WHERE c.category IN (@k0, @k1, @k2)", Array.Empty<CosmosParameter>());
+            var second = new RecordingExecutor("""{"category":"bikes"}""");
+            await Join(Async("bikes"), second, query: other, shared: shared);
+
+            second.Executed.Should().ContainSingle("an answer for one statement is no answer for another");
+        }
+
+        /// <remarks>
+        /// The per-join cache holds built rows and the shared cache holds JSON; a batch answered from
+        /// the shared cache still fills the per-join one, so the same key in a later batch of the
+        /// same join costs neither a request nor a rebuild.
+        /// </remarks>
+        [TestMethod]
+        public async Task ASharedHitStillFillsThePerJoinCache()
+        {
+            var shared = new CosmosLookupCache(100, TimeSpan.FromMinutes(5));
+
+            await Join(Async("bikes"), new RecordingExecutor("""{"category":"bikes"}"""), shared: shared);
+
+            var second = new RecordingExecutor();
+            var rows = await Join(Async("bikes", "bikes"), second, batchSize: 1, cacheSize: 10, shared: shared);
+
+            second.Executed.Should().BeEmpty();
+            rows.Should().Equal("bikes/bikes", "bikes/bikes");
         }
 
         // ── Binding ───────────────────────────────────────────────────────────────
