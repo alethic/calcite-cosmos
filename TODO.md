@@ -25,10 +25,11 @@ rejecting the full text search Azure runs — so "the reference says" is not a m
 
 ## 0. Resuming
 
-**487 tests: 482 passing, 5 skipped**, on net8.0 and net10.0. The skips are things only a real account
+**488 tests: 482 passing, 6 skipped**, on net8.0 and net10.0. The skips are things only a real account
 can answer; the suite runs against one when `COSMOS_TEST_ENDPOINT` and `COSMOS_TEST_KEY` name it, and
 reports inconclusive rather than passing where the emulator cannot. Several facts in this file and in
-`DESIGN.md` were settled that way — an Azure account, used and deleted.
+`DESIGN.md` were settled that way — most recently the lookup-routing measurement — each time with an
+Azure account, used and deleted.
 
 No PRs are open; `main` is where the work is and a new branch starts from it. **One decision is in
 flight rather than any code:** declared columns — a `columns` operand promoting caller-declared,
@@ -76,12 +77,9 @@ carries both with the reasoning.
    queue behind it: the `UPDATE` patch tier (section 3), the nullable-aggregate rewrite (section 5),
    and a temporal basis (section 4). The implementation is parked on `declared-columns-parked`; the
    design is in `DESIGN.md` under *Declared columns* on that branch.
-2. **Shuffle the build side by partition key** (section 11) — the biggest remaining win for the lookup
-   join, but measure first: routing per key means one request per distinct key, and whether that beats
-   one cross-partition query depends on key count against partition count. Grouping by feed range is
-   the likelier shape.
-3. **A cache across executions** (section 11) — the within-execution one is done; this one needs a TTL,
+2. **A cache across executions** (section 11) — the within-execution one is done; this one needs a TTL,
    a bound shared between queries, and something that owns it.
+3. **Differential testing** (section 9) — the highest-value test work, and gated on nothing.
 
 ---
 
@@ -370,8 +368,7 @@ project references.
 | Flink | Here |
 |---|---|
 | `SupportsPartitionPushDown` | **worth taking.** Hands the planner the list of partitions. `GetFeedRangesAsync` gives the physical ones. |
-| `SupportsDynamicFiltering` | **worth taking** — FLIP-248 dynamic partition pruning. The other half of sideways information passing: instead of fetching by key, the build side's values *prune partitions* on the probe side at run time. Complements the lookup join rather than competing with it, and for Cosmos the unit pruned is a physical partition. |
-| `SupportsLookupCustomShuffle` | **worth taking, and it is the big one.** A connector says how rows should be partitioned before they reach the lookup. Shuffling build rows by Cosmos partition key would make every batch single-partition, turning a fan-out into one request — which is the saving the lookup join otherwise leaves on the table. |
+| `SupportsDynamicFiltering`, `SupportsLookupCustomShuffle` | **closed by measurement** — the service's query router already prunes an `IN` over the partition key to the partitions owning the values, cross-partition execution already fans out per feed range, and per-key routing costs the per-query floor times the key count. See *The lookup restriction is already routed* in `DESIGN.md`; `CosmosLookupRoutingMeasurementTests` reruns the evidence against any real account. |
 | `SupportsReadingMetadata` | **small.** Metadata columns declared rather than always promoted: `_rid`, `_self`, `_attachments`, and the per-item `ttl`. Would also let `_ts`/`_etag` stop occupying ordinary column ordinals. |
 | `SupportsRowLevelModificationScan` | **worth taking.** The scan is told it is feeding an `UPDATE`/`DELETE`, so it can read only what the modification needs. Both are implemented and read whole documents to use two paths out of them — `id` and the partition key — which for a map row model is the whole cost of the statement. |
 | `SupportsWatermarkPushDown`, `SupportsSourceWatermark` | **only with the change feed.** Streaming concepts; the change feed is the analogue, and `_ts` the natural watermark. See *change feed*. |
