@@ -25,11 +25,11 @@ rejecting the full text search Azure runs — so "the reference says" is not a m
 
 ## 0. Resuming
 
-**488 tests: 482 passing, 6 skipped**, on net8.0 and net10.0. The skips are things only a real account
-can answer; the suite runs against one when `COSMOS_TEST_ENDPOINT` and `COSMOS_TEST_KEY` name it, and
-reports inconclusive rather than passing where the emulator cannot. Several facts in this file and in
-`DESIGN.md` were settled that way — most recently the lookup-routing measurement — each time with an
-Azure account, used and deleted.
+**507 tests: 501 passing, 6 skipped**, on net8.0 and net10.0, against Apache.Calcite 2.0.0-pre.3.
+The skips are things only a real account can answer; the suite runs against one when
+`COSMOS_TEST_ENDPOINT` and `COSMOS_TEST_KEY` name it, and reports inconclusive rather than passing
+where the emulator cannot. Several facts in this file and in `DESIGN.md` were settled that way —
+most recently the lookup-routing measurement — each time with an Azure account, used and deleted.
 
 No PRs are open; `main` is where the work is and a new branch starts from it. **One decision is in
 flight rather than any code:** declared columns — a `columns` operand promoting caller-declared,
@@ -41,11 +41,6 @@ Reading, writing (`INSERT`, `DELETE`, and `UPDATE` of the map column as a whole-
 the lookup join, partial aggregates, and the diagnostics surface are complete and covered. What
 remains below is not started.
 
-**What no build has checked is the sample**, which nothing in CI runs. `EXPLAIN PLAN FOR` on the
-asynchronous path should print the physical tree, `CosmosLookupJoin` and all — but `Explain` returns
-null on any exception, so a failure there is silent and shows as a missing plan panel rather than as
-anything louder. Run it against the emulator and look for the tree before believing it.
-
 ### Running the sample
 
 ```
@@ -56,13 +51,6 @@ It needs the Cosmos emulator on `localhost:8081` and prints the docker command i
 seeds both sources and is safe to re-run. What it demonstrates is the lookup join across two adapters:
 the CSV side's three product ids are pushed into Cosmos, so the container is filtered at the service
 rather than read whole.
-
-### One thing still waiting on `ikvmnet/calcite-dotnet`
-
-- **[#24](https://github.com/ikvmnet/calcite-dotnet/issues/24) — the ADO.NET adapter cannot read SQL
-  Server.** Its metadata read calls `GetInt32` on columns SQL Server types as `tinyint`, so every
-  query against every table throws. The sample uses the CSV adapter instead; SQL Server is the better
-  demonstration and switching back is a one-line change.
 
 ### Integration requirements, recorded in the README
 
@@ -138,6 +126,14 @@ with in-process alternatives on a real scale rather than a notional one.
 
 Queries execute through `GetItemQueryStreamIterator`, with a pinned `id` and complete partition key
 recovered as a point read. The SDK's other cheap routes are unused.
+
+### The sample against SQL Server — *small*
+
+Apache.Calcite 2.0.0-pre.3 fixed the ADO.NET adapter against SQL Server
+([calcite-dotnet#24](https://github.com/ikvmnet/calcite-dotnet/issues/24)), so the sample's CSV side
+can become the SQL Server it was meant to be — a one-line change, plus the SQL Server the sample
+would then need running beside the emulator, which is the actual decision. Nothing in CI runs the
+sample either way; it was last verified by hand against pre.3.
 
 ### Batch point reads for `id IN (…)` — *medium*
 
