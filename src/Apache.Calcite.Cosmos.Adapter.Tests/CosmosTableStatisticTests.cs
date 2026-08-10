@@ -132,16 +132,28 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests
         }
 
         /// <remarks>
-        /// A distribution is expressed over field ordinals, so a nested path — which has no column —
-        /// yields <c>RANDOM</c> rather than a distribution over ordinals the row type does not have.
-        /// The same promotion rule the key obeys, for the same reason.
+        /// A distribution is stated over field ordinals, and a nested path has no column — but such
+        /// a container is still hash-distributed, by a path this row type cannot spell.
+        /// <c>RANDOM</c> would claim rows are <em>not</em> co-located by key, which is false;
+        /// <c>ANY</c> is the absence of a claim, which is the truth.
         /// </remarks>
         [TestMethod]
-        public void ANestedPartitionKeyDistributesRandomly()
+        public void ANestedPartitionKeyClaimsNoDistribution()
         {
             var table = new CosmosTable(new CosmosContainerMetadata("products", new[] { "/inventory/sku" }));
 
-            table.getStatistic().getDistribution().getType().Should().Be(RelDistribution.Type.RANDOM_DISTRIBUTED);
+            var type = table.getStatistic().getDistribution().getType();
+
+            type.Should().Be(RelDistribution.Type.ANY);
+            type.Should().NotBe(RelDistribution.Type.RANDOM_DISTRIBUTED, "the rows are co-located, by a path with no ordinal");
+        }
+
+        [TestMethod]
+        public void AnUndeclaredPartitionKeyClaimsNoDistribution()
+        {
+            var table = new CosmosTable(new CosmosContainerMetadata("products"));
+
+            table.getStatistic().getDistribution().getType().Should().Be(RelDistribution.Type.ANY);
         }
 
         /// <remarks>

@@ -574,6 +574,26 @@ container to guess its shape is fine as an opt-in convenience for projection erg
 must never feed `Statistic` — an inferred key or collation that is wrong produces a silently
 incorrect plan, not a slow one.
 
+#### Metadata is stated over ordinals; Cosmos is organised by paths
+
+The deeper shape behind every gap in what this table can report. Calcite's planner metadata —
+keys, collations, distribution, and everything a `RelMetadataQuery` answers — is expressed over
+**field ordinals**. Cosmos has no columns at all: a container is organised by **JSON paths**, and
+its partition key is a path, its indexes are paths, its computed properties are paths. Promotion is
+the only bridge, so *a fact about a path that is not promoted cannot be stated as metadata at all.*
+
+That is one cause with several faces:
+
+- A nested partition key path yields no key and no distribution — not because the container lacks
+  them, but because the row type has no ordinal to name them with. The honest report is then
+  `ANY`: **no claim**, never `RANDOM_DISTRIBUTED`, which would positively assert that rows are not
+  co-located when in fact they are.
+- `CosmosFilter` keeps its own path-based recovery rather than consulting the distribution, and has
+  to: it works in path space, where the nested key is visible and the truth is complete.
+- Widening promotion — declared columns, computed properties, and nested paths above all — is
+  therefore not only an ergonomic feature. It is what makes these facts *expressible*, and every
+  path promoted turns a fact the adapter currently knows privately into one the planner can use.
+
 #### Residual type problems
 
 - **No date/time type.** Cosmos JSON has six types — `undefined`, `null`, boolean, number,

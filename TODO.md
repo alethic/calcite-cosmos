@@ -114,6 +114,16 @@ a row count for a partition-pinned scan rather than for the container — which 
 between costing a single-partition read and costing everything. It needs a statistic attached to a
 `RelNode` rather than to a table, which is a larger change than it sounds.
 
+### Nested paths as promoted columns — *medium, and it unblocks metadata*
+
+The structural finding behind several gaps, recorded in `DESIGN.md` under *Metadata is stated over
+ordinals; Cosmos is organised by paths*: planner metadata is expressed over field ordinals and
+Cosmos is organised by JSON paths, so a fact about an unpromoted path cannot be stated at all. A
+nested partition key therefore yields no key and no distribution, though the container has both.
+Promotion is name-based today — the same restriction declared columns inherit — so the work is a
+binding from a column to a *path* rather than a name, after which the nested key becomes an
+ordinal like any other and the statistics follow for free.
+
 ### The filter's private cost arithmetic — *medium, and it belongs in the cost model*
 
 `CosmosFilter.computeSelfCost` discounts a pinned partition key by the container's partition count
