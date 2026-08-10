@@ -18,6 +18,20 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests
     public class CosmosTableStatisticTests
     {
 
+        /// <summary>
+        /// The field ordinals a distribution names.
+        /// </summary>
+        static System.Collections.Generic.List<int> Ordinals(RelDistribution distribution)
+        {
+            var ordinals = new System.Collections.Generic.List<int>();
+
+            var keys = distribution.getKeys();
+            for (var i = 0; i < keys.size(); i++)
+                ordinals.Add(((java.lang.Integer)keys.get(i)).intValue());
+
+            return ordinals;
+        }
+
         static CosmosCompositeIndex Index(params (string Path, bool Descending)[] paths)
         {
             var list = new System.Collections.Generic.List<CosmosCompositeIndexPath>();
@@ -89,6 +103,57 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests
         {
             var table = new CosmosTable(new CosmosContainerMetadata("products"));
             table.getStatistic().getKeys().size().Should().Be(0);
+        }
+
+        /// <remarks>
+        /// A container is hash-distributed by its partition key — the service's own routing, not an
+        /// inference about the data — and saying so hands the planner the fact
+        /// <c>CosmosFilter.computeSelfCost</c> otherwise spends privately when it discounts a
+        /// pinned key by the partition count.
+        /// </remarks>
+        [TestMethod]
+        public void ThePartitionKeyIsReportedAsAHashDistribution()
+        {
+            var table = new CosmosTable(new CosmosContainerMetadata("products", new[] { "/category" }));
+            var distribution = table.getStatistic().getDistribution();
+
+            distribution.getType().Should().Be(RelDistribution.Type.HASH_DISTRIBUTED);
+            Ordinals(distribution).Should().Equal(4);
+        }
+
+        [TestMethod]
+        public void AHierarchicalKeyDistributesOverEveryPath()
+        {
+            var table = new CosmosTable(new CosmosContainerMetadata("products", new[] { "/tenant", "/user" }));
+            var distribution = table.getStatistic().getDistribution();
+
+            // 0 _MAP, 1 id, 2 _ts, 3 _etag, 4 tenant, 5 user
+            Ordinals(distribution).Should().Equal(4, 5);
+        }
+
+        /// <remarks>
+        /// A distribution is expressed over field ordinals, so a nested path — which has no column —
+        /// yields <c>RANDOM</c> rather than a distribution over ordinals the row type does not have.
+        /// The same promotion rule the key obeys, for the same reason.
+        /// </remarks>
+        [TestMethod]
+        public void ANestedPartitionKeyDistributesRandomly()
+        {
+            var table = new CosmosTable(new CosmosContainerMetadata("products", new[] { "/inventory/sku" }));
+
+            table.getStatistic().getDistribution().getType().Should().Be(RelDistribution.Type.RANDOM_DISTRIBUTED);
+        }
+
+        /// <remarks>
+        /// The distribution says how rows are spread, never what order they arrive in — which is why
+        /// declaring one is safe where declaring a collation would licence dropping a <c>Sort</c>.
+        /// </remarks>
+        [TestMethod]
+        public void NoCollationIsClaimedAlongsideTheDistribution()
+        {
+            var table = new CosmosTable(new CosmosContainerMetadata("products", new[] { "/category" }));
+
+            table.getStatistic().getCollations().size().Should().Be(0);
         }
 
         /// <remarks>

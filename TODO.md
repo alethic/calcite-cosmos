@@ -114,6 +114,20 @@ a row count for a partition-pinned scan rather than for the container — which 
 between costing a single-partition read and costing everything. It needs a statistic attached to a
 `RelNode` rather than to a table, which is a larger change than it sounds.
 
+### The filter's private cost arithmetic — *medium, and it belongs in the cost model*
+
+`CosmosFilter.computeSelfCost` discounts a pinned partition key by the container's partition count
+and penalises an unindexed path, both as multipliers over Calcite's abstract cost. The facts are
+right; the place is wrong — they are stated once, privately, in one node's cost function, where
+nothing above the filter can see or compose them.
+
+Probed while reporting the distribution statistic, and the obvious unification does **not** work:
+the statistic says how rows are spread and the filter asks whether a predicate confines execution,
+and the filter recognises a *nested* partition key — which has no column ordinal, so the statistic
+must report `RANDOM` — that the executor genuinely routes on. Gating the discount on the
+distribution would lose that signal on every container with a nested key. Where the two meet is
+this section's cost model, taking the distribution as one input and the confinement as another.
+
 ### A cost model in RU — *large*
 
 The above are inputs; this is the model. Cosmos charges in RUs and the current model multiplies

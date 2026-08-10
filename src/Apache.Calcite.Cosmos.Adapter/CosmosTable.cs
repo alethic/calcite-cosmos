@@ -276,7 +276,33 @@ namespace Apache.Calcite.Cosmos.Adapter
                 ? java.lang.Double.valueOf(statistics.DocumentCount)
                 : null;
 
-            return Statistics.of(rowCount, keys, java.util.Collections.emptyList(), java.util.Collections.emptyList());
+            // THE DISTRIBUTION IS DECLARED, AND UNLIKE A COLLATION IT IS SAFE TO DECLARE.
+            //
+            // A container is hash-distributed by its partition key: that is what the key *is*, the
+            // service's own routing, not an inference about the data. Reporting it hands the planner
+            // the fact this adapter has otherwise been spending by hand — CosmosFilter's cost
+            // discounts a pinned key by the partition count, which is this same fact stated once,
+            // privately, in one node's cost function.
+            //
+            // A distribution says how rows are spread, never what order they arrive in, so none of
+            // the reasoning that keeps collations empty applies: nothing here licences dropping a
+            // Sort. The same promotion rule as the key does bind, and for the same reason — a
+            // distribution is expressed over field ordinals, so a nested partition key path, having
+            // no column, yields RANDOM rather than a distribution over ordinals it does not have.
+            //
+            // Which is also why this does not replace CosmosFilter's discount, and was tried: that
+            // asks whether a predicate *confines* execution, and it recognises the nested key this
+            // must report as RANDOM — the executor routes on one, so gating the discount here would
+            // lose a real cost signal on every container with a nested key. The two facts are
+            // different; where they meet is the RU cost model, which is where the arithmetic in
+            // that node's cost function belongs. See TODO.md.
+            var distribution = partitionPromoted && partitionOrdinals.size() > 0
+                ? RelDistributions.hash(partitionOrdinals)
+                : RelDistributions.RANDOM_DISTRIBUTED;
+
+            // Implemented rather than composed: Statistics.of has no overload carrying a
+            // distribution, though the interface declares one.
+            return new CosmosStatistic(rowCount, keys, distribution);
         }
 
         /// <inheritdoc />
