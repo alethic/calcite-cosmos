@@ -892,11 +892,33 @@ refuses it with 400 and deletes nothing, and an unenrolled account is documented
 
 **The gate is a probed capability consulted by the rule, not a configuration flag.** The probe is
 safe by construction — the operation invoked against a random partition key value, which deletes
-nothing whichever answer comes back — and it is cached on the container metadata behind a lazy
-provider, the exact shape statistics use, blocking once on the planning path where the adapter
-already permits it. Rule legality consulting container metadata is this adapter's recorded pattern;
-an account that answers 400 keeps the scan-and-delete it has today, and no statement anywhere
-trades a working plan for a per-request refusal.
+nothing whichever answer comes back — cached, and asked once on the planning path where the adapter
+already permits blocking. An account that answers 400 keeps the scan-and-delete it has today, and
+no statement anywhere trades a working plan for a per-request refusal.
+
+**Where the answer lives is researched but not decided, and the first act of building decides
+it.** The owner's lean is Calcite's metadata system — a custom `Metadata` class and provider,
+queried through `RelMetadataQuery` from the rule. What the research says, both ways:
+
+- The metadata system is Calcite's sanctioned, deliberately extensible point for facts the planner
+  consults, and it is machinery the statistics-after-pushdown item in `TODO.md` needs anyway — a
+  fact asked of a `RelNode` composes with facts that genuinely vary per node, where a property on
+  the container metadata never could. The docs define its scope as "cost functions and statistics
+  about relational operators", and every built-in class is statistical — cardinality, selectivity,
+  distinctness, uniqueness, predicates — derived per node and cached per query.
+- Calcite's own idiom for *capabilities* is a different seam: interfaces on tables, discovered by
+  `unwrap` — `ModifiableTable` is precisely "this table supports modification", and this adapter
+  already gates its writes on exactly such unwrapping. Flink likewise gates on table-source
+  ability interfaces rather than metadata.
+- Feasibility under IKVM is half-proven: the built-in metadata handlers are Janino-generated and
+  already run in this suite — every cost computed goes through them — so what is unverified is
+  only whether Janino's classloader resolves a handler interface *defined in C#*. If it refuses,
+  the probe's fallbacks, in order: the handler interface shipped as a small Java type through the
+  IKVM toolchain, or the capability on the container metadata behind a lazy provider, the shape
+  statistics use today.
+
+That feasibility probe is the first act of building the feature, and its outcome — with the
+owner's lean — makes the decision.
 
 Two facts the implementation inherits:
 
@@ -905,9 +927,12 @@ Two facts the implementation inherits:
   the scan-and-delete already is.
 - **Visibility is documented as immediate** — the physical deletion runs in the background but
   deleted documents stop appearing in queries and reads at once — which is what makes the recovery
-  faithful to read-your-writes. *Documented, not measured*: the claim must be verified against an
-  enrolled account before the fast path is trusted, and `WholePartitionDeleteProbe` is where the
-  block on doing so is asserted.
+  faithful to read-your-writes. *Documented, not measured.*
+
+**And the whole of it waits on an enrolled account.** Probe, gate and execution arrive together,
+as one piece, when there is an environment that accepts the operation to verify them against —
+machinery nothing exercises is not shipped ahead of the feature that would. Enrollment is through
+the subscription's portal Preview Features blade, which is the owner's to do.
 
 ### Updating
 
