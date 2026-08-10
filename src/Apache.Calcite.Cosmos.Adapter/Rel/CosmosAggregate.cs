@@ -89,12 +89,33 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
                 case SqlKind.__Enum.SUM:
                 case SqlKind.__Enum.MIN:
                 case SqlKind.__Enum.MAX:
-                case SqlKind.__Enum.AVG:
                     return arguments.size() == 1 && IsNonNullable(inputRowType, ((java.lang.Integer)arguments.get(0)).intValue());
+
+                case SqlKind.__Enum.AVG:
+                    // Cosmos AVG returns the exact mean; Calcite types an integer AVG as an integer
+                    // with truncating division. The fraction cannot be materialized as the declared
+                    // type — found by the differential suite, a fractional mean of _ts failing to
+                    // read as BIGINT — and truncating it here would still diverge from SQL's
+                    // toward-zero division on negatives. So AVG pushes only where the argument is
+                    // approximate and the two agree exactly; an integer AVG is carried by
+                    // AGGREGATE_REDUCE_FUNCTIONS as SUM and COUNT with the division done above, in
+                    // SQL's own semantics.
+                    return arguments.size() == 1
+                        && IsNonNullable(inputRowType, ((java.lang.Integer)arguments.get(0)).intValue())
+                        && IsApproximateNumeric(inputRowType, ((java.lang.Integer)arguments.get(0)).intValue());
 
                 default:
                     return false;
             }
+        }
+
+        static bool IsApproximateNumeric(RelDataType rowType, int ordinal)
+        {
+            var fields = rowType.getFieldList();
+            if (ordinal < 0 || ordinal >= fields.size())
+                return false;
+
+            return org.apache.calcite.sql.type.SqlTypeName.APPROX_TYPES.contains(((RelDataTypeField)fields.get(ordinal)).getType().getSqlTypeName());
         }
 
         static bool IsNonNullable(RelDataType rowType, int ordinal)

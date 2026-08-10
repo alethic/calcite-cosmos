@@ -972,6 +972,30 @@ no request units at all. Its decisions:
 
 ---
 
+## Differential testing
+
+Every pushdown is checked against an oracle rather than an expected string: the same SQL is planned
+twice — once with the full Cosmos rule set, once with only the way-out converter registered, so the
+scan is read whole and Calcite evaluates everything in process — and both plans execute against the
+same live container. Equal rows or a defect; there is no third outcome to hide in.
+
+- **The oracle is the adapter's own minimal mode, not a second engine.** Withholding every rule but
+  `CosmosToClrAsyncEnumerableConverterRule` is expressible with the rule-registration seam the
+  planner tests already use, costs no new surface, and the in-process side exercises the same row
+  builder — so a mismatch indicts the pushdown, not the plumbing around it.
+- **Rows are compared canonically, as multisets unless the statement orders.** Values are reduced
+  to a canonical text — numbers through double, documents with sorted keys — because the two sides
+  may box a computed value differently while meaning the same thing, and a map's entry order means
+  nothing.
+- **Known, recorded divergences are excluded by name.** Out-of-domain arithmetic is pushed
+  deliberately and diverges deliberately; the corpus states each exclusion beside the reason, so an
+  exclusion reads as a decision rather than a blind spot.
+- **The corpus leans into the semantics that have bitten**: null against absent, `NOT` over both,
+  grouping by a key some documents lack, `LIKE`'s shapes, and the aggregate forms. It needs the
+  emulator and reports inconclusive without one, like every test that needs a service.
+
+---
+
 ## Design Constraints
 
 - **Generate only what Cosmos accepts.** Declining to push down is always correct; emitting a

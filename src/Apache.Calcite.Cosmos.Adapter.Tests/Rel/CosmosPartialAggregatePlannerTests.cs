@@ -143,6 +143,28 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
         }
 
         /// <remarks>
+        /// A plain <c>AVG</c> over an integer column, which must not push as Cosmos <c>AVG</c>: the
+        /// service returns the exact mean, Calcite types an integer average as an integer with
+        /// truncating division, and the fraction can neither be materialized as the declared type
+        /// nor truncated without diverging on negatives — found by the differential suite when a
+        /// fractional mean of <c>_ts</c> failed to read as <c>BIGINT</c>. The reduce rule carries it
+        /// instead: pushed <c>SUM</c> and <c>COUNT</c>, the division done above in SQL's own
+        /// semantics.
+        /// </remarks>
+        [TestMethod]
+        public void AvgOverAnIntegerColumnIsCarriedAsPushedSumAndCount()
+        {
+            var plan = Plan("SELECT AVG(c.\"_ts\") AS a FROM products AS c");
+
+            var pushed = Find<CosmosAggregate>(plan);
+            pushed.Should().NotBeNull();
+
+            Render(pushed!).Should().Contain("SUM(c._ts)").And.Contain("COUNT(1)").And.NotContain("AVG(");
+
+            plan.getConvention().Should().Be(ClrAsyncEnumerableConvention.Instance);
+        }
+
+        /// <remarks>
         /// An average of averages weights every group equally, so <c>AVG</c> has no finishing form
         /// of its own — and unreduced, a grouping-set <c>AVG</c> cannot be implemented by the
         /// asynchronous convention at all. <c>AGGREGATE_REDUCE_FUNCTIONS</c> decomposes it into
