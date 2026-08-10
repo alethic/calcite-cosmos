@@ -883,6 +883,32 @@ satisfies — and asking such a trait set for its one collation throws. An `INSE
 `VALUES` is the first statement anyone writes, so without it the rule fails immediately; a `DELETE`
 never shows it, its input being a scan, which claims no collation at all.
 
+### Deleting a whole partition — designed, gated on a probed capability
+
+`DELETE … WHERE` pinning exactly the complete partition key could be
+`DeleteAllItemsByPartitionKeyStreamAsync` — one request, no query engine — instead of a scan and a
+delete per document. The operation is an account-level public preview: measured, the emulator
+refuses it with 400 and deletes nothing, and an unenrolled account is documented to do the same.
+
+**The gate is a probed capability consulted by the rule, not a configuration flag.** The probe is
+safe by construction — the operation invoked against a random partition key value, which deletes
+nothing whichever answer comes back — and it is cached on the container metadata behind a lazy
+provider, the exact shape statistics use, blocking once on the planning path where the adapter
+already permits it. Rule legality consulting container metadata is this adapter's recorded pattern;
+an account that answers 400 keeps the scan-and-delete it has today, and no statement anywhere
+trades a working plan for a per-request refusal.
+
+Two facts the implementation inherits:
+
+- **The affected count comes from a `COUNT(*)` first.** The operation reports none, and a `DELETE`
+  answers with one; the preceding count is racy against concurrent writers to exactly the degree
+  the scan-and-delete already is.
+- **Visibility is documented as immediate** — the physical deletion runs in the background but
+  deleted documents stop appearing in queries and reads at once — which is what makes the recovery
+  faithful to read-your-writes. *Documented, not measured*: the claim must be verified against an
+  enrolled account before the fast path is trusted, and `WholePartitionDeleteProbe` is where the
+  block on doing so is asserted.
+
 ### Updating
 
 **SQL fixes the *what*; the adapter owns the *how*.** An `UPDATE` assigns whole values to named

@@ -65,11 +65,13 @@ carries both with the reasoning.
    queue behind it: the `UPDATE` patch tier (section 3), the nullable-aggregate rewrite (section 5),
    and a temporal basis (section 4). The implementation is parked on `declared-columns-parked`; the
    design is in `DESIGN.md` under *Declared columns* on that branch.
-2. **The small-coverage batch** — the scalar functions still to map (section 4), `SELECT DISTINCT`,
+2. **Whole-partition `DELETE`, probe-gated** (section 3) — the design is settled in `DESIGN.md`;
+   the work is the capability probe on the metadata, the rule consulting it, and the
+   count-then-delete execution.
+3. **The small-coverage batch** — the scalar functions still to map (section 4), `SELECT DISTINCT`,
    native `IN`/`BETWEEN` with its pricing measurement, `TOP`, and the remaining emulator gaps
    asserted (section 9) — each a translator case and a test, and each a differential corpus entry
-   as it lands. Whole-partition `DELETE` left this list by measurement: blocked on a service
-   preview, with a sentinel asserting the block (section 3).
+   as it lands.
 
 ---
 
@@ -169,20 +171,19 @@ the tier is one rule-and-writer step once that lands. The execution ladder above
 decomposition via a mutation operator, the diff and blind-patch optimizations) is recorded in
 `DESIGN.md` under *Updating*.
 
-### Whole-partition `DELETE` — *blocked on a service preview, measured*
+### Whole-partition `DELETE` — *medium, designed; gated on a probed capability*
 
-A predicate pinning the partition key and nothing else could be
-`DeleteAllItemsByPartitionKeyStreamAsync` — not a query at all — instead of today's scan and delete
-per document. **Measured, and the service refuses it:** the emulator answers 400 and deletes
-nothing, the capability is an account-level preview, and the preview is not discoverable as a
-registrable feature under the test subscription. `WholePartitionDeleteProbe` *asserts* the refusal,
-so an emulator or account that implements it fails the test loudly and reopens this item.
-
-Two design questions wait here for that day, so the reopening starts with an argument rather than a
-blank page: the operation reports no affected count, so the honest `DELETE` count would come from a
-`COUNT(*)` query first — racy to exactly the degree the scan-and-delete already is — and the
-documentation describes the deletion as a background operation, which breaks read-your-writes and
-likely means the recovery must be an explicit opt-in operand rather than a silent improvement.
+A predicate pinning exactly the complete partition key becomes
+`DeleteAllItemsByPartitionKeyStreamAsync` — one request, no query at all — where the account
+supports it, and stays the scan-and-delete it is today where it does not. The design is recorded in
+`DESIGN.md` under *Deleting a whole partition*: the operation is an account-level public preview
+(measured: the emulator answers 400 and deletes nothing; portal-only enrollment, not registrable
+from the CLI under the test subscription), so **the rule consults a probed capability** — the
+operation invoked against a random key value, safe whichever answer comes back, cached on the
+container metadata behind a lazy provider the way statistics are. The count comes from a `COUNT(*)`
+first; visibility-on-return is documented as immediate but *unmeasured*, and
+`WholePartitionDeleteProbe` asserts the block on measuring it — an environment that implements the
+operation fails that test loudly, which is the signal to verify the claim and finish this item.
 
 ### Transactional batch — *medium*
 
