@@ -163,6 +163,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
                     Expression.Constant(write),
                     FieldReader(inputResult.PhysType, inputRowType),
                     CountBuilder(physType),
+                    Rel.Convert.CosmosConverters.LookupCacheExpression(getTable(), implementor.Root),
                     // As everywhere else on this path: Calcite's cancellation is a flag on the
                     // DataContext rather than a token, and a request in flight would not observe one.
                     Expression.Constant(CancellationToken.None)));

@@ -89,6 +89,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
             CosmosWrite write,
             Func<TRow, object?[]> fields,
             Func<long, TResult> result,
+            CosmosLookupCache? invalidate = null,
             [EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
             if (source is null)
@@ -150,6 +151,11 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
                         throw new CosmosExecutionException($"No write is defined for operation '{write.Operation}'.");
                 }
             }
+
+            // The container changed, so what the lookup cache remembers about it may be wrong.
+            // Cleared whatever was written: goodwill is cheap here, and a write from outside the
+            // process is the TTL's problem rather than this line's.
+            invalidate?.Clear();
 
             yield return result(affected);
         }

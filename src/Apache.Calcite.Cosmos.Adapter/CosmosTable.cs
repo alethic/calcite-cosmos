@@ -43,20 +43,34 @@ namespace Apache.Calcite.Cosmos.Adapter
         readonly CosmosConvention _convention;
         readonly ICosmosQueryExecutor? _executor;
         readonly CosmosColumnStrategies _strategies;
+        readonly Client.CosmosLookupCache? _lookupCache;
 
         /// <summary>
         /// Initializes a new instance.
         /// </summary>
         /// <param name="container">The container this table exposes.</param>
         /// <param name="executor">Executes statements against the container, or <c>null</c> to expose a table that can be planned against but not read.</param>
+        /// <param name="lookupCache">The lookup join's cache across executions, or <c>null</c> where none is configured.</param>
         /// <exception cref="ArgumentNullException"><paramref name="container"/> is <c>null</c>.</exception>
-        public CosmosTable(CosmosContainerMetadata container, ICosmosQueryExecutor? executor = null)
+        public CosmosTable(CosmosContainerMetadata container, ICosmosQueryExecutor? executor = null, Client.CosmosLookupCache? lookupCache = null)
         {
             _container = container ?? throw new ArgumentNullException(nameof(container));
             _convention = CosmosConvention.Create(container);
             _executor = executor;
             _strategies = new CosmosColumnStrategies(this);
+            _lookupCache = lookupCache;
         }
+
+        /// <summary>
+        /// Gets the lookup join's cache across executions, or <c>null</c> where none is configured.
+        /// </summary>
+        /// <remarks>
+        /// Owned here for the reason the executor is: the compiled plan navigates to this table
+        /// through the schema the query executes against, and what hangs off the table shares the
+        /// schema's lifetime and its declared policy. See <c>DESIGN.md</c> under <em>The lookup
+        /// join's caches</em>.
+        /// </remarks>
+        public Client.CosmosLookupCache? LookupCache => _lookupCache;
 
         /// <inheritdoc />
         /// <remarks>

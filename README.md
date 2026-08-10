@@ -98,6 +98,18 @@ Cosmos has no relational join — its `JOIN` cross-products a document with its 
 
 It applies to an inner join on a single equality where the container's side of the key is a document path. Anything else is joined the ordinary way, by reading both sides.
 
+Within one execution the join remembers what each key answered, absence included. To remember across executions — reference data is looked up repeatedly by definition, and a remembered answer costs no request units at all — declare a policy in the operand:
+
+```json
+"operand": {
+  "…": "…",
+  "lookupCacheMaxRows": 10000,
+  "lookupCacheExpireSeconds": 300
+}
+```
+
+Both together or neither: the bound says what the cache may hold (an absent key counts as one row), the expiry says how long an answer may be believed, and a cache missing either is not something the adapter will guess into existence. A write through the adapter clears its container's cache; a write from outside the process is what the expiry is for.
+
 **One thing a host has to do for this to plan.** After the cost-based planner runs, apply the calc rules as a pass over the result:
 
 ```csharp

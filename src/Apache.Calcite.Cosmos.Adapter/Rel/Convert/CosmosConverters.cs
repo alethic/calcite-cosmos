@@ -181,6 +181,50 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
         static readonly System.Reflection.MethodInfo GetWriterMethod = typeof(CosmosSchemas).GetMethod(nameof(CosmosSchemas.GetWriter), [typeof(org.apache.calcite.DataContext), typeof(string[])])
             ?? throw new InvalidOperationException($"'{nameof(CosmosSchemas.GetWriter)}' is missing from {nameof(CosmosSchemas)}.");
 
+        static readonly System.Reflection.MethodInfo GetLookupCacheMethod = typeof(CosmosSchemas).GetMethod(nameof(CosmosSchemas.GetLookupCache), [typeof(org.apache.calcite.DataContext), typeof(string[])])
+            ?? throw new InvalidOperationException($"'{nameof(CosmosSchemas.GetLookupCache)}' is missing from {nameof(CosmosSchemas)}.");
+
+        /// <summary>
+        /// Returns the expression by which the running plan reaches a container's lookup cache, or
+        /// the null it holds where none is configured.
+        /// </summary>
+        /// <remarks>
+        /// The same route as <see cref="ExecutorExpression"/>, for the same reason: the cache shares
+        /// the schema's lifetime, and a plan is prepared once and executed against whichever schema
+        /// is current.
+        /// </remarks>
+        /// <param name="input">The subtree being converted.</param>
+        /// <param name="root">The parameter the context arrives by.</param>
+        /// <returns>The expression.</returns>
+        public static Expression LookupCacheExpression(RelNode input, ParameterExpression root)
+        {
+            var scan = FindScan(input) ?? throw new CosmosTranslationException("The subtree has no Cosmos table scan at its leaf.");
+            return Expression.Call(null, GetLookupCacheMethod, root, Expression.Constant(QualifiedName(scan.getTable())));
+        }
+
+        /// <summary>
+        /// The table-direct counterpart of <see cref="LookupCacheExpression(RelNode, ParameterExpression)"/>,
+        /// for a write, whose container is named by the modify rather than scanned below it.
+        /// </summary>
+        /// <param name="table">The table being written to.</param>
+        /// <param name="root">The parameter the context arrives by.</param>
+        /// <returns>The expression.</returns>
+        public static Expression LookupCacheExpression(RelOptTable table, ParameterExpression root)
+        {
+            return Expression.Call(null, GetLookupCacheMethod, root, Expression.Constant(QualifiedName(table ?? throw new ArgumentNullException(nameof(table)))));
+        }
+
+        static string[] QualifiedName(RelOptTable table)
+        {
+            var qualifiedName = table.getQualifiedName();
+
+            var names = new string[qualifiedName.size()];
+            for (var i = 0; i < names.Length; i++)
+                names[i] = (string)qualifiedName.get(i);
+
+            return names;
+        }
+
         /// <summary>
         /// Returns the expression by which the running plan reaches what writes to a container.
         /// </summary>

@@ -31,14 +31,21 @@ namespace Apache.Calcite.Cosmos.Adapter
         /// Returns what executes statements against a container. Omit it to expose tables that can be
         /// planned against but not read — which is what a schema built from metadata alone can offer.
         /// </param>
+        /// <param name="lookupCacheFactory">
+        /// Returns a container's lookup cache across executions, or <c>null</c> for none. One instance
+        /// per container: the cache shares the schema's lifetime and its declared freshness policy.
+        /// </param>
         /// <exception cref="ArgumentNullException"><paramref name="containers"/> is <c>null</c>.</exception>
-        public CosmosSchema(IEnumerable<CosmosContainerMetadata> containers, Func<CosmosContainerMetadata, ICosmosQueryExecutor>? executorFactory = null)
+        public CosmosSchema(
+            IEnumerable<CosmosContainerMetadata> containers,
+            Func<CosmosContainerMetadata, ICosmosQueryExecutor>? executorFactory = null,
+            Func<CosmosContainerMetadata, CosmosLookupCache?>? lookupCacheFactory = null)
         {
             if (containers is null)
                 throw new ArgumentNullException(nameof(containers));
 
             foreach (var container in containers)
-                _tables.put(container.Name, new CosmosTable(container, executorFactory?.Invoke(container)));
+                _tables.put(container.Name, new CosmosTable(container, executorFactory?.Invoke(container), lookupCacheFactory?.Invoke(container)));
         }
 
         /// <inheritdoc />
