@@ -99,6 +99,74 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Metadata
             values.Should().Equal("emea");
         }
 
+        // ── A set of point reads ──────────────────────────────────────────────────
+
+        static bool ExtractSet(RexNode condition, CosmosContainerMetadata container, out IReadOnlyList<object?> values, out IReadOnlyList<string> ids) =>
+            CosmosPartitionKeyExtractor.TryExtractPointReadSet(condition, Fields, container, "c", out values, out ids);
+
+        /// <remarks>
+        /// The shape <c>pk = 'x' AND id IN ('a', 'b')</c>, after <c>IN</c> has expanded to the
+        /// disjunction of equalities the planner carries.
+        /// </remarks>
+        [TestMethod]
+        public void ASetOfIdsWithACompleteKeyIsRecovered()
+        {
+            var condition = And(Eq(Ref(1), Str("bikes")), Or(Eq(Ref(3), Str("a")), Eq(Ref(3), Str("b"))));
+
+            ExtractSet(condition, Container("/category"), out var values, out var ids).Should().BeTrue();
+            values.Should().Equal("bikes");
+            ids.Should().Equal("a", "b");
+        }
+
+        [TestMethod]
+        public void DuplicateIdsCollapse()
+        {
+            var condition = And(Eq(Ref(1), Str("bikes")), Or(Eq(Ref(3), Str("a")), Eq(Ref(3), Str("a"))));
+
+            ExtractSet(condition, Container("/category"), out _, out var ids).Should().BeTrue();
+            ids.Should().Equal("a");
+        }
+
+        /// <remarks>
+        /// The batch read applies no predicate, so a residual conjunct rules it out — the same
+        /// blindness the single point read answers for.
+        /// </remarks>
+        [TestMethod]
+        public void AResidualConjunctIsNotRecovered()
+        {
+            var condition = And(
+                Eq(Ref(1), Str("bikes")),
+                Or(Eq(Ref(3), Str("a")), Eq(Ref(3), Str("b"))),
+                Eq(_rex.makeCall(SqlStdOperatorTable.ITEM, Ref(0), Str("price")), Str("5")));
+
+            ExtractSet(condition, Container("/category"), out _, out _).Should().BeFalse();
+        }
+
+        [TestMethod]
+        public void ABranchThatIsNotAnIdIsNotRecovered()
+        {
+            var condition = And(Eq(Ref(1), Str("bikes")), Or(Eq(Ref(3), Str("a")), Eq(Ref(1), Str("shoes"))));
+
+            ExtractSet(condition, Container("/category"), out _, out _).Should().BeFalse();
+        }
+
+        [TestMethod]
+        public void ASetWithoutACompleteKeyIsNotRecovered()
+        {
+            ExtractSet(Or(Eq(Ref(3), Str("a")), Eq(Ref(3), Str("b"))), Container("/category"), out _, out _).Should().BeFalse();
+        }
+
+        /// <remarks>
+        /// A lone id equality is the single point read's question, asked first by the filter.
+        /// </remarks>
+        [TestMethod]
+        public void ASingleIdEqualityIsLeftToThePointRead()
+        {
+            var condition = And(Eq(Ref(1), Str("bikes")), Eq(Ref(3), Str("a")));
+
+            ExtractSet(condition, Container("/category"), out _, out _).Should().BeFalse();
+        }
+
         // ── Not recovered ─────────────────────────────────────────────────────────
 
         /// <remarks>

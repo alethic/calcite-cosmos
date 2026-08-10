@@ -351,6 +351,30 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
         }
 
         /// <remarks>
+        /// The batch point read end to end: two of the ids exist in the partition, one does not, and
+        /// the missing one is simply absent from the result — the answer the query this stands in
+        /// for would have given.
+        /// </remarks>
+        [TestMethod]
+        public async Task ABatchOfPointReadsReturnsTheDocumentsThatExist()
+        {
+            var query = new CosmosQuery(
+                "SELECT * FROM products c WHERE c.category = @p0 AND c.id IN (@p1, @p2, @p3)",
+                new[] { new CosmosParameter("@p0", "bikes"), new CosmosParameter("@p1", "1"), new CosmosParameter("@p2", "2"), new CosmosParameter("@p3", "missing") },
+                PartitionKeyValues: new object?[] { "bikes" },
+                PartitionKeyIsComplete: true,
+                PointReadIds: new[] { "1", "2", "missing" });
+
+            var results = await Execute(query);
+
+            results.Select(x => x.GetProperty("id").GetString()).Should().BeEquivalentTo("1", "2");
+
+            // What arrives is documents, not a projection: the service properties are present, which
+            // is what the converter's document row builder depends on.
+            results.Should().OnlyContain(x => x.GetProperty("_ts").ValueKind == JsonValueKind.Number);
+        }
+
+        /// <remarks>
         /// The measurement the <c>LIKE</c> translation is built on: Cosmos reads a bracket in the
         /// pattern as a character range, where SQL <c>LIKE</c> matches the brackets literally —
         /// so a pattern containing one must not be pushed.

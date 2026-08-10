@@ -165,6 +165,35 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             query.Sql.Should().Contain("STARTSWITH(c.category, @p0)");
         }
 
+        /// <remarks>
+        /// The batch counterpart of the point read: <c>pk = … AND id IN (…)</c> is a set of
+        /// documents, which <c>ReadManyItemsAsync</c> answers charged as point reads. The <c>IN</c>
+        /// arrives from the planner as a <c>SEARCH</c>, which is why this is asserted from real SQL
+        /// rather than a hand-built predicate.
+        /// </remarks>
+        [TestMethod]
+        public void ASetOfIdsWithThePartitionKeyIsRecoveredAsABatchOfPointReads()
+        {
+            var query = Query(PlanToCosmos("SELECT * FROM products AS c WHERE c.\"category\" = 'bikes' AND c.\"id\" IN ('a', 'b')"));
+
+            query.PointReadIds.Should().Equal("a", "b");
+            query.PartitionKeyValues.Should().Equal("bikes");
+            query.PartitionKeyIsComplete.Should().BeTrue();
+        }
+
+        /// <remarks>
+        /// The reads are blind, so anything beyond the pinned predicate withdraws them and the
+        /// statement runs as the query it already is.
+        /// </remarks>
+        [TestMethod]
+        public void AResidualPredicateWithdrawsTheBatchOfPointReads()
+        {
+            var query = Query(PlanToCosmos("SELECT * FROM products AS c WHERE c.\"category\" = 'bikes' AND c.\"id\" IN ('a', 'b') AND c.\"_ts\" > 5"));
+
+            query.PointReadIds.Should().BeNull();
+            query.PartitionKeyValues.Should().Equal("bikes");
+        }
+
         [TestMethod]
         public void PredicateOnANonPartitionKeyRecoversNothing()
         {

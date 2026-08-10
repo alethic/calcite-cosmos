@@ -65,7 +65,8 @@ carries both with the reasoning.
    queue behind it: the `UPDATE` patch tier (section 3), the nullable-aggregate rewrite (section 5),
    and a temporal basis (section 4). The implementation is parked on `declared-columns-parked`; the
    design is in `DESIGN.md` under *Declared columns* on that branch.
-2. **Differential testing** (section 9) — the highest-value test work, and gated on nothing.
+2. **Whole-partition `DELETE`** (section 3) — the remaining medium item that is a straight extension
+   of recovery logic that already exists.
 
 ---
 
@@ -134,11 +135,6 @@ Apache.Calcite 2.0.0-pre.3 fixed the ADO.NET adapter against SQL Server
 can become the SQL Server it was meant to be — a one-line change, plus the SQL Server the sample
 would then need running beside the emulator, which is the actual decision. Nothing in CI runs the
 sample either way; it was last verified by hand against pre.3.
-
-### Batch point reads for `id IN (…)` — *medium*
-
-`ReadManyItemsAsync` takes (id, partition key) pairs and is charged as point reads. The same recovery
-the single point read already does, one level up.
 
 ### Change feed — *large*
 

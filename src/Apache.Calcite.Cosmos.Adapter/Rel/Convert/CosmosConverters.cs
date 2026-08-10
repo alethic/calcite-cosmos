@@ -112,8 +112,8 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
             // A batch restriction is not a lookup by id, whatever the rest of the predicate said. The
             // extractor reads literals only and so would not have offered one, but a point read applies
             // no predicate at all — it would ignore this and return a document the batch did not ask
-            // for, which is a wrong answer rather than a slow one.
-            return (implementor.Build() with { PointReadId = null }, fields);
+            // for, which is a wrong answer rather than a slow one. Both forms, for the same reason.
+            return (implementor.Build() with { PointReadId = null, PointReadIds = null }, fields);
         }
 
         /// <summary>
