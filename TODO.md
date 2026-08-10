@@ -318,12 +318,13 @@ comes back as SQL's null does, and that `* 1` does not disturb a large integer.
 
 - **A real account in CI** — *medium.* The emulator accepts statements Azure rejects and rejects
   features Azure implements; both have been found by hand. A nightly job against a real account is
-  what stops the next one being found by a user.
-- **Differential testing** — *large, and the highest-value test work.* Run the same SQL twice — once
-  with the Cosmos rules registered, once with them withheld so Calcite evaluates everything in
-  process — and require the same rows. Every pushdown is then checked against an oracle rather than
-  against an expected string. This is what `ClrEnumerableDifferentialTests` does for the CLR
-  conventions in `calcite-dotnet`, and it is where the defects were found there.
+  what stops the next one being found by a user — and it is where `CosmosDifferentialTests` and the
+  routing measurement rerun their evidence against the real service.
+- **Growing the differential corpus** — *small, forever.* The harness is done (`DESIGN.md` under
+  *Differential testing*); every new pushdown should bring its statements to the corpus, and every
+  translator addition is a candidate. Probed and in: filters, sorts, the aggregate forms, `LIKE`,
+  and the array traversal — the guess that the oracle could not evaluate an in-process unnest was
+  wrong, and the corpus says so.
 - **Emulator gaps, asserted** — *small.* The emulator silently discards composite indexes, does not
   implement full text search, reports a flat 1 RU for every request, and returns no index metrics.
   All four are known and are why the corresponding tests report inconclusive there rather than
