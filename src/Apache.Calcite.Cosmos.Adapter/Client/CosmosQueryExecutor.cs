@@ -81,6 +81,33 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
         }
 
         /// <summary>
+        /// Reads a set of documents directly, yielding those that exist.
+        /// </summary>
+        /// <remarks>
+        /// A missing id is simply absent from the result, which is the answer the query this stands
+        /// in for would have given — the same stance the single read takes on a 404.
+        /// </remarks>
+        async IAsyncEnumerable<JsonElement> ReadManyAsync(IReadOnlyList<string> ids, PartitionKey partitionKey, [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            var items = new List<(string, PartitionKey)>(ids.Count);
+            foreach (var id in ids)
+                items.Add((id, partitionKey));
+
+            using var response = await _container.ReadManyItemsStreamAsync(items, cancellationToken: cancellationToken).ConfigureAwait(false);
+
+            Report(response.Headers.RequestCharge, CosmosInstrumentation.Kinds.PointRead);
+
+            response.EnsureSuccessStatusCode();
+
+            using var document = await JsonDocument.ParseAsync(response.Content, cancellationToken: cancellationToken).ConfigureAwait(false);
+
+            // The same envelope a query page carries, and cloned for the same reason: the elements
+            // belong to the document, which returns its buffer to the pool here.
+            foreach (var element in document.RootElement.GetProperty("Documents").EnumerateArray())
+                yield return element.Clone();
+        }
+
+        /// <summary>
         /// Builds the SDK query definition for a rendered statement.
         /// </summary>
         /// <param name="query">The statement and its bound parameters.</param>
@@ -189,6 +216,16 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
             if (query.PointReadId is string id && query.PartitionKeyIsComplete && effective is PartitionKey readKey)
             {
                 await foreach (var document in ReadItemAsync(id, readKey, cancellationToken))
+                    yield return document;
+
+                yield break;
+            }
+
+            // The same recovery for a set of ids: ReadManyItemsAsync is charged as point reads,
+            // and is gated by the same completeness the single read is.
+            if (query.PointReadIds is { Count: > 0 } ids && query.PartitionKeyIsComplete && effective is PartitionKey manyKey)
+            {
+                await foreach (var document in ReadManyAsync(ids, manyKey, cancellationToken))
                     yield return document;
 
                 yield break;

@@ -46,7 +46,16 @@ namespace Apache.Calcite.Cosmos.Adapter
     /// <c>CosmosPartitionKeyExtractor.TryExtractPointRead</c> for the predicate condition.
     /// </para>
     /// </param>
-    public readonly record struct CosmosQuery(string Sql, IReadOnlyList<CosmosParameter> Parameters, IReadOnlyList<object?>? PartitionKeyValues = null, int? MaxItemCount = null, string? PointReadId = null, bool PartitionKeyIsComplete = false);
+    /// <param name="PointReadIds">
+    /// The distinct <c>id</c>s to read as a batch of point reads when the statement is exactly a
+    /// lookup by a set of <c>id</c>s and a complete partition key, otherwise <c>null</c>.
+    /// <para>
+    /// <c>ReadManyItemsAsync</c> is charged as point reads and, like one, applies no predicate and
+    /// returns documents rather than a projection — so the same conditions gate it, one level up.
+    /// Never set together with <see cref="PointReadId"/>.
+    /// </para>
+    /// </param>
+    public readonly record struct CosmosQuery(string Sql, IReadOnlyList<CosmosParameter> Parameters, IReadOnlyList<object?>? PartitionKeyValues = null, int? MaxItemCount = null, string? PointReadId = null, bool PartitionKeyIsComplete = false, IReadOnlyList<string>? PointReadIds = null);
 
     /// <summary>
     /// Accumulates the state contributed by a tree of <see cref="CosmosRel"/> nodes and renders
@@ -342,7 +351,7 @@ namespace Apache.Calcite.Cosmos.Adapter
         /// </summary>
         /// <returns>The statement text and its bound parameters.</returns>
         /// <exception cref="InvalidOperationException">The accumulated clauses form a statement Cosmos does not accept.</exception>
-        public CosmosQuery Build() => new(_query.Build(), _parameters.Parameters, PartitionKeyValues, MaxItemCount(), PointReadId(), PartitionKeyIsComplete);
+        public CosmosQuery Build() => new(_query.Build(), _parameters.Parameters, PartitionKeyValues, MaxItemCount(), PointReadId(), PartitionKeyIsComplete, PointReadIds());
 
         /// <summary>
         /// Gets or sets the <c>id</c> a filter pinned alongside a complete partition key, or <c>null</c>.
@@ -352,6 +361,32 @@ namespace Apache.Calcite.Cosmos.Adapter
         /// is <see cref="Build"/>'s decision, because the predicate is only half the question.
         /// </remarks>
         public string? PointReadCandidate { get; set; }
+
+        /// <summary>
+        /// Gets or sets the distinct <c>id</c>s a filter pinned as a set alongside a complete
+        /// partition key, or <c>null</c>.
+        /// </summary>
+        /// <remarks>
+        /// The batch counterpart of <see cref="PointReadCandidate"/>, set by a filter whose predicate
+        /// is exactly <c>pk = … AND id IN (…)</c>, and acted on under the same conditions.
+        /// </remarks>
+        public IReadOnlyList<string>? PointReadSetCandidate { get; set; }
+
+        /// <summary>
+        /// Returns the <c>id</c>s to read as a batch, under exactly the conditions
+        /// <see cref="PointReadId"/> applies to a single one: every clause beyond the pinned
+        /// predicate rules the reads out, a batch of blind reads being no less blind.
+        /// </summary>
+        IReadOnlyList<string>? PointReadIds()
+        {
+            if (PointReadSetCandidate is null)
+                return null;
+
+            if (_query.HasGroupBy || _query.HasOrderBy || _query.HasOrderByRank || _query.HasRowLimit || _query.HasUnnest)
+                return null;
+
+            return PointReadSetCandidate;
+        }
 
         /// <summary>
         /// Returns the <c>id</c> to read directly, or <c>null</c> where the statement asks for something

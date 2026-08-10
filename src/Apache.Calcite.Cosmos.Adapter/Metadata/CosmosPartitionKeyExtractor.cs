@@ -186,6 +186,141 @@ namespace Apache.Calcite.Cosmos.Adapter.Metadata
         }
 
         /// <summary>
+        /// Attempts to recover a set of <c>id</c>s and a complete partition key from a predicate that
+        /// says nothing else — the shape a batch of point reads can answer.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <c>WHERE pk = 'x' AND id IN ('a', 'b', 'c')</c> is <see cref="TryExtractPointRead"/>'s
+        /// question asked for several documents at once, and <c>ReadManyItemsAsync</c> answers it
+        /// charged as point reads. The same blindness applies: the batch read applies no predicate,
+        /// so every conjunct must be a partition key equality or the one disjunction of <c>id</c>
+        /// equalities, and anything else leaves the statement to the query path.
+        /// </para>
+        /// <para>
+        /// An <c>IN</c> arrives as a <c>SEARCH</c> over a set and is expanded here the way
+        /// translation expands it, so the shapes this walks are the ones the statement would carry.
+        /// Duplicate <c>id</c>s collapse: <c>IN ('a', 'a')</c> asks for one document.
+        /// </para>
+        /// </remarks>
+        /// <param name="condition">The predicate, expressed over <paramref name="fields"/>.</param>
+        /// <param name="fields">The ordinal-to-path binding of the filtered input.</param>
+        /// <param name="container">The container being read.</param>
+        /// <param name="rootAlias">The alias bound to the container.</param>
+        /// <param name="values">On success, one value per declared partition key path, in order.</param>
+        /// <param name="ids">On success, the distinct pinned <c>id</c>s, in predicate order.</param>
+        /// <returns><c>true</c> if the predicate is exactly a set of <c>id</c>s and a complete partition key.</returns>
+        public static bool TryExtractPointReadSet(RexNode condition, IReadOnlyList<CosmosPath?> fields, CosmosContainerMetadata container, string rootAlias, out IReadOnlyList<object?> values, out IReadOnlyList<string> ids)
+        {
+            values = Array.Empty<object?>();
+            ids = Array.Empty<string>();
+
+            if (condition is null || fields is null || container is null)
+                return false;
+
+            condition = RexUtil.expandSearch(RexBuilderHolder.Value, null, condition);
+
+            if (TryExtract(condition, fields, container, rootAlias, out var partitionKey) == false)
+                return false;
+
+            var conjuncts = new List<RexNode>();
+            Flatten(condition, conjuncts);
+
+            var accounted = new HashSet<string>(container.PartitionKeyPaths, StringComparer.Ordinal);
+            List<string>? set = null;
+
+            foreach (var conjunct in conjuncts)
+            {
+                if (conjunct is not RexCall call)
+                    return false;
+
+                if ((SqlKind.__Enum)call.getKind().ordinal() == SqlKind.__Enum.EQUALS)
+                {
+                    // A partition key equality accounts for itself; any other equality — an id, or
+                    // something else entirely — is a shape this recovery does not answer for. A lone
+                    // id equality is TryExtractPointRead's question, asked first by the caller.
+                    var pinned = new Dictionary<string, object?>(StringComparer.Ordinal);
+                    Collect(call, fields, rootAlias, pinned);
+
+                    if (pinned.Count == 1 && accounted.Contains(System.Linq.Enumerable.First(pinned.Keys)))
+                        continue;
+
+                    return false;
+                }
+
+                if (TryExtractIdSet(call, fields, rootAlias, out var branchIds))
+                {
+                    // Two id sets in one conjunction intersect, which this does not compute.
+                    if (set is not null)
+                        return false;
+
+                    set = branchIds;
+                    continue;
+                }
+
+                return false;
+            }
+
+            if (set is null)
+                return false;
+
+            values = partitionKey;
+            ids = set;
+            return true;
+        }
+
+        /// <summary>
+        /// Recognises a disjunction in which every branch pins <c>id</c> to a string.
+        /// </summary>
+        static bool TryExtractIdSet(RexCall call, IReadOnlyList<CosmosPath?> fields, string rootAlias, out List<string> ids)
+        {
+            ids = new List<string>();
+
+            if ((SqlKind.__Enum)call.getKind().ordinal() != SqlKind.__Enum.OR)
+                return false;
+
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+
+            for (var i = 0; i < call.getOperands().size(); i++)
+            {
+                if (call.getOperands().get(i) is not RexCall branch ||
+                    (SqlKind.__Enum)branch.getKind().ordinal() != SqlKind.__Enum.EQUALS)
+                    return false;
+
+                var pinned = new Dictionary<string, object?>(StringComparer.Ordinal);
+                Collect(branch, fields, rootAlias, pinned);
+
+                // Cosmos types id as a string; a branch pinning anything else, or anything more,
+                // makes the disjunction a predicate rather than a set of documents.
+                if (pinned.Count != 1 ||
+                    pinned.TryGetValue("/" + CosmosContainerMetadata.IdPropertyName, out var value) == false ||
+                    value is not string id)
+                    return false;
+
+                if (seen.Add(id))
+                    ids.Add(id);
+            }
+
+            return ids.Count > 0;
+        }
+
+        /// <summary>
+        /// Flattens nested conjunctions into their top-level conjuncts.
+        /// </summary>
+        static void Flatten(RexNode node, List<RexNode> conjuncts)
+        {
+            if (node is RexCall call && (SqlKind.__Enum)call.getKind().ordinal() == SqlKind.__Enum.AND)
+            {
+                for (var i = 0; i < call.getOperands().size(); i++)
+                    Flatten((RexNode)call.getOperands().get(i), conjuncts);
+
+                return;
+            }
+
+            conjuncts.Add(node);
+        }
+
+        /// <summary>
         /// Determines whether every top-level conjunct is an equality pinning one of the given paths.
         /// </summary>
         /// <remarks>

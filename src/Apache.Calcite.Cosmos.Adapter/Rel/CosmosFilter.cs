@@ -207,6 +207,12 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
                 Metadata.CosmosPartitionKeyExtractor.TryExtractPointRead(getCondition(), implementor.Fields, implementor.Container, implementor.RootAlias, out _, out var pointReadId))
                 implementor.PointReadCandidate = pointReadId;
 
+            // Or a set of ids — the same shape for several documents, which ReadManyItemsAsync
+            // answers charged as point reads. Asked second: a single id is the single read's.
+            else if (implementor.PointReadCandidate is null && implementor.PointReadSetCandidate is null &&
+                Metadata.CosmosPartitionKeyExtractor.TryExtractPointReadSet(getCondition(), implementor.Fields, implementor.Container, implementor.RootAlias, out _, out var pointReadIds))
+                implementor.PointReadSetCandidate = pointReadIds;
+
             var condition = implementor.Translate(getCondition());
 
             // Stacked filters are normally merged by the planner, but conjoin defensively rather
