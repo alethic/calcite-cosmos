@@ -175,9 +175,6 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests
         /// </summary>
         static async Task<List<object>> Run(string sql, bool pushdown)
         {
-            if (_container is null)
-                Assert.Inconclusive("Differential testing needs a service. " + (_initializationFailure ?? "No account is reachable at " + Endpoint));
-
             var typeFactory = new JavaTypeFactoryImpl();
             var table = new CosmosTable(Products, new CosmosQueryExecutor(_container!));
 
@@ -308,7 +305,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests
                 pushed = (await Run(sql, pushdown: true)).Select(Canonical).ToList();
                 oracle = (await Run(sql, pushdown: false)).Select(Canonical).ToList();
             }
-            catch (Exception e)
+            catch (Exception e) when (e is not AssertInconclusiveException)
             {
                 return $"{sql}\n  failed to run: {e.Message}";
             }
@@ -378,6 +375,11 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests
         [TestMethod]
         public async Task EveryStatementAgreesWithTheOracle()
         {
+            // Gated here, outside any catch: raising the gate inside Run turned "no emulator" into
+            // twenty-seven failures on every platform without one, which is how CI first said so.
+            if (_container is null)
+                Assert.Inconclusive("Differential testing needs a service. " + (_initializationFailure ?? "No account is reachable at " + Endpoint));
+
             var failures = new List<string>();
 
             foreach (var (sql, ordered) in Corpus)
