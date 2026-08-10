@@ -1017,9 +1017,31 @@ Everything above is *inference* — from declared metadata and, where the servic
 measured row count. The service reports what a request actually cost, and that number is the only
 one in the system that is not a guess.
 
----
+### The lookup restriction is already routed — measured, and it closed the shuffle idea
 
-## What the adapter reports
+The lookup join sends one cross-partition `k IN (…)` batch per hundred build rows, and the open
+question was whether routing it — per key with the partition key pinned, or grouped by feed range,
+Flink's `SupportsLookupCustomShuffle` — would beat that. Measured on a real account with four
+physical partitions (`CosmosLookupRoutingMeasurementTests`, which reruns the measurement whenever
+`COSMOS_TEST_ENDPOINT` names an account):
+
+- **The router prunes.** A single-key `IN` over the partition key, with nothing pinned, contacted
+  one partition and cost the single-query floor. The gateway computes the relevant partitions from
+  the `IN` values; the fan-out the shuffle would avoid does not happen.
+- **Cross-partition execution already is per-feed-range fan-out.** The same `IN(10)` issued once
+  per feed range priced identically to the plain query, page for page — grouping by feed range
+  reproduces the SDK's own execution and buys nothing.
+- **Per-key routing costs more, not less.** Ten pinned single-key queries cost 2.3× the one batch,
+  each paying the per-query floor. The charge scales with partitions *contacted*, and pruning
+  already minimises those; splitting the batch only multiplies the floors.
+- **Padding is free.** The emitted form — a hundred parameters over ten distinct values, repeats
+  padding the fixed statement — priced identically to the clean ten.
+
+So the batched statement the lookup join sends is already the cheapest expressible form, and the
+shuffle — and with it FLIP-248-style dynamic partition pruning, whose unit of pruning is exactly
+what the router derives from the values — is not built because there is nothing left for it to
+save. What the measurement is *not* is a statement about latency under load, where per-partition
+parallelism inside one query is the SDK's `MaxConcurrency` and stays its business.
 
 `CosmosInstrumentation` publishes a `Meter` and an `ActivitySource`, both named
 `Apache.Calcite.Cosmos.Adapter`.
