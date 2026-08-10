@@ -65,9 +65,17 @@ carries both with the reasoning.
    queue behind it: the `UPDATE` patch tier (section 3), the nullable-aggregate rewrite (section 5),
    and a temporal basis (section 4). The implementation is parked on `declared-columns-parked`; the
    design is in `DESIGN.md` under *Declared columns* on that branch.
-2. **Whole-partition `DELETE`, probe-gated** (section 3) — the design is settled in `DESIGN.md`;
-   the work is the capability probe on the metadata, the rule consulting it, and the
-   count-then-delete execution.
+2. **Adopting Calcite's metadata system** (section 1) — the owner's direction, and an audit agrees
+   it is overdue: `CosmosFilter.computeSelfCost` hand-rolls a partition-count discount that is
+   `Distribution`/`Parallelism` metadata by another name, `getStatistic` reports no distribution
+   though a container is hash-distributed by its partition key, and the document-size costing item
+   is a `Size` (`averageRowSize`) provider rather than another multiplier. One provider also
+   carries the statistics-after-pushdown item and the whole-partition `DELETE` capability gate.
+   First act: the Janino-under-IKVM feasibility probe recorded in `DESIGN.md` under *Deleting a
+   whole partition*.
+3. **Whole-partition `DELETE`, probe-gated** (section 3) — the design is settled in `DESIGN.md`;
+   the work is the capability metadata, the rule consulting it, and the count-then-delete
+   execution, together, once an enrolled account exists to verify against.
 3. **The small-coverage batch** — the scalar functions still to map (section 4), `SELECT DISTINCT`,
    native `IN`/`BETWEEN` with its pricing measurement, `TOP`, and the remaining emulator gaps
    asserted (section 9) — each a translator case and a test, and each a differential corpus entry

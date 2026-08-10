@@ -896,29 +896,27 @@ nothing whichever answer comes back — cached, and asked once on the planning p
 already permits blocking. An account that answers 400 keeps the scan-and-delete it has today, and
 no statement anywhere trades a working plan for a per-request refusal.
 
-**Where the answer lives is researched but not decided, and the first act of building decides
-it.** The owner's lean is Calcite's metadata system — a custom `Metadata` class and provider,
-queried through `RelMetadataQuery` from the rule. What the research says, both ways:
+**The answer lives in Calcite's metadata system, pending one feasibility probe.** A custom
+`Metadata` class and provider, queried through `RelMetadataQuery` from the rule. The research that
+settled the direction:
 
-- The metadata system is Calcite's sanctioned, deliberately extensible point for facts the planner
-  consults, and it is machinery the statistics-after-pushdown item in `TODO.md` needs anyway — a
-  fact asked of a `RelNode` composes with facts that genuinely vary per node, where a property on
-  the container metadata never could. The docs define its scope as "cost functions and statistics
-  about relational operators", and every built-in class is statistical — cardinality, selectivity,
-  distinctness, uniqueness, predicates — derived per node and cached per query.
-- Calcite's own idiom for *capabilities* is a different seam: interfaces on tables, discovered by
-  `unwrap` — `ModifiableTable` is precisely "this table supports modification", and this adapter
-  already gates its writes on exactly such unwrapping. Flink likewise gates on table-source
-  ability interfaces rather than metadata.
+- The system's built-in vocabulary is not statistics alone. `ColumnUniqueness`, `UniqueKeys`,
+  `ColumnOrigins`, `Collation`, `TableReferences` are structural facts about columns and tables;
+  `Distribution` and `Parallelism` (`splitCount`, phase boundaries) are *execution-physics* facts —
+  how data is spread and how much concurrency a subtree admits. A service capability asked of a
+  scan is a neighbor of those, not a foreign body — and `Distribution`/`Parallelism` map onto
+  Cosmos almost verbatim: hash by partition key, split count from the feed ranges the metadata
+  already fetches. One provider serves this gate, the statistics-after-pushdown item, and
+  `SupportsPartitionPushDown` alike.
+- Calcite's other capability idiom — interfaces discovered by `unwrap`, as `ModifiableTable` is
+  "supports modification" — remains what this adapter uses where a capability gates *whether a
+  rule exists at all*; the metadata system carries the facts rules *consult*.
 - Feasibility under IKVM is half-proven: the built-in metadata handlers are Janino-generated and
-  already run in this suite — every cost computed goes through them — so what is unverified is
-  only whether Janino's classloader resolves a handler interface *defined in C#*. If it refuses,
-  the probe's fallbacks, in order: the handler interface shipped as a small Java type through the
-  IKVM toolchain, or the capability on the container metadata behind a lazy provider, the shape
-  statistics use today.
-
-That feasibility probe is the first act of building the feature, and its outcome — with the
-owner's lean — makes the decision.
+  already run in this suite — every cost computed goes through them. Unverified, and the first act
+  of building: whether Janino's classloader resolves a handler interface *defined in C#*. If it
+  refuses, the fallbacks in order are the handler interface shipped as a small Java type through
+  the IKVM toolchain, then the capability on the container metadata behind a lazy provider, the
+  shape statistics use today.
 
 Two facts the implementation inherits:
 
