@@ -1074,6 +1074,25 @@ Everything above is *inference* — from declared metadata and, where the servic
 measured row count. The service reports what a request actually cost, and that number is the only
 one in the system that is not a guess.
 
+### A spelling is not a price — measured
+
+`expandSearch` rewrites `IN` and `BETWEEN` into chains of comparisons before anything here sees
+them, and the standing question was whether emitting the native spelling back would be cheaper.
+Measured on a real account over five hundred documents:
+
+| Form | Charge |
+|---|---|
+| `s IN (3 values)` / the same as an `OR` chain | 6.06 RU each |
+| `s IN (10 values)` / chain | 7.62 RU each |
+| `s IN (50 values)` / chain | 16.52 RU each |
+| `n BETWEEN 100 AND 200` / `n >= 100 AND n <= 200` | 7.90 RU each |
+| `TOP 10` / `OFFSET 0 LIMIT 10` | 2.37 RU each |
+
+Identical to the hundredth of an RU at every size, and neither form used an index on an unindexed
+path — so "index-friendly" is a property of the *path*, not of the spelling. The service normalises
+these before costing them, which is why the adapter emits whatever the expansion produced and adds
+nothing to say the same thing differently.
+
 ### The lookup restriction is already routed — measured, and it closed the shuffle idea
 
 The lookup join sends one cross-partition `k IN (…)` batch per hundred build rows, and the open

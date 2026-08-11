@@ -262,16 +262,22 @@ whose encoding the service defines. Pushing a temporal function down means decla
 
 ### Clause-level
 
-- **Native `IN` and `BETWEEN`** — *small.* `expandSearch` turns both into comparison chains, which is
-  what makes them pushable. The reference calls `IN` index-friendly; whether the OR-chain is priced
-  the same is worth measuring before doing this for its own sake.
+- **Native `IN` and `BETWEEN` — closed by measurement, not built.** `expandSearch` turns both into
+  comparison chains, and the question was whether the native spelling is priced differently.
+  Measured on a real account over five hundred documents: `IN` and its OR-chain cost *identically*
+  at three, ten and fifty values — 6.06, 7.62 and 16.52 RU, matching to the hundredth — and
+  `BETWEEN` costs exactly what its two comparisons do (7.90 RU). Neither form used an index on an
+  unindexed path, so the reference's "index-friendly" is a property of the path rather than of the
+  spelling. Emitting the native form would be a change with no effect.
 - **`DISTINCT` with `ORDER BY` reaches only non-nullable keys** — *small, and it waits on declared
   columns.* The combination pushes as one statement now, but the null-placement rule refuses any
   nullable sort key — Calcite's ascending means nulls last and Cosmos sorts them first — and every
   promoted user column is nullable, so today it reaches `_ts`, `id` and `_etag` alone. A column
   that could be declared non-nullable would extend it to user paths; the rule itself is correct and
   should not move.
-- **`TOP`** — *small.* Emitted for a rank clause and nowhere else; `OFFSET`/`LIMIT` covers the rest.
+- **`TOP` — closed by the same measurement.** Emitted for a rank clause and nowhere else. `TOP 10`
+  and `OFFSET 0 LIMIT 10` cost the same 2.37 RU on a real account, so the spelling the adapter
+  already emits is the cheaper of nothing.
 
 ---
 
