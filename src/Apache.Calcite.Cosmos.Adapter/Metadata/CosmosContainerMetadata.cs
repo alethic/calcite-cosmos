@@ -245,6 +245,42 @@ namespace Apache.Calcite.Cosmos.Adapter.Metadata
                 : new CosmosContainerMetadata(_name, _partitionKeyPaths, _compositeIndexes, _includedPaths, _excludedPaths, statistics);
         }
 
+        Lazy<bool> _partitionKeyDelete = new(() => false, LazyThreadSafetyMode.ExecutionAndPublication);
+
+        /// <summary>
+        /// Gets whether the account will delete a whole logical partition in one request.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// A capability rather than a declaration: the operation is a preview the service enables
+        /// per account, so nothing in the container definition says whether it is available and
+        /// only asking can answer. Asked at most once, and only where a rule needs it — a plan with
+        /// no whole-partition <c>DELETE</c> in it never pays for the question.
+        /// </para>
+        /// <para>
+        /// False where nothing supplied a probe, which is the safe answer: the statement then plans
+        /// as the scan and per-document delete it has always been.
+        /// </para>
+        /// </remarks>
+        public bool SupportsPartitionKeyDelete => _partitionKeyDelete.Value;
+
+        /// <summary>
+        /// Returns the same metadata whose whole-partition delete capability is probed on first use.
+        /// </summary>
+        /// <param name="probe">Answers whether the account will accept the operation.</param>
+        /// <returns>The metadata.</returns>
+        /// <exception cref="ArgumentNullException"><paramref name="probe"/> is <c>null</c>.</exception>
+        public CosmosContainerMetadata WithPartitionKeyDeleteProbe(Func<bool> probe)
+        {
+            if (probe is null)
+                throw new ArgumentNullException(nameof(probe));
+
+            var metadata = new CosmosContainerMetadata(_name, _partitionKeyPaths, _compositeIndexes, _includedPaths, _excludedPaths);
+            metadata._statistics = _statistics;
+            metadata._partitionKeyDelete = new Lazy<bool>(probe, LazyThreadSafetyMode.ExecutionAndPublication);
+            return metadata;
+        }
+
         /// <summary>
         /// Returns the same metadata whose statistics are fetched on first use.
         /// </summary>
@@ -263,6 +299,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Metadata
 
             var metadata = new CosmosContainerMetadata(_name, _partitionKeyPaths, _compositeIndexes, _includedPaths, _excludedPaths);
             metadata._statistics = new Lazy<CosmosContainerStatistics?>(provider, LazyThreadSafetyMode.ExecutionAndPublication);
+            metadata._partitionKeyDelete = _partitionKeyDelete;
             return metadata;
         }
 

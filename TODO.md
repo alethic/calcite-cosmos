@@ -99,6 +99,20 @@ below wearing a different hat.
 Per-partition storage is an Azure Monitor metric, not data plane. The count is reachable and the
 distribution is not, so a hot-partition estimate would have to come from outside the adapter.
 
+### Nothing is remembered between connections — *medium, and it now costs more than it did*
+
+`CosmosSchemaFactory.create` runs per model read, which in the ADO.NET path is per *connection*, so
+every connection builds fresh `CosmosContainerMetadata` and with it fresh lazy cells. Within a
+connection each fact is computed once; across connections nothing is shared, though the client can
+be. That was two round trips per container for statistics; the whole-partition delete capability
+adds a third for any connection that plans one, and a short-lived-connection application pays them
+all again each time.
+
+What it wants is a cache keyed by account, database and container, living beside the client rather
+than beside the schema — which is the same owner question the lookup cache answered with a declared
+policy, and should probably answer the same way. Related: *Statistics refresh* below, which is this
+question asked about staleness rather than about sharing.
+
 ### Statistics refresh — *medium*
 
 Fetched once per container, on first use, and never again: a schema that lives for the life of a

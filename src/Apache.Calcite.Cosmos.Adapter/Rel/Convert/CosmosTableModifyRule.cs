@@ -52,12 +52,67 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
                 return CosmosWriteOperation.Insert;
 
             if (operation == TableModify.Operation.DELETE)
-                return CosmosWriteOperation.Delete;
+                return TryWholePartition(modify, out _) ? CosmosWriteOperation.DeletePartition : CosmosWriteOperation.Delete;
 
             if (operation == TableModify.Operation.UPDATE)
                 return CosmosWriteOperation.Update;
 
             return null;
+        }
+
+        /// <summary>
+        /// Determines whether a delete empties exactly one logical partition, and the account will
+        /// do that in one request.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Two questions, and the order matters: the predicate's shape is free to ask, the
+        /// account's capability costs a round trip. So the shape is recognised first and the
+        /// capability asked only for a statement that could use it — a plan with no
+        /// whole-partition delete in it never probes at all.
+        /// </para>
+        /// <para>
+        /// Where either answer is no the delete stays what it was: a scan, and a delete per
+        /// document. Nothing here can turn a working plan into a refused request.
+        /// </para>
+        /// </remarks>
+        static bool TryWholePartition(TableModify modify, out System.Collections.Generic.IReadOnlyList<object?> values)
+        {
+            values = System.Array.Empty<object?>();
+
+            if (modify.getTable()?.unwrap(typeof(CosmosTable)) is not CosmosTable table)
+                return false;
+
+            if (FindFilter(modify.getInput()) is not Filter filter)
+                return false;
+
+            if (CosmosImplementor.TryBindOutput(filter.getInput(), out var fields) == false)
+                return false;
+
+            if (Metadata.CosmosPartitionKeyExtractor.TryExtractWholePartition(filter.getCondition(), fields, table.Container, CosmosImplementor.DefaultRootAlias, out var pinned) == false)
+                return false;
+
+            if (table.Container.SupportsPartitionKeyDelete == false)
+                return false;
+
+            values = pinned;
+            return true;
+        }
+
+        /// <summary>
+        /// Returns the filter a modify's input reads through, or <c>null</c> where it has none.
+        /// </summary>
+        static Filter? FindFilter(RelNode? node)
+        {
+            if (node is org.apache.calcite.plan.volcano.RelSubset subset)
+                node = subset.getOriginal() ?? subset.getBest();
+
+            return node switch
+            {
+                Filter filter => filter,
+                Project project => FindFilter(project.getInput()),
+                _ => null,
+            };
         }
 
         /// <summary>
@@ -165,6 +220,12 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
             // rule fails on the first statement anyone writes.
             var inputTraits = input.getTraitSet().replace(ClrAsyncEnumerableConvention.Instance).simplify();
 
+            // Recovered again rather than carried from the predicate check: a rule's match and its
+            // conversion are separate calls, and the second is where the value has to be right.
+            object?[]? partitionKey = null;
+            if (write == CosmosWriteOperation.DeletePartition && TryWholePartition(modify, out var pinned))
+                partitionKey = System.Linq.Enumerable.ToArray(pinned);
+
             return new CosmosTableModify(
                 modify.getCluster(),
                 modify.getTraitSet().replace(ClrAsyncEnumerableConvention.Instance),
@@ -176,7 +237,8 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
                 modify.getSourceExpressionList(),
                 modify.isFlattened(),
                 table,
-                write);
+                write,
+                partitionKey);
         }
 
     }

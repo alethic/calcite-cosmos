@@ -46,6 +46,34 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
         Task<bool> DeleteItemAsync(string id, PartitionKey partitionKey, CancellationToken cancellationToken = default);
 
         /// <summary>
+        /// Deletes every document in a logical partition, in one request.
+        /// </summary>
+        /// <remarks>
+        /// The operation is a per-account preview and answers 400 where it is not enabled, so
+        /// nothing calls this without asking first; see
+        /// <c>CosmosContainerMetadata.SupportsPartitionKeyDelete</c>. Deletion proceeds in the
+        /// background, but the service documents the effect as immediate — the documents stop
+        /// appearing in queries and reads before the physical removal completes.
+        /// </remarks>
+        /// <param name="partitionKey">The logical partition to empty.</param>
+        /// <param name="cancellationToken">Cancels the request.</param>
+        /// <returns><c>true</c> if the service accepted the operation.</returns>
+        /// <exception cref="CosmosExecutionException">The service refused the request.</exception>
+        Task<bool> DeletePartitionAsync(PartitionKey partitionKey, CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Determines whether this container's account will accept a whole-partition delete.
+        /// </summary>
+        /// <remarks>
+        /// Safe by construction: the operation is invoked against a partition key value nothing can
+        /// be stored under, so it deletes nothing whichever answer comes back. What is being read
+        /// is the refusal, not the effect.
+        /// </remarks>
+        /// <param name="cancellationToken">Cancels the request.</param>
+        /// <returns><c>true</c> where the account accepts it.</returns>
+        Task<bool> SupportsPartitionDeleteAsync(CancellationToken cancellationToken = default);
+
+        /// <summary>
         /// Replaces a document.
         /// </summary>
         /// <param name="document">The new document, as UTF-8 JSON.</param>

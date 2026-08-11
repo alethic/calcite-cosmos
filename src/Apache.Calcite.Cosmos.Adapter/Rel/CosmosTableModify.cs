@@ -65,6 +65,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
         /// <param name="flattened">Whether the input's row type has been flattened.</param>
         /// <param name="cosmos">The container's metadata-bearing table.</param>
         /// <param name="write">What the write does to each document.</param>
+        /// <param name="partitionKey">The partition a whole-partition delete empties, or <c>null</c> for every other operation.</param>
         public CosmosTableModify(
             RelOptCluster cluster,
             RelTraitSet traitSet,
@@ -76,12 +77,16 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
             java.util.List? sourceExpressionList,
             bool flattened,
             CosmosTable cosmos,
-            CosmosWriteOperation write) :
+            CosmosWriteOperation write,
+            object?[]? partitionKey = null) :
             base(cluster, traitSet, table, catalogReader, input, operation, updateColumnList, sourceExpressionList, flattened)
         {
             _table = cosmos ?? throw new ArgumentNullException(nameof(cosmos));
             _write = write;
+            _partitionKey = partitionKey;
         }
+
+        readonly object?[]? _partitionKey;
 
         /// <summary>
         /// Gets what the write does to each document.
@@ -102,7 +107,8 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
                 getSourceExpressionList(),
                 isFlattened(),
                 _table,
-                _write);
+                _write,
+                _partitionKey);
         }
 
         /// <inheritdoc />
@@ -153,7 +159,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
             for (var i = 0; i < paths.Length; i++)
                 paths[i] = _table.Container.PartitionKeyPaths[i];
 
-            var write = new CosmosWrite(_write, names, paths, updates);
+            var write = new CosmosWrite(_write, names, paths, updates, _partitionKey);
 
             return implementor.Result(physType,
                 Expression.Call(null,
@@ -164,6 +170,9 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
                     FieldReader(inputResult.PhysType, inputRowType),
                     CountBuilder(physType),
                     Rel.Convert.CosmosConverters.LookupCacheExpression(getTable(), implementor.Root),
+                    // Counts the partition a whole-partition delete is about to empty; unused by
+                    // every other operation, whose count is the rows it wrote.
+                    Rel.Convert.CosmosConverters.PartitionCounterExpression(getTable(), implementor.Root),
                     // As everywhere else on this path: Calcite's cancellation is a flag on the
                     // DataContext rather than a token, and a request in flight would not observe one.
                     Expression.Constant(CancellationToken.None)));

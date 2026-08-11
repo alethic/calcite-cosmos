@@ -56,6 +56,32 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
             return GetTable(root, qualifiedName).LookupCache;
         }
 
+        /// <summary>
+        /// Returns something that counts the documents in one logical partition of the named table.
+        /// </summary>
+        /// <remarks>
+        /// What a whole-partition <c>DELETE</c> answers with. The operation itself reports no count,
+        /// so this is asked first, and it is as racy against a concurrent writer as the scan the
+        /// fast path replaces — no more, and no less.
+        /// </remarks>
+        /// <param name="root">The context the statement is executing against.</param>
+        /// <param name="qualifiedName">The table's qualified name, schemas outermost first.</param>
+        /// <returns>The counter.</returns>
+        public static Func<Microsoft.Azure.Cosmos.PartitionKey, System.Threading.CancellationToken, System.Threading.Tasks.Task<long>> GetPartitionCounter(DataContext root, string[] qualifiedName)
+        {
+            var executor = GetExecutor(root, qualifiedName);
+
+            return async (partitionKey, cancellationToken) =>
+            {
+                var query = new CosmosQuery("SELECT VALUE COUNT(1) FROM c", System.Array.Empty<Sql.CosmosParameter>());
+
+                await foreach (var element in executor.ExecuteAsync(query, partitionKey, cancellationToken))
+                    return element.ValueKind == System.Text.Json.JsonValueKind.Number ? element.GetInt64() : 0L;
+
+                return 0L;
+            };
+        }
+
         static CosmosTable GetTable(DataContext root, string[] qualifiedName)
         {
             if (root is null)

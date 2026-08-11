@@ -214,6 +214,25 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
             return Expression.Call(null, GetLookupCacheMethod, root, Expression.Constant(QualifiedName(table ?? throw new ArgumentNullException(nameof(table)))));
         }
 
+        static readonly System.Reflection.MethodInfo GetPartitionCounterMethod = typeof(CosmosSchemas).GetMethod(nameof(CosmosSchemas.GetPartitionCounter), [typeof(org.apache.calcite.DataContext), typeof(string[])])
+            ?? throw new InvalidOperationException($"'{nameof(CosmosSchemas.GetPartitionCounter)}' is missing from {nameof(CosmosSchemas)}.");
+
+        /// <summary>
+        /// Returns the expression by which the running plan counts a logical partition.
+        /// </summary>
+        /// <remarks>
+        /// A whole-partition delete reports no affected count, so the count a <c>DELETE</c> answers
+        /// with has to be asked for separately, and before — the same route every other resource on
+        /// this path takes.
+        /// </remarks>
+        /// <param name="table">The table being written to.</param>
+        /// <param name="root">The parameter the context arrives by.</param>
+        /// <returns>The expression.</returns>
+        public static Expression PartitionCounterExpression(RelOptTable table, ParameterExpression root)
+        {
+            return Expression.Call(null, GetPartitionCounterMethod, root, Expression.Constant(QualifiedName(table ?? throw new ArgumentNullException(nameof(table)))));
+        }
+
         static string[] QualifiedName(RelOptTable table)
         {
             var qualifiedName = table.getQualifiedName();

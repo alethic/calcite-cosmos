@@ -163,6 +163,85 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
             throw new InvalidOperationException("The write yielded no row count.");
         }
 
+        /// <summary>
+        /// Answers as an account without the whole-partition delete preview does, and records what
+        /// it was asked.
+        /// </summary>
+        sealed class RefusingWriter : ICosmosItemWriter
+        {
+
+            readonly ICosmosItemWriter _inner;
+
+            public RefusingWriter(ICosmosItemWriter inner) => _inner = inner;
+
+            public List<PartitionKey> PartitionsDeleted { get; } = new();
+
+            public Task CreateItemAsync(byte[] document, PartitionKey partitionKey, CancellationToken cancellationToken = default) =>
+                _inner.CreateItemAsync(document, partitionKey, cancellationToken);
+
+            public Task<bool> DeleteItemAsync(string id, PartitionKey partitionKey, CancellationToken cancellationToken = default) =>
+                _inner.DeleteItemAsync(id, partitionKey, cancellationToken);
+
+            public Task<bool> ReplaceItemAsync(byte[] document, string id, PartitionKey partitionKey, CancellationToken cancellationToken = default) =>
+                _inner.ReplaceItemAsync(document, id, partitionKey, cancellationToken);
+
+            public Task<bool> DeletePartitionAsync(PartitionKey partitionKey, CancellationToken cancellationToken = default)
+            {
+                PartitionsDeleted.Add(partitionKey);
+                return Task.FromResult(true);
+            }
+
+            public Task<bool> SupportsPartitionDeleteAsync(CancellationToken cancellationToken = default) =>
+                Task.FromResult(false);
+
+        }
+
+        /// <remarks>
+        /// The execution path, with the request itself stubbed — no environment reachable from here
+        /// enables the preview, so what can be verified is everything around it: that the count
+        /// comes from the partition before it is emptied, that the input rows are never read, and
+        /// that the service is asked for exactly the partition the predicate named.
+        /// </remarks>
+        [TestMethod]
+        public async Task AWholePartitionDeleteCountsFirstAndReadsNoRows()
+        {
+            await Write(CosmosWriteOperation.Insert, [Map("id", "wp1", "category", "bikes"), null, null, null, null]);
+            await Write(CosmosWriteOperation.Insert, [Map("id", "wp2", "category", "bikes"), null, null, null, null]);
+
+            var writer = new RefusingWriter(new CosmosQueryExecutor(Container()));
+            var write = new CosmosWrite(CosmosWriteOperation.DeletePartition, Columns, PartitionKeyPaths, null, new object?[] { "bikes" });
+
+            var executor = new CosmosQueryExecutor(Container());
+
+            async Task<long> Count(PartitionKey key, CancellationToken token)
+            {
+                var query = new CosmosQuery("SELECT VALUE COUNT(1) FROM c", Array.Empty<Apache.Calcite.Cosmos.Adapter.Sql.CosmosParameter>());
+
+                await foreach (var element in executor.ExecuteAsync(query, key, token))
+                    return element.GetInt64();
+
+                return 0;
+            }
+
+            // A source that would throw if it were read: the whole point is that it is not.
+            static async IAsyncEnumerable<object?[]> Untouched()
+            {
+                await Task.Yield();
+                throw new InvalidOperationException("a whole-partition delete must not read its input");
+
+#pragma warning disable CS0162
+                yield break;
+#pragma warning restore CS0162
+            }
+
+            long affected = -1;
+            await foreach (var count in CosmosSequences.WriteAsync<object?[], long>(Untouched(), writer, write, r => r!, c => c, counter: Count))
+                affected = count;
+
+            affected.Should().BeGreaterThanOrEqualTo(2, "the count is taken from the partition before it is emptied");
+            writer.PartitionsDeleted.Should().ContainSingle().Which.Should().Be(new PartitionKey("bikes"));
+        }
+
         static async Task<JsonElement?> Read(string id, PartitionKey partitionKey)
         {
             using var response = await Container().ReadItemStreamAsync(id, partitionKey);

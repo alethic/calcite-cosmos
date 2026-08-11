@@ -90,6 +90,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
             Func<TRow, object?[]> fields,
             Func<long, TResult> result,
             CosmosLookupCache? invalidate = null,
+            Func<Microsoft.Azure.Cosmos.PartitionKey, CancellationToken, Task<long>>? counter = null,
             [EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
             if (source is null)
@@ -104,6 +105,28 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
                 throw new ArgumentNullException(nameof(result));
 
             var affected = 0L;
+
+            // The one write that does not read its rows. The predicate named the partition, so the
+            // rows the plan would have scanned are precisely the rows the service will remove, and
+            // the input is left unenumerated rather than walked to discard. The count comes from a
+            // COUNT(*) beforehand, which is as racy against a concurrent writer as the scan it
+            // replaces — and is the only count available, the operation reporting none.
+            if (write.Operation == CosmosWriteOperation.DeletePartition)
+            {
+                if (write.PartitionKeyValues is not object?[] values)
+                    throw new CosmosExecutionException("A whole-partition delete carries no partition key.");
+
+                if (counter is null)
+                    throw new CosmosExecutionException("A whole-partition delete needs something to count the partition with.");
+
+                var partition = PartitionKeyOf(values);
+
+                affected = await counter(partition, cancellationToken).ConfigureAwait(false);
+                await writer.DeletePartitionAsync(partition, cancellationToken).ConfigureAwait(false);
+
+                yield return result(affected);
+                yield break;
+            }
 
             await foreach (var row in source.WithCancellation(cancellationToken).ConfigureAwait(false))
             {
@@ -218,6 +241,44 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
         /// <param name="document">The document.</param>
         /// <param name="write">The write, which carries the declared paths.</param>
         /// <returns>The partition key.</returns>
+        /// <summary>
+        /// Builds a partition key from the values a predicate pinned.
+        /// </summary>
+        /// <remarks>
+        /// The counterpart of the overload below, which reads them out of a document: here the
+        /// predicate named them at planning time and no document was ever read.
+        /// </remarks>
+        static Microsoft.Azure.Cosmos.PartitionKey PartitionKeyOf(object?[] values)
+        {
+            var builder = new Microsoft.Azure.Cosmos.PartitionKeyBuilder();
+
+            foreach (var value in values)
+            {
+                switch (value)
+                {
+                    case null:
+                        builder.AddNullValue();
+                        break;
+                    case string s:
+                        builder.Add(s);
+                        break;
+                    case bool b:
+                        builder.Add(b);
+                        break;
+                    case double d:
+                        builder.Add(d);
+                        break;
+                    case long l:
+                        builder.Add(l);
+                        break;
+                    default:
+                        throw new CosmosExecutionException($"A partition key value of type '{value.GetType().Name}' cannot be a partition key.");
+                }
+            }
+
+            return builder.Build();
+        }
+
         static Microsoft.Azure.Cosmos.PartitionKey PartitionKeyOf(JsonElement document, CosmosWrite write)
         {
             var builder = new Microsoft.Azure.Cosmos.PartitionKeyBuilder();

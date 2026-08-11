@@ -37,7 +37,13 @@ namespace Apache.Calcite.Cosmos.Adapter.Metadata
             // Attached rather than fetched. A schema exposes every container of a database, and at the
             // account level every container of every database, so reading the size of all of them to
             // plan against one is the wrong trade — and it is two more round trips each.
-            return metadata.WithStatisticsProvider(() => ReadStatisticsAsync(container, CancellationToken.None).GetAwaiter().GetResult());
+            //
+            // The whole-partition delete capability is attached the same way and for a sharper
+            // version of the same reason: it can only be learnt by attempting the operation, and a
+            // plan with no whole-partition DELETE in it must never pay for that question.
+            return metadata
+                .WithStatisticsProvider(() => ReadStatisticsAsync(container, CancellationToken.None).GetAwaiter().GetResult())
+                .WithPartitionKeyDeleteProbe(() => new Client.CosmosQueryExecutor(container).SupportsPartitionDeleteAsync(CancellationToken.None).GetAwaiter().GetResult());
         }
 
         /// <summary>

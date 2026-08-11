@@ -25,6 +25,17 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
         Delete,
 
         /// <summary>
+        /// Deletes every document in one logical partition, without reading them.
+        /// </summary>
+        /// <remarks>
+        /// The one write whose rows are never read: the predicate names the partition, so the rows
+        /// the plan would have scanned are exactly the rows the service will remove, and scanning
+        /// them to delete them one at a time is the cost this avoids. Gated on the account
+        /// supporting it — see <c>CosmosContainerMetadata.SupportsPartitionKeyDelete</c>.
+        /// </remarks>
+        DeletePartition,
+
+        /// <summary>
         /// Replaces the document a row identifies with the one the row's <c>SET</c> values describe.
         /// </summary>
         /// <remarks>
@@ -50,7 +61,8 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
     /// <param name="ColumnNames">The table's field names, the map column first. An update's input rows carry one further value per <paramref name="UpdateColumnNames"/> entry, after these.</param>
     /// <param name="PartitionKeyPaths">The container's declared partition key paths, in policy form and outermost first.</param>
     /// <param name="UpdateColumnNames">The columns an <c>UPDATE</c> sets, in the order their new values trail the row, or <c>null</c> for any other operation.</param>
-    public sealed record CosmosWrite(CosmosWriteOperation Operation, string[] ColumnNames, string[] PartitionKeyPaths, string[]? UpdateColumnNames = null)
+    /// <param name="PartitionKeyValues">The partition key a whole-partition delete empties, one value per declared path, or <c>null</c> for any other operation.</param>
+    public sealed record CosmosWrite(CosmosWriteOperation Operation, string[] ColumnNames, string[] PartitionKeyPaths, string[]? UpdateColumnNames = null, object?[]? PartitionKeyValues = null)
     {
 
         /// <summary>
