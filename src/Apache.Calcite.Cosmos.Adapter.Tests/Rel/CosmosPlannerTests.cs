@@ -321,6 +321,28 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             query.PartitionKeyValues.Should().Equal("bikes");
         }
 
+        /// <remarks>
+        /// <para>
+        /// A call-less aggregate is a <c>DISTINCT</c>, and emitting it as one is what lets the sort
+        /// join it: <c>GROUP BY</c> and <c>ORDER BY</c> cannot appear together, <c>DISTINCT</c> and
+        /// <c>ORDER BY</c> can — measured against a real account, not only the emulator.
+        /// </para>
+        /// <para>
+        /// Over <c>_ts</c> rather than a user path, and that is the null-placement rule rather than
+        /// anything to do with the distinct: Calcite's ascending means nulls last and Cosmos sorts
+        /// them first, so a nullable key is refused whatever sits below it. Every promoted user
+        /// column is nullable today, so this combination reaches only the service's own columns
+        /// until a column can be declared non-nullable.
+        /// </para>
+        /// </remarks>
+        [TestMethod]
+        public void DistinctAndOrderByPushAsOneStatement()
+        {
+            var sql = Render(PlanToCosmos("SELECT DISTINCT c.\"_ts\" FROM products AS c ORDER BY c.\"_ts\""));
+
+            sql.Should().Be("SELECT DISTINCT VALUE { \"_ts\": c._ts } FROM products c ORDER BY c._ts ASC");
+        }
+
         // ── The planner declines rather than guessing ─────────────────────────────
 
         /// <remarks>

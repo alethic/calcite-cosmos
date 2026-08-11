@@ -223,7 +223,9 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             pushed!.getAggCallList().size().Should().Be(0, "what is pushed is the GROUP BY, not the count");
             pushed.getGroupSet().cardinality().Should().Be(1);
 
-            Render(pushed).Should().Be("SELECT c.category AS \"category\" FROM products c GROUP BY c.category");
+            // DISTINCT rather than GROUP BY: a call-less aggregate is a distinct, and emitting it
+            // as one keeps the statement able to carry an ORDER BY. The dedup is identical.
+            Render(pushed).Should().Be("SELECT DISTINCT VALUE { \"category\": c.category } FROM products c");
 
             // The finishing count lives outside the Cosmos convention.
             plan.getConvention().Should().Be(ClrAsyncEnumerableConvention.Instance);

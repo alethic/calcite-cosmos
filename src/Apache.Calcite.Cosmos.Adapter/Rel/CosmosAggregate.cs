@@ -187,10 +187,6 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
                 implementor.Query.ClearProjection();
             }
 
-            // Cosmos rejects GROUP BY and ORDER BY in the same statement.
-            if (implementor.Query.HasOrderBy)
-                throw new CosmosTranslationException("Cosmos SQL does not support GROUP BY together with ORDER BY.");
-
             // GROUP BY is applied before OFFSET/LIMIT, so an aggregation above a row restriction
             // would group the whole set rather than the restricted one.
             if (implementor.Query.HasRowLimit)
@@ -198,6 +194,23 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
 
             if (getGroupType() != Group.SIMPLE)
                 throw new CosmosTranslationException("Grouping sets have no Cosmos equivalent.");
+
+            // AN AGGREGATE WITH NO CALLS IS A DISTINCT, AND IS EMITTED AS ONE.
+            //
+            // Grouping by every output column and computing nothing is what SELECT DISTINCT means,
+            // and Cosmos has the keyword. Rendering it that way is not a tidier spelling of the
+            // same statement: GROUP BY and ORDER BY cannot appear together, and DISTINCT and
+            // ORDER BY can — measured — so this is the difference between a sort that pushes and
+            // one that does not.
+            if (getAggCallList().size() == 0)
+            {
+                EmitDistinct(implementor);
+                return;
+            }
+
+            // Cosmos rejects GROUP BY and ORDER BY in the same statement.
+            if (implementor.Query.HasOrderBy)
+                throw new CosmosTranslationException("Cosmos SQL does not support GROUP BY together with ORDER BY.");
 
             // Cosmos rejects an aggregate inside an object constructor, so a grouped projection
             // must be written as a flat select list.
@@ -236,6 +249,47 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
             // computed column rather than for being out of range.
             var aggregated = new CosmosPath?[names.size()];
             implementor.Fields = aggregated;
+        }
+
+        /// <summary>
+        /// Emits a call-less aggregate as <c>SELECT DISTINCT</c>.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// The projected paths are the grouping keys, so this is the same statement a
+        /// <c>GROUP BY</c> over every key would return — with two differences that matter. It may
+        /// carry an <c>ORDER BY</c>, which a grouped statement may not; and its output is still
+        /// <em>paths</em>, since nothing is computed, so a sort or a filter above it can address
+        /// them. That is why the bindings are kept rather than blanked the way an aggregated row's
+        /// are.
+        /// </para>
+        /// <para>
+        /// The flat projection a grouped statement needs is not needed here — nothing is aggregated,
+        /// so no aggregate can sit inside an object constructor — and the ordinary object form is
+        /// what the row builder above expects.
+        /// </para>
+        /// </remarks>
+        void EmitDistinct(CosmosImplementor implementor)
+        {
+            var names = getRowType().getFieldNames();
+            var fields = implementor.Fields;
+
+            var groupKeys = getGroupSet().asList();
+            var projected = new CosmosPath?[names.size()];
+
+            for (var i = 0; i < groupKeys.size(); i++)
+            {
+                var index = ((java.lang.Integer)groupKeys.get(i)).intValue();
+                if (index < 0 || index >= fields.Count || fields[index] is null)
+                    throw new CosmosTranslationException("A grouping key does not resolve to a document path.");
+
+                var path = fields[index]!;
+                implementor.Query.SelectProperty((string)names.get(i), path.ToString());
+                projected[i] = path;
+            }
+
+            implementor.Query.Distinct = true;
+            implementor.Fields = projected;
         }
 
         string Render(AggregateCall call, IReadOnlyList<CosmosPath?> fields)

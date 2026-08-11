@@ -181,6 +181,29 @@ namespace Apache.Calcite.Cosmos.Adapter
                 case Sort sort:
                     return TryBindOutput(sort.getInput(), out fields);
 
+                // An aggregate that computes nothing is a DISTINCT, and a distinct's output is the
+                // grouping keys themselves — still document paths, because nothing was computed. So
+                // an operator above one can address them, which is what lets a sort join a DISTINCT
+                // in the same statement. An aggregate with calls binds nothing: its output is
+                // computed and Cosmos can name none of it.
+                case Aggregate aggregate when aggregate.getAggCallList().size() == 0 && aggregate.getGroupType() == Aggregate.Group.SIMPLE:
+                {
+                    if (TryBindOutput(aggregate.getInput(), out var input) == false)
+                        return false;
+
+                    var keys = aggregate.getGroupSet().asList();
+                    var paths = new CosmosPath?[aggregate.getRowType().getFieldCount()];
+
+                    for (var i = 0; i < paths.Length && i < keys.size(); i++)
+                    {
+                        var index = ((java.lang.Integer)keys.get(i)).intValue();
+                        paths[i] = index >= 0 && index < input.Count ? input[index] : null;
+                    }
+
+                    fields = paths;
+                    return true;
+                }
+
                 case Project project:
                 {
                     if (TryBindOutput(project.getInput(), out var input) == false)

@@ -232,10 +232,12 @@ whose encoding the service defines. Pushing a temporal function down means decla
 - **Native `IN` and `BETWEEN`** — *small.* `expandSearch` turns both into comparison chains, which is
   what makes them pushable. The reference calls `IN` index-friendly; whether the OR-chain is priced
   the same is worth measuring before doing this for its own sake.
-- **`SELECT DISTINCT`** — *small.* `Query.Distinct` is never set. An aggregate with no calls already
-  renders as `GROUP BY` over every key, which is a correct `DISTINCT`, so this is not a coverage gap;
-  what it buys is the `ORDER BY` combination, since `GROUP BY` and `ORDER BY` cannot coexist. Whether
-  `DISTINCT` and `ORDER BY` can is **unverified**.
+- **`DISTINCT` with `ORDER BY` reaches only non-nullable keys** — *small, and it waits on declared
+  columns.* The combination pushes as one statement now, but the null-placement rule refuses any
+  nullable sort key — Calcite's ascending means nulls last and Cosmos sorts them first — and every
+  promoted user column is nullable, so today it reaches `_ts`, `id` and `_etag` alone. A column
+  that could be declared non-nullable would extend it to user paths; the rule itself is correct and
+  should not move.
 - **`TOP`** — *small.* Emitted for a rank clause and nowhere else; `OFFSET`/`LIMIT` covers the rest.
 
 ---
@@ -344,7 +346,6 @@ comes back as SQL's null does, and that `* 1` does not disturb a large integer.
 These are not features. They are things believed but not measured, and each one is a defect waiting
 for the right query.
 
-- **`DISTINCT` with `ORDER BY`.** Assumed incompatible, never tested.
 - **Two-argument `TRIM` and `TRUNCATE`.** Left out for want of a measurement.
 
 ---
