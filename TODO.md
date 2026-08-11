@@ -199,11 +199,30 @@ the tier is one rule-and-writer step once that lands. The execution ladder above
 decomposition via a mutation operator, the diff and blind-patch optimizations) is recorded in
 `DESIGN.md` under *Updating*.
 
-### Whole-partition `DELETE` — *medium*
+### Whole-partition `DELETE` — *medium, and the gate is an Azure Support request*
 
-A predicate pinning the partition key and nothing else could be
-`DeleteAllItemsByPartitionKeyStreamAsync`, which is not a query at all — `SupportsDeletePushDown` in
-section 11. Today it is a scan and a delete per document.
+A predicate pinning exactly the complete partition key could be
+`DeleteAllItemsByPartitionKeyStreamAsync` — one request, no query at all — instead of today's scan
+and delete per document.
+
+**Measured twice, and the second measurement corrected the first.** The emulator answers 400. The
+capability is *not* a subscription preview registration, which `az feature` cannot see and which
+made it look portal-only: it is an account capability, set with
+`az cosmosdb update --capabilities DeleteAllItemsByPartitionKey`. Set on a fresh account and
+reported back by `az cosmosdb show`, the operation still answers 400, and the service says why:
+
+> Partition key delete feature is disabled for this account. Please contact Azure Support to enable
+> it.
+
+So the gate is a support request against a specific account, not a switch anyone can flip — which
+is what makes this worth leaving alone rather than building against an unreachable path. Two facts
+from the documentation for whenever it is reachable: hierarchical partition keys are **not**
+supported, so only a complete key qualifies, which the recovery condition already required; and an
+index-using `COUNT` issued *during* an ongoing delete may still count the documents being removed,
+which bears on whether the fast path can be silent.
+
+The design — a probed capability the rule consults, `COUNT(*)` first for the affected count — is
+recorded in `DESIGN.md` under *Deleting a whole partition*.
 
 ### Transactional batch — *medium*
 
