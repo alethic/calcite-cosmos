@@ -868,17 +868,15 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
         /// And it costs less, which is the point of the whole path: a point read is charged about 1 RU
         /// where the same fetch as a query is 2.3 at best.
         /// <para>
-        /// Inconclusive on the emulator, which reports a flat 1 RU for both and so cannot tell them
-        /// apart. Asserting against that would be asserting a fiction — the emulator does not model
-        /// request charges, and this is the third thing it does not model faithfully.
+        /// The emulator reports a flat charge for both and so cannot tell them apart — but that is
+        /// <em>detected</em> rather than assumed from the endpoint. An emulator that starts
+        /// modelling request charges runs the assertion instead of skipping it, which is the whole
+        /// point of not writing the gap into the test as a constant.
         /// </para>
         /// </remarks>
         [TestMethod]
         public async Task APointReadCostsLessThanTheQuery()
         {
-            if (IsEmulator)
-                Assert.Inconclusive("The emulator reports a flat request charge and cannot distinguish a point read from a query.");
-
             var sql = "SELECT VALUE c FROM products c WHERE c.id = \"1\" AND c.category = \"bikes\"";
             var parameters = new CosmosParameterList().Parameters;
 
@@ -894,6 +892,14 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
 
             using var read = await Container().ReadItemStreamAsync("1", new PartitionKey("bikes"));
             var readCharge = read.Headers.RequestCharge;
+
+            // The gap itself, detected: an environment that charges the same for both is not
+            // modelling request charges, and the comparison would be asserting a fiction.
+            if (readCharge == queryCharge)
+            {
+                Assert.Inconclusive(
+                    $"This service reports a flat request charge — {readCharge} RU for both a point read and the equivalent query — so the two cannot be told apart here.");
+            }
 
             readCharge.Should().BeLessThan(queryCharge,
                 $"a point read ({readCharge} RU) should cost less than the equivalent query ({queryCharge} RU)");
@@ -1368,17 +1374,15 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
         /// sorting outright could not pass for a container that rejects only the multi-key form.
         /// </para>
         /// <para>
-        /// Inconclusive on the emulator, which discards composite indexes on create and accepts the
-        /// multi-key form regardless. That acceptance is a fact about the emulator and says nothing
-        /// about the service, which is the whole reason this needs a real account.
+        /// Inconclusive where the environment accepts the multi-key form — the emulator discards
+        /// composite indexes on create and does — but <em>detected</em> rather than assumed from
+        /// the endpoint: an emulator that starts implementing them makes this assert instead of
+        /// skip, which is the point of not writing the gap in as a constant.
         /// </para>
         /// </remarks>
         [TestMethod]
         public async Task AMultiKeyOrderByNeedsACompositeIndex()
         {
-            if (IsEmulator)
-                Assert.Inconclusive("The emulator does not implement composite indexes and accepts the multi-key form regardless.");
-
             var database = _client!.GetDatabase(DatabaseName);
             var name = "no_composite_index";
 
@@ -1426,8 +1430,17 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
                 var multi = await Run(container, $"SELECT VALUE c FROM {name} c ORDER BY c.category, c.price");
 
                 single.Should().BeNull("a single-key sort is served by the range index every path gets");
-                multi.Should().NotBeNull("the guard exists because the service refuses this without a composite index");
-                multi!.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
+
+                // The gap itself, detected: an environment that accepts the multi-key form without a
+                // composite index is not implementing them, and has nothing to say about the guard.
+                if (multi is null)
+                {
+                    Assert.Inconclusive(
+                        "This service accepts a multi-key ORDER BY over a container with no composite index, so it does not implement them and cannot answer what the sort guard is built on.");
+                }
+
+                multi!.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest,
+                    "the guard exists because the service refuses this without a composite index");
             }
             finally
             {

@@ -369,10 +369,12 @@ comes back as SQL's null does, and that `* 1` does not disturb a large integer.
   translator addition is a candidate. Probed and in: filters, sorts, the aggregate forms, `LIKE`,
   and the array traversal — the guess that the oracle could not evaluate an in-process unnest was
   wrong, and the corpus says so.
-- **Emulator gaps, asserted** — *small.* The emulator silently discards composite indexes, does not
-  implement full text search, reports a flat 1 RU for every request, and returns no index metrics.
-  All four are known and are why the corresponding tests report inconclusive there rather than
-  failing; none is *asserted*, so a future emulator that fixes one would go unnoticed.
+- **Emulator gaps, asserted — done for the two that were wrong; keep the shape.** A skip must be
+  earned by detecting the gap, never by asking which endpoint answered: the flat request charge and
+  the discarded composite index were both hard-coded to `IsEmulator`, so an emulator that fixed
+  either would have gone on skipping for ever. Both now measure the gap and report it, and the
+  index-metrics pair already did. Any future gap belongs in that shape. *(Retained here as the rule
+  rather than as a task.)*
 - **A malformed response's failure mode** — *small.* A lookup-join stub returning raw documents
   instead of the statement's projection once produced a null reference inside the join's result
   selector, and which access produced it was never established. Worth knowing whether a malformed
