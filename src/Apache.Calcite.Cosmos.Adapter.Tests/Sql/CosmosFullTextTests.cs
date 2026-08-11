@@ -123,6 +123,10 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Sql
                 "FULLTEXTSCORE", "RRF", "VECTORDISTANCE",
                 "IS_DEFINED", "IS_ARRAY", "IS_BOOL", "IS_NULL",
                 "IS_NUMBER", "IS_OBJECT", "IS_PRIMITIVE", "IS_STRING",
+                // What has no SQL counterpart to map from: a regular expression dialect, and the
+                // JSON conversions. The array functions are mapped instead — see the translator.
+                "REGEXMATCH",
+                "ToString", "StringToNumber", "StringToObject", "StringToArray", "StringToBoolean", "ObjectToArray",
             ]);
         }
 
