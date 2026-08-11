@@ -108,10 +108,27 @@ be. That was two round trips per container for statistics; the whole-partition d
 adds a third for any connection that plans one, and a short-lived-connection application pays them
 all again each time.
 
-What it wants is a cache keyed by account, database and container, living beside the client rather
-than beside the schema — which is the same owner question the lookup cache answered with a declared
-policy, and should probably answer the same way. Related: *Statistics refresh* below, which is this
-question asked about staleness rather than about sharing.
+**The cache hangs off the schema**, which is where the lookup cache already hangs and for the same
+reason: no global static, no leak between accounts, and the lifetime is the caller's to choose. It
+does not help a host that rebuilds its schema per connection — but that is the honest shape, because
+the alternative is a process-wide cache keyed by `CosmosClient.Endpoint` that outlives every
+decision anyone made about it. ADO.NET pushes callers to recreate connections freely and pool them
+underneath; reusing the *schema* across those connections is the documented way to keep what it
+learnt, and the README should say so beside the client-factory guidance.
+
+Three facts, three lifetimes, and they are not the same:
+
+- **The container definition** — partition key paths, indexing policy. Changes only by a control
+  plane operation; cache for the life of the schema.
+- **The whole-partition delete capability** — a property of the account, changed only by a support
+  request. Same treatment.
+- **Statistics** — genuinely mutable, and sharing them across connections is what makes
+  *Statistics refresh* below load-bearing rather than theoretical: without a time to live, one
+  connection's stale row count would outlive the connection that fetched it.
+
+Worth verifying first: how a host reuses a schema through `Apache.Calcite.Data`, since the model
+path builds one per connection and the guidance is only actionable if there is a supported way to
+hand the same instance back.
 
 ### Statistics refresh — *medium*
 
