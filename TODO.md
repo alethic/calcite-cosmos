@@ -205,9 +205,12 @@ owns the client.
 
 ### Scalar functions still to map
 
-- *Small each*: `ARRAY_SLICE`, `ARRAY_CONCAT`, `SETINTERSECT`, `SETUNION`; `LEFT`, `RIGHT`, `REVERSE`,
-  `REPLICATE`, `REGEXMATCH`; the JSON conversions `ToString`, `StringToNumber`, `StringToObject`,
-  `ObjectToArray`.
+- **Temporal is what is left**, and its blocker is a declared representation rather than a
+  translation — see below.
+- **A host must chain a library operator table** to name `LEFT`, `RIGHT`, `REVERSE` or `REPEAT` at
+  all: Calcite's standard table carries none of them, and the adapter translates whatever arrives
+  rather than deciding which library a caller uses. Worth a line in the README beside the
+  `CosmosOperators` chaining it already documents — *small*.
 - **Currently declined, admissible with work** — `SUBSTRING` without a length (`LENGTH(s)` supplies
   it); `LIKE` with `ESCAPE`, and a bracket-escaping rewrite that would lift the bracket-pattern
   decline (Cosmos `LIKE` reads `[…]` as a character range where SQL does not — measured, and why

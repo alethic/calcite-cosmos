@@ -186,7 +186,15 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests
 
             var catalogReader = new CalciteCatalogReader(rootSchema, java.util.Collections.emptyList(), typeFactory, new CalciteConnectionConfigImpl(properties));
             var parsed = SqlParser.create(sql, SqlParser.config().withUnquotedCasing(Casing.UNCHANGED)).parseQuery();
-            var validator = SqlValidatorUtil.newValidator(SqlStdOperatorTable.instance(), catalogReader, typeFactory, SqlValidator.Config.DEFAULT);
+            // Chained with the library table so the corpus can name LEFT, RIGHT, REVERSE and REPEAT
+            // — Calcite's standard table has none of them, and they are the functions whose two
+            // dialects this suite exists to compare.
+            var operators = org.apache.calcite.sql.util.SqlOperatorTables.chain(
+                SqlStdOperatorTable.instance(),
+                org.apache.calcite.sql.fun.SqlLibraryOperatorTableFactory.INSTANCE.getOperatorTable(
+                    java.util.EnumSet.of(org.apache.calcite.sql.fun.SqlLibrary.MYSQL)));
+
+            var validator = SqlValidatorUtil.newValidator(operators, catalogReader, typeFactory, SqlValidator.Config.DEFAULT);
 
             var planner = new VolcanoPlanner();
             planner.addRelTraitDef(ConventionTraitDef.INSTANCE);
@@ -370,6 +378,18 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests
 
             // Array traversal.
             ("SELECT c.\"id\" FROM products AS c, UNNEST(c.\"_MAP\"['tags']) AS t", false),
+
+            // The string functions mapped from a SQL counterpart, which is exactly where the two
+            // could disagree — the oracle evaluates SQL's, the pushdown Cosmos's.
+            ("SELECT LEFT(CAST(c.\"_MAP\"['name'] AS VARCHAR), 3) FROM products AS c", false),
+            ("SELECT RIGHT(CAST(c.\"_MAP\"['name'] AS VARCHAR), 3) FROM products AS c", false),
+            ("SELECT REVERSE(CAST(c.\"_MAP\"['name'] AS VARCHAR)) FROM products AS c", false),
+            ("SELECT REPEAT(CAST(c.\"_MAP\"['name'] AS VARCHAR), 2) FROM products AS c", false),
+
+            // And the boundary that most often differs between dialects: a count longer than the
+            // string, which both are documented to clamp rather than fail.
+            ("SELECT LEFT(CAST(c.\"_MAP\"['name'] AS VARCHAR), 99) FROM products AS c", false),
+            ("SELECT RIGHT(CAST(c.\"_MAP\"['name'] AS VARCHAR), 99) FROM products AS c", false),
         ];
 
         [TestMethod]

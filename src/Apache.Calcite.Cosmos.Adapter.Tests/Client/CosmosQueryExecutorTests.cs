@@ -463,6 +463,25 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
                 ("startswith", b => b.Where = "STARTSWITH(c.name, \"Trail\")"),
                 ("like", b => b.Where = "c.name LIKE \"%unner\""),
 
+                // The scalar functions mapped without a service to check them against would be
+                // guesses; every emitted form runs here.
+                ("left", b => b.SelectValue("LEFT(c.name, 3)")),
+                ("right", b => b.SelectValue("RIGHT(c.name, 3)")),
+                ("reverse", b => b.SelectValue("REVERSE(c.name)")),
+                ("replicate", b => b.SelectValue("REPLICATE(c.name, 2)")),
+                ("regexmatch", b => b.Where = "REGEXMATCH(c.name, \"^Tr\")"),
+                ("regexmatch with modifiers", b => b.Where = "REGEXMATCH(c.name, \"^tr\", \"i\")"),
+                ("array_slice", b => b.SelectValue("ARRAY_SLICE(c.tags, 0, 1)")),
+                ("array_concat", b => b.SelectValue("ARRAY_CONCAT(c.tags, c.tags)")),
+                ("setintersect", b => b.SelectValue("SETINTERSECT(c.tags, c.tags)")),
+                ("setunion", b => b.SelectValue("SETUNION(c.tags, c.tags)")),
+                ("tostring", b => b.SelectValue("ToString(c.price)")),
+                ("stringtonumber", b => b.SelectValue("StringToNumber(\"42\")")),
+                ("stringtoobject", b => b.SelectValue("StringToObject(\"{\\\"a\\\":1}\")")),
+                ("stringtoarray", b => b.SelectValue("StringToArray(\"[1,2]\")")),
+                ("stringtoboolean", b => b.SelectValue("StringToBoolean(\"true\")")),
+                ("objecttoarray", b => b.SelectValue("ObjectToArray(c.metadata)")),
+
                 // Scalar functions, in the exact forms the translator emits.
                 ("upper", b => b.SelectValue("UPPER(c.name)")),
                 ("length", b => b.SelectValue("LENGTH(c.name)")),

@@ -224,6 +224,88 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Sql
                 .Should().BeFalse();
         }
 
+        // ── Scalar functions ──────────────────────────────────────────────────────
+
+        /// <remarks>
+        /// Spelled alike at both ends, and meaning alike: the count is a character count and both
+        /// clamp rather than fail where it exceeds the string.
+        /// </remarks>
+        [TestMethod]
+        public void LeftAndRightRenderUnchanged()
+        {
+            Translate(Call(SqlLibraryOperators.LEFT, Ref(0, SqlTypeName.VARCHAR), Num(3)))
+                .Should().Be("LEFT(c.name, @p0)");
+
+            Translate(Call(SqlLibraryOperators.RIGHT, Ref(0, SqlTypeName.VARCHAR), Num(3)))
+                .Should().Be("RIGHT(c.name, @p0)");
+        }
+
+        [TestMethod]
+        public void ReverseRendersUnchanged()
+        {
+            Translate(Call(SqlLibraryOperators.REVERSE, Ref(0, SqlTypeName.VARCHAR)))
+                .Should().Be("REVERSE(c.name)");
+        }
+
+        /// <remarks>
+        /// The one string function whose name differs: SQL repeats with <c>REPEAT</c> and Cosmos
+        /// with <c>REPLICATE</c>, same arguments in the same order.
+        /// </remarks>
+        [TestMethod]
+        public void RepeatBecomesReplicate()
+        {
+            Translate(Call(SqlLibraryOperators.REPEAT, Ref(0, SqlTypeName.VARCHAR), Num(2)))
+                .Should().Be("REPLICATE(c.name, @p0)");
+        }
+
+        /// <remarks>
+        /// Cosmos's own, under Cosmos's name — <c>ARRAY_SLICE</c> counts from zero where SQL counts
+        /// from one, so mapping it from a SQL counterpart would be two spellings that disagree
+        /// about the first element.
+        /// </remarks>
+        [TestMethod]
+        public void CosmosArrayFunctionsRenderUnderTheirOwnNames()
+        {
+            Translate(Call(CosmosOperators.ArraySlice, Ref(2, SqlTypeName.ANY), Num(0), Num(1)))
+                .Should().Be("ARRAY_SLICE(c, @p0, @p1)");
+
+            Translate(Call(CosmosOperators.ArrayConcat, Ref(2, SqlTypeName.ANY), Ref(2, SqlTypeName.ANY)))
+                .Should().Be("ARRAY_CONCAT(c, c)");
+
+            Translate(Call(CosmosOperators.SetIntersect, Ref(2, SqlTypeName.ANY), Ref(2, SqlTypeName.ANY)))
+                .Should().Be("SETINTERSECT(c, c)");
+
+            Translate(Call(CosmosOperators.SetUnion, Ref(2, SqlTypeName.ANY), Ref(2, SqlTypeName.ANY)))
+                .Should().Be("SETUNION(c, c)");
+        }
+
+        /// <remarks>
+        /// Under its own name deliberately: regular expression dialects differ in ways a query
+        /// cannot see, and the <c>LIKE</c> measurement is the argument for not quietly equating two.
+        /// </remarks>
+        [TestMethod]
+        public void RegexMatchRendersUnderItsOwnName()
+        {
+            Translate(Call(CosmosOperators.RegexMatch, Ref(0, SqlTypeName.VARCHAR), Str("^Tr")))
+                .Should().Be("REGEXMATCH(c.name, @p0)");
+
+            Translate(Call(CosmosOperators.RegexMatch, Ref(0, SqlTypeName.VARCHAR), Str("^tr"), Str("i")))
+                .Should().Be("REGEXMATCH(c.name, @p0, @p1)");
+        }
+
+        [TestMethod]
+        public void TheJsonConversionsRender()
+        {
+            Translate(Call(CosmosOperators.ToStringFunction, Ref(1, SqlTypeName.ANY)))
+                .Should().Be("ToString(c.price)");
+
+            Translate(Call(CosmosOperators.StringToNumber, Str("42")))
+                .Should().Be("StringToNumber(@p0)");
+
+            Translate(Call(CosmosOperators.ObjectToArray, Ref(2, SqlTypeName.ANY)))
+                .Should().Be("ObjectToArray(c)");
+        }
+
         [TestMethod]
         public void CaseBecomesNestedTernary()
         {

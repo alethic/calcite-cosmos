@@ -618,6 +618,31 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
             // projects it. So it renders wherever any other function does, and IsScoringFunction lets an
             // ORDER BY over it reach the clause as well.
             ["VECTORDISTANCE"] = ("VECTORDISTANCE", 2, 4),
+            // String functions SQL and Cosmos spell alike and mean alike. LEFT and RIGHT clamp rather
+            // than fail on a count longer than the string at both ends; REVERSE is a reversal.
+            ["LEFT"] = ("LEFT", 2, 2),
+            ["RIGHT"] = ("RIGHT", 2, 2),
+            ["REVERSE"] = ("REVERSE", 1, 1),
+            // SQL repeats a string with REPEAT and Cosmos with REPLICATE. Same arguments, same order,
+            // same meaning.
+            ["REPEAT"] = ("REPLICATE", 2, 2),
+            // Cosmos's own, under Cosmos's names, and offered rather than mapped from a SQL
+            // counterpart — see CosmosOperators for why each: ARRAY_SLICE indexes from zero where
+            // SQL indexes from one, the set operations have no scalar SQL counterpart at all, and a
+            // regular expression dialect is not something two spellings can quietly disagree about.
+            ["ARRAY_SLICE"] = ("ARRAY_SLICE", 2, 3),
+            ["ARRAY_CONCAT"] = ("ARRAY_CONCAT", 2, int.MaxValue),
+            ["SETINTERSECT"] = ("SETINTERSECT", 2, 2),
+            ["SETUNION"] = ("SETUNION", 2, 2),
+            ["REGEXMATCH"] = ("REGEXMATCH", 2, 3),
+            // The JSON conversions. Cosmos spells these in camel case and the service is
+            // case-insensitive about function names, but they are emitted as documented.
+            ["ToString"] = ("ToString", 1, 1),
+            ["StringToNumber"] = ("StringToNumber", 1, 1),
+            ["StringToObject"] = ("StringToObject", 1, 1),
+            ["StringToArray"] = ("StringToArray", 1, 1),
+            ["StringToBoolean"] = ("StringToBoolean", 1, 1),
+            ["ObjectToArray"] = ("ObjectToArray", 1, 1),
             // The type tests. Their argument is an ordinary expression rather than a path, so they need
             // nothing beyond the name — which is already the Cosmos one, these operators being this
             // adapter's own rather than translations of a SQL counterpart. See CosmosOperators.

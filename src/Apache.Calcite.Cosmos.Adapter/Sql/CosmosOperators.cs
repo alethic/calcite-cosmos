@@ -123,6 +123,57 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
         public static readonly SqlFunction IsString = TypeTest("IS_STRING");
 
         /// <summary>
+        /// <c>ARRAY_SLICE(&lt;array&gt;, &lt;start&gt; [, &lt;count&gt;])</c>.
+        /// </summary>
+        /// <remarks>
+        /// Cosmos's own, and offered under its own name rather than mapped from a SQL counterpart:
+        /// the start index is zero-based and may be negative to count from the end, where SQL's
+        /// array subscripting is one-based. Two spellings that disagree about the first element are
+        /// not the same function.
+        /// </remarks>
+        public static readonly SqlFunction ArraySlice = Value("ARRAY_SLICE", 2, 3);
+
+        /// <summary><c>ARRAY_CONCAT(&lt;array&gt;, &lt;array&gt; [, …])</c>.</summary>
+        public static readonly SqlFunction ArrayConcat = Value("ARRAY_CONCAT", 2, -1);
+
+        /// <summary><c>SETINTERSECT(&lt;array&gt;, &lt;array&gt;)</c> — the distinct elements in both.</summary>
+        public static readonly SqlFunction SetIntersect = Value("SETINTERSECT", 2, 2);
+
+        /// <summary><c>SETUNION(&lt;array&gt;, &lt;array&gt;)</c> — the distinct elements in either.</summary>
+        public static readonly SqlFunction SetUnion = Value("SETUNION", 2, 2);
+
+        /// <summary>
+        /// <c>REGEXMATCH(&lt;string&gt;, &lt;pattern&gt; [, &lt;modifiers&gt;])</c>.
+        /// </summary>
+        /// <remarks>
+        /// Under its own name rather than mapped from SQL's <c>REGEXP_LIKE</c>, and deliberately:
+        /// regular expression dialects differ in ways a query cannot see — Cosmos documents PCRE
+        /// with a stated list of unsupported constructs — so a caller writing this is asking for
+        /// Cosmos's regular expressions rather than for SQL's. The <c>LIKE</c> measurement is the
+        /// argument: two spellings that agree on most patterns and disagree on some are worse than
+        /// two names.
+        /// </remarks>
+        public static readonly SqlFunction RegexMatch = Predicate("REGEXMATCH", 2, 3);
+
+        /// <summary><c>ToString(&lt;expr&gt;)</c> — the JSON value rendered as a string.</summary>
+        public static readonly SqlFunction ToStringFunction = Value("ToString", 1, 1);
+
+        /// <summary><c>StringToNumber(&lt;string&gt;)</c>.</summary>
+        public static readonly SqlFunction StringToNumber = Value("StringToNumber", 1, 1);
+
+        /// <summary><c>StringToObject(&lt;string&gt;)</c>.</summary>
+        public static readonly SqlFunction StringToObject = Value("StringToObject", 1, 1);
+
+        /// <summary><c>StringToArray(&lt;string&gt;)</c>.</summary>
+        public static readonly SqlFunction StringToArray = Value("StringToArray", 1, 1);
+
+        /// <summary><c>StringToBoolean(&lt;string&gt;)</c>.</summary>
+        public static readonly SqlFunction StringToBoolean = Value("StringToBoolean", 1, 1);
+
+        /// <summary><c>ObjectToArray(&lt;object&gt;)</c> — an object as an array of key/value pairs.</summary>
+        public static readonly SqlFunction ObjectToArray = Value("ObjectToArray", 1, 1);
+
+        /// <summary>
         /// Gets an operator table carrying every Cosmos-specific function.
         /// </summary>
         public static SqlOperatorTable Instance { get; } = SqlOperatorTables.of(
@@ -130,6 +181,8 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
                 FullTextContains, FullTextContainsAll, FullTextContainsAny,
                 FullTextScore, Rrf, VectorDistance,
                 IsDefined, IsArray, IsBool, IsNull, IsNumber, IsObject, IsPrimitive, IsString,
+                ArraySlice, ArrayConcat, SetIntersect, SetUnion, RegexMatch,
+                ToStringFunction, StringToNumber, StringToObject, StringToArray, StringToBoolean, ObjectToArray,
             ]);
 
         /// <summary>
@@ -178,6 +231,28 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
                 name,
                 ReturnTypes.DOUBLE,
                 OperandTypes.variadic(SqlOperandCountRanges.from(min)),
+                SqlFunctionCategory.SYSTEM);
+        }
+
+        /// <summary>
+        /// Defines a function returning a value rather than a boolean.
+        /// </summary>
+        /// <remarks>
+        /// Typed <c>ANY</c>, which is what the row model types every document value: these return
+        /// arrays, objects, strings and numbers depending on what they were given, and a container
+        /// declares none of it. The arity is checked here so a mistyped call fails in the validator
+        /// with the message a caller can act on rather than in the translator.
+        /// </remarks>
+        static SqlFunction Value(string name, int min, int max)
+        {
+            var range = max < 0
+                ? SqlOperandCountRanges.from(min)
+                : SqlOperandCountRanges.between(min, max);
+
+            return SqlBasicFunction.create(
+                name,
+                ReturnTypes.@explicit(SqlTypeName.ANY),
+                OperandTypes.variadic(range),
                 SqlFunctionCategory.SYSTEM);
         }
 
