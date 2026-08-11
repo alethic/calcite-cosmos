@@ -192,7 +192,11 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests
             var operators = org.apache.calcite.sql.util.SqlOperatorTables.chain(
                 SqlStdOperatorTable.instance(),
                 org.apache.calcite.sql.fun.SqlLibraryOperatorTableFactory.INSTANCE.getOperatorTable(
-                    java.util.EnumSet.of(org.apache.calcite.sql.fun.SqlLibrary.MYSQL)));
+                    java.util.EnumSet.of(
+                        org.apache.calcite.sql.fun.SqlLibrary.MYSQL,
+                        org.apache.calcite.sql.fun.SqlLibrary.SPARK,
+                        org.apache.calcite.sql.fun.SqlLibrary.HIVE,
+                        org.apache.calcite.sql.fun.SqlLibrary.BIG_QUERY)));
 
             var validator = SqlValidatorUtil.newValidator(operators, catalogReader, typeFactory, SqlValidator.Config.DEFAULT);
 
@@ -390,6 +394,19 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests
             // string, which both are documented to clamp rather than fail.
             ("SELECT LEFT(CAST(c.\"_MAP\"['name'] AS VARCHAR), 99) FROM products AS c", false),
             ("SELECT RIGHT(CAST(c.\"_MAP\"['name'] AS VARCHAR), 99) FROM products AS c", false),
+
+            // The array functions, and the index shift above all: the oracle counts from one and
+            // the pushdown from zero, so an off-by-one in the translation shows here as different
+            // elements rather than as an error.
+            ("SELECT ARRAY_SLICE(c.\"_MAP\"['tags'], 1, 1) FROM products AS c WHERE c.\"id\" = '1'", false),
+            ("SELECT ARRAY_SLICE(c.\"_MAP\"['tags'], 2, 1) FROM products AS c WHERE c.\"id\" = '1'", false),
+            ("SELECT ARRAY_UNION(c.\"_MAP\"['tags'], c.\"_MAP\"['tags']) FROM products AS c WHERE c.\"id\" = '1'", false),
+            ("SELECT ARRAY_INTERSECT(c.\"_MAP\"['tags'], c.\"_MAP\"['tags']) FROM products AS c WHERE c.\"id\" = '1'", false),
+
+            // Not here, and the absences are facts rather than oversights: the library's
+            // ARRAY_SLICE takes exactly three arguments, so Cosmos's two-argument form has no SQL
+            // spelling to compare against; and ARRAY_CONCAT's operand checker refuses a map value,
+            // which is typed ANY, so the statement does not validate over this row model at all.
         ];
 
         [TestMethod]

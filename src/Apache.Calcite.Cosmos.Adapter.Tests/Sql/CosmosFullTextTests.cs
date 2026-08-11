@@ -123,9 +123,9 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Sql
                 "FULLTEXTSCORE", "RRF", "VECTORDISTANCE",
                 "IS_DEFINED", "IS_ARRAY", "IS_BOOL", "IS_NULL",
                 "IS_NUMBER", "IS_OBJECT", "IS_PRIMITIVE", "IS_STRING",
-                // Cosmos's own scalar functions, offered under Cosmos's names rather than mapped
-                // from a SQL counterpart that means something subtly different. See CosmosOperators.
-                "ARRAY_SLICE", "ARRAY_CONCAT", "SETINTERSECT", "SETUNION", "REGEXMATCH",
+                // What has no SQL counterpart to map from: a regular expression dialect, and the
+                // JSON conversions. The array functions are mapped instead — see the translator.
+                "REGEXMATCH",
                 "ToString", "StringToNumber", "StringToObject", "StringToArray", "StringToBoolean", "ObjectToArray",
             ]);
         }

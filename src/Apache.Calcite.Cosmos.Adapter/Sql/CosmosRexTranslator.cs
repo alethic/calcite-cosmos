@@ -626,14 +626,15 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
             // SQL repeats a string with REPEAT and Cosmos with REPLICATE. Same arguments, same order,
             // same meaning.
             ["REPEAT"] = ("REPLICATE", 2, 2),
-            // Cosmos's own, under Cosmos's names, and offered rather than mapped from a SQL
-            // counterpart — see CosmosOperators for why each: ARRAY_SLICE indexes from zero where
-            // SQL indexes from one, the set operations have no scalar SQL counterpart at all, and a
-            // regular expression dialect is not something two spellings can quietly disagree about.
-            ["ARRAY_SLICE"] = ("ARRAY_SLICE", 2, 3),
+            // The array functions, mapped from their SQL counterparts. ARRAY_SLICE differs only in
+            // index origin and is adjusted like SUBSTRING, below; these three agree outright.
             ["ARRAY_CONCAT"] = ("ARRAY_CONCAT", 2, int.MaxValue),
-            ["SETINTERSECT"] = ("SETINTERSECT", 2, 2),
-            ["SETUNION"] = ("SETUNION", 2, 2),
+            ["ARRAY_INTERSECT"] = ("SETINTERSECT", 2, 2),
+            ["ARRAY_UNION"] = ("SETUNION", 2, 2),
+            // Under its own name, and this one is not an index origin: a regular expression dialect
+            // is a semantic difference a query cannot see. Cosmos documents PCRE with constructs it
+            // does not support, so REGEXP_LIKE and this are two languages, not two spellings — the
+            // LIKE bracket measurement is the standing argument.
             ["REGEXMATCH"] = ("REGEXMATCH", 2, 3),
             // The JSON conversions. Cosmos spells these in camel case and the service is
             // case-insensitive about function names, but they are emitted as documented.
@@ -667,6 +668,9 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
             {
                 case "SUBSTRING":
                     WriteSubstring(builder, call);
+                    return;
+                case "ARRAY_SLICE":
+                    WriteArraySlice(builder, call);
                     return;
                 case "POSITION":
                     WritePosition(builder, call);
@@ -749,6 +753,43 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
             Write(builder, Operand(call, 1));
             builder.Append(" - 1), ");
             Write(builder, Operand(call, 2));
+            builder.Append(')');
+        }
+
+        /// <summary>
+        /// Writes <c>ARRAY_SLICE</c>, adjusting for the differing origin.
+        /// </summary>
+        /// <remarks>
+        /// Both take <c>(array, start, length)</c> and differ only in where counting begins —
+        /// Calcite's is one-based, Cosmos's zero-based — which is a translation detail rather than
+        /// a difference in meaning, and is emitted as <c>start - 1</c> exactly as
+        /// <see cref="WriteSubstring"/> does. The shift is checked rather than reasoned: the
+        /// differential corpus slices the same array both ways, so an off-by-one shows as different
+        /// elements rather than as an error.
+        /// <para>
+        /// The two-argument form is accepted because Cosmos accepts it — the rest of the array —
+        /// though the library's counterpart takes exactly three, so no SQL statement produces it
+        /// today.
+        /// </para>
+        /// </remarks>
+        void WriteArraySlice(StringBuilder builder, RexCall call)
+        {
+            var operands = call.getOperands();
+            if (operands.size() is not (2 or 3))
+                throw new CosmosTranslationException("ARRAY_SLICE takes an array, a start, and an optional length.");
+
+            builder.Append("ARRAY_SLICE(");
+            Write(builder, Operand(call, 0));
+            builder.Append(", (");
+            Write(builder, Operand(call, 1));
+            builder.Append(" - 1)");
+
+            if (operands.size() == 3)
+            {
+                builder.Append(", ");
+                Write(builder, Operand(call, 2));
+            }
+
             builder.Append(')');
         }
 

@@ -259,23 +259,26 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Sql
         }
 
         /// <remarks>
-        /// Cosmos's own, under Cosmos's name — <c>ARRAY_SLICE</c> counts from zero where SQL counts
-        /// from one, so mapping it from a SQL counterpart would be two spellings that disagree
-        /// about the first element.
+        /// The index origin is a translation detail, not a difference in meaning — Calcite counts
+        /// from one and Cosmos from zero, so the start is shifted exactly as <c>SUBSTRING</c>'s is.
         /// </remarks>
         [TestMethod]
-        public void CosmosArrayFunctionsRenderUnderTheirOwnNames()
+        public void ArraySliceShiftsTheStartToCosmosOrigin()
         {
-            Translate(Call(CosmosOperators.ArraySlice, Ref(2, SqlTypeName.ANY), Num(0), Num(1)))
-                .Should().Be("ARRAY_SLICE(c, @p0, @p1)");
+            Translate(Call(SqlLibraryOperators.ARRAY_SLICE, Ref(2, SqlTypeName.ANY), Num(1), Num(2)))
+                .Should().Be("ARRAY_SLICE(c, (@p0 - 1), @p1)");
+        }
 
-            Translate(Call(CosmosOperators.ArrayConcat, Ref(2, SqlTypeName.ANY), Ref(2, SqlTypeName.ANY)))
+        [TestMethod]
+        public void TheSetFunctionsMapFromTheirSqlCounterparts()
+        {
+            Translate(Call(SqlLibraryOperators.ARRAY_CONCAT, Ref(2, SqlTypeName.ANY), Ref(2, SqlTypeName.ANY)))
                 .Should().Be("ARRAY_CONCAT(c, c)");
 
-            Translate(Call(CosmosOperators.SetIntersect, Ref(2, SqlTypeName.ANY), Ref(2, SqlTypeName.ANY)))
+            Translate(Call(SqlLibraryOperators.ARRAY_INTERSECT, Ref(2, SqlTypeName.ANY), Ref(2, SqlTypeName.ANY)))
                 .Should().Be("SETINTERSECT(c, c)");
 
-            Translate(Call(CosmosOperators.SetUnion, Ref(2, SqlTypeName.ANY), Ref(2, SqlTypeName.ANY)))
+            Translate(Call(SqlLibraryOperators.ARRAY_UNION, Ref(2, SqlTypeName.ANY), Ref(2, SqlTypeName.ANY)))
                 .Should().Be("SETUNION(c, c)");
         }
 

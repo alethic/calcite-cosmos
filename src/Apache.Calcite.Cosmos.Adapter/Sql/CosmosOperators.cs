@@ -123,26 +123,6 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
         public static readonly SqlFunction IsString = TypeTest("IS_STRING");
 
         /// <summary>
-        /// <c>ARRAY_SLICE(&lt;array&gt;, &lt;start&gt; [, &lt;count&gt;])</c>.
-        /// </summary>
-        /// <remarks>
-        /// Cosmos's own, and offered under its own name rather than mapped from a SQL counterpart:
-        /// the start index is zero-based and may be negative to count from the end, where SQL's
-        /// array subscripting is one-based. Two spellings that disagree about the first element are
-        /// not the same function.
-        /// </remarks>
-        public static readonly SqlFunction ArraySlice = Value("ARRAY_SLICE", 2, 3);
-
-        /// <summary><c>ARRAY_CONCAT(&lt;array&gt;, &lt;array&gt; [, …])</c>.</summary>
-        public static readonly SqlFunction ArrayConcat = Value("ARRAY_CONCAT", 2, -1);
-
-        /// <summary><c>SETINTERSECT(&lt;array&gt;, &lt;array&gt;)</c> — the distinct elements in both.</summary>
-        public static readonly SqlFunction SetIntersect = Value("SETINTERSECT", 2, 2);
-
-        /// <summary><c>SETUNION(&lt;array&gt;, &lt;array&gt;)</c> — the distinct elements in either.</summary>
-        public static readonly SqlFunction SetUnion = Value("SETUNION", 2, 2);
-
-        /// <summary>
         /// <c>REGEXMATCH(&lt;string&gt;, &lt;pattern&gt; [, &lt;modifiers&gt;])</c>.
         /// </summary>
         /// <remarks>
@@ -164,7 +144,13 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
         /// <summary><c>StringToObject(&lt;string&gt;)</c>.</summary>
         public static readonly SqlFunction StringToObject = Value("StringToObject", 1, 1);
 
-        /// <summary><c>StringToArray(&lt;string&gt;)</c>.</summary>
+        /// <summary>
+        /// <c>StringToArray(&lt;string&gt;)</c> — a JSON array parsed out of a string.
+        /// </summary>
+        /// <remarks>
+        /// <b>Not</b> mapped from the library's <c>STRING_TO_ARRAY</c>, which is Postgres's and
+        /// splits a string on a delimiter. Same name, unrelated function: this parses JSON text.
+        /// </remarks>
         public static readonly SqlFunction StringToArray = Value("StringToArray", 1, 1);
 
         /// <summary><c>StringToBoolean(&lt;string&gt;)</c>.</summary>
@@ -181,7 +167,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
                 FullTextContains, FullTextContainsAll, FullTextContainsAny,
                 FullTextScore, Rrf, VectorDistance,
                 IsDefined, IsArray, IsBool, IsNull, IsNumber, IsObject, IsPrimitive, IsString,
-                ArraySlice, ArrayConcat, SetIntersect, SetUnion, RegexMatch,
+                RegexMatch,
                 ToStringFunction, StringToNumber, StringToObject, StringToArray, StringToBoolean, ObjectToArray,
             ]);
 
