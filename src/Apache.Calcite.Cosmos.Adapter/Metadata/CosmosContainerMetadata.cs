@@ -225,8 +225,56 @@ namespace Apache.Calcite.Cosmos.Adapter.Metadata
         /// await. That is the one place this adapter does block — the planning path, once per container —
         /// and it is why the data path refuses to.
         /// </para>
+        /// <para>
+        /// <b>And it expires.</b> A row count is a measurement of something that keeps changing, so a
+        /// schema living for the life of a process would otherwise plan for ever against the count
+        /// it happened to read first. What expiry costs is a round trip; what it buys is a number
+        /// that still describes the container. The capability beside it does <em>not</em> expire and
+        /// should not: it changes only when someone enables a preview on the account, which no
+        /// running process can observe happening.
+        /// </para>
         /// </remarks>
-        public CosmosContainerStatistics? Statistics => _statistics.Value;
+        public CosmosContainerStatistics? Statistics
+        {
+            get
+            {
+                if (_statisticsProvider is null)
+                    return _statistics.Value;
+
+                lock (_statisticsGate)
+                {
+                    var now = (_time ?? TimeProvider.System).GetUtcNow();
+
+                    if (_statisticsFetched is DateTimeOffset fetched && now - fetched < _statisticsTimeToLive)
+                        return _statisticsValue;
+
+                    _statisticsValue = _statisticsProvider();
+                    _statisticsFetched = now;
+
+                    return _statisticsValue;
+                }
+            }
+        }
+
+        /// <summary>
+        /// How long a fetched row count is believed before it is read again.
+        /// </summary>
+        /// <remarks>
+        /// Five minutes, and the number is a judgement rather than a measurement — but not an
+        /// arbitrary one. The count the service reports already lags: measured, it reports zero
+        /// immediately after documents are written, so expiring it every few seconds would spend
+        /// round trips re-reading a number that had not caught up. What a stale count costs is a
+        /// worse plan, never a wrong answer, which is what makes a default defensible at all where
+        /// this adapter refuses to guess about semantics.
+        /// </remarks>
+        public static readonly TimeSpan DefaultStatisticsTimeToLive = TimeSpan.FromMinutes(5);
+
+        readonly object _statisticsGate = new();
+        Func<CosmosContainerStatistics?>? _statisticsProvider;
+        CosmosContainerStatistics? _statisticsValue;
+        DateTimeOffset? _statisticsFetched;
+        TimeSpan _statisticsTimeToLive = DefaultStatisticsTimeToLive;
+        TimeProvider? _time;
 
         /// <summary>
         /// Returns the same metadata carrying the given statistics.
@@ -277,6 +325,12 @@ namespace Apache.Calcite.Cosmos.Adapter.Metadata
 
             var metadata = new CosmosContainerMetadata(_name, _partitionKeyPaths, _compositeIndexes, _includedPaths, _excludedPaths);
             metadata._statistics = _statistics;
+            metadata._statisticsProvider = _statisticsProvider;
+            metadata._statisticsTimeToLive = _statisticsTimeToLive;
+            metadata._time = _time;
+
+            // Not expiring, and deliberately: a capability changes when someone enables a preview
+            // on the account, which is not something a running process can observe happening.
             metadata._partitionKeyDelete = new Lazy<bool>(probe, LazyThreadSafetyMode.ExecutionAndPublication);
             return metadata;
         }
@@ -285,20 +339,28 @@ namespace Apache.Calcite.Cosmos.Adapter.Metadata
         /// Returns the same metadata whose statistics are fetched on first use.
         /// </summary>
         /// <remarks>
-        /// The provider is invoked at most once, and a container nothing plans against never invokes it
-        /// at all — which is the point. A provider returning <c>null</c> leaves the planner where it
-        /// would have been without one.
+        /// The provider is invoked on first use and then again whenever the answer has expired, and
+        /// a container nothing plans against never invokes it at all — which is the point. A
+        /// provider returning <c>null</c> leaves the planner where it would have been without one.
         /// </remarks>
         /// <param name="provider">Fetches the statistics.</param>
+        /// <param name="timeToLive">How long an answer is believed, or <c>null</c> for <see cref="DefaultStatisticsTimeToLive"/>.</param>
+        /// <param name="time">The clock, replaceable for tests.</param>
         /// <returns>The metadata.</returns>
         /// <exception cref="ArgumentNullException"><paramref name="provider"/> is <c>null</c>.</exception>
-        public CosmosContainerMetadata WithStatisticsProvider(Func<CosmosContainerStatistics?> provider)
+        /// <exception cref="ArgumentOutOfRangeException"><paramref name="timeToLive"/> is not positive.</exception>
+        public CosmosContainerMetadata WithStatisticsProvider(Func<CosmosContainerStatistics?> provider, TimeSpan? timeToLive = null, TimeProvider? time = null)
         {
             if (provider is null)
                 throw new ArgumentNullException(nameof(provider));
 
+            if (timeToLive is TimeSpan span && span <= TimeSpan.Zero)
+                throw new ArgumentOutOfRangeException(nameof(timeToLive), "A statistics time to live must be positive.");
+
             var metadata = new CosmosContainerMetadata(_name, _partitionKeyPaths, _compositeIndexes, _includedPaths, _excludedPaths);
-            metadata._statistics = new Lazy<CosmosContainerStatistics?>(provider, LazyThreadSafetyMode.ExecutionAndPublication);
+            metadata._statisticsProvider = provider;
+            metadata._statisticsTimeToLive = timeToLive ?? DefaultStatisticsTimeToLive;
+            metadata._time = time;
             metadata._partitionKeyDelete = _partitionKeyDelete;
             return metadata;
         }

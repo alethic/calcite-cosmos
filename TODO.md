@@ -130,12 +130,14 @@ Worth verifying first: how a host reuses a schema through `Apache.Calcite.Data`,
 path builds one per connection and the guidance is only actionable if there is a supported way to
 hand the same instance back.
 
-### Statistics refresh — *medium*
+### An explicit statistics refresh — *medium*
 
-Fetched once per container, on first use, and never again: a schema that lives for the life of a
-process will plan against a row count from whenever it was first asked. A time-to-live, or an explicit
-refresh, is the missing piece. Drill's answer is a metastore that `ANALYZE TABLE COMPUTE STATISTICS`
-populates, which decouples the fetch from the query entirely and is worth considering over a TTL.
+A row count now expires and is read again — five minutes by default, `statisticsExpireSeconds` to
+say otherwise — so a long-lived schema no longer plans for ever against the first number it saw.
+What a time to live cannot do is let a caller say *now*: after a bulk load, the useful moment to
+re-read is the one the caller knows about and the clock does not. Drill's answer is a metastore that
+an explicit `ANALYZE TABLE COMPUTE STATISTICS` populates, which decouples the fetch from the query
+altogether and is the shape worth copying.
 
 ### Statistics after pushdown — *large*
 
