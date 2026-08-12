@@ -321,6 +321,45 @@ namespace Apache.Calcite.Cosmos.Adapter.Metadata
         }
 
         /// <summary>
+        /// Attempts to recover a complete partition key from a predicate that pins it and says
+        /// nothing else — the shape a whole-partition delete answers.
+        /// </summary>
+        /// <remarks>
+        /// The same blindness argument the point read makes, one operation over: the service
+        /// removes every document in the partition and applies no predicate, so a residual conjunct
+        /// would delete rows the statement did not ask for — which is data loss rather than a slow
+        /// plan. Every top-level conjunct must therefore be one of the equalities pinning the key,
+        /// and an <c>id</c> among them disqualifies it: that is a delete of one document, which the
+        /// per-row path already does cheaply.
+        /// </remarks>
+        /// <param name="condition">The predicate, expressed over <paramref name="fields"/>.</param>
+        /// <param name="fields">The ordinal-to-path binding of the filtered input.</param>
+        /// <param name="container">The container being deleted from.</param>
+        /// <param name="rootAlias">The alias bound to the container.</param>
+        /// <param name="values">On success, one value per declared partition key path, in order.</param>
+        /// <returns><c>true</c> if the predicate is exactly a complete partition key.</returns>
+        public static bool TryExtractWholePartition(RexNode condition, IReadOnlyList<CosmosPath?> fields, CosmosContainerMetadata container, string rootAlias, out IReadOnlyList<object?> values)
+        {
+            values = Array.Empty<object?>();
+
+            if (condition is null || fields is null || container is null)
+                return false;
+
+            if (TryExtract(condition, fields, container, rootAlias, out var partitionKey) == false)
+                return false;
+
+            // Only the partition key paths are accounted for — not id, which makes this a
+            // single-document delete rather than a partition one.
+            var accounted = new HashSet<string>(container.PartitionKeyPaths, StringComparer.Ordinal);
+
+            if (CoversExactly(condition, fields, rootAlias, accounted) == false)
+                return false;
+
+            values = partitionKey;
+            return true;
+        }
+
+        /// <summary>
         /// Determines whether every top-level conjunct is an equality pinning one of the given paths.
         /// </summary>
         /// <remarks>

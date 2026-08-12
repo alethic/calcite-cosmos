@@ -327,6 +327,39 @@ namespace Apache.Calcite.Cosmos.Adapter.Client
         }
 
         /// <inheritdoc />
+        public async Task<bool> DeletePartitionAsync(PartitionKey partitionKey, CancellationToken cancellationToken = default)
+        {
+            using var response = await _container.DeleteAllItemsByPartitionKeyStreamAsync(partitionKey, cancellationToken: cancellationToken).ConfigureAwait(false);
+
+            Report(response.Headers.RequestCharge, CosmosInstrumentation.Kinds.Write);
+
+            if (response.IsSuccessStatusCode == false)
+                throw new CosmosExecutionException($"Deleting the partition from '{_container.Id}' failed with {(int)response.StatusCode} {response.StatusCode}. {response.ErrorMessage}".TrimEnd());
+
+            return true;
+        }
+
+        /// <inheritdoc />
+        public async Task<bool> SupportsPartitionDeleteAsync(CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                // A partition key value nothing can be stored under, so the call deletes nothing
+                // whichever way it is answered. What is read is the refusal, not the effect: an
+                // account without the capability answers 400 saying the feature is disabled.
+                var probe = new PartitionKey("cosmos-adapter-capability-probe-" + Guid.NewGuid().ToString("n"));
+
+                using var response = await _container.DeleteAllItemsByPartitionKeyStreamAsync(probe, cancellationToken: cancellationToken).ConfigureAwait(false);
+
+                return response.IsSuccessStatusCode;
+            }
+            catch (CosmosException)
+            {
+                return false;
+            }
+        }
+
+        /// <inheritdoc />
         public async Task<bool> ReplaceItemAsync(byte[] document, string id, PartitionKey partitionKey, CancellationToken cancellationToken = default)
         {
             if (document is null)

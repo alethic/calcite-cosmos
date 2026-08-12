@@ -117,6 +117,16 @@ namespace Apache.Calcite.Cosmos.Adapter
         public const string LookupCacheExpireSecondsOperand = "lookupCacheExpireSeconds";
 
         /// <summary>
+        /// The operand stating how long a container's row count may be believed, in seconds.
+        /// </summary>
+        /// <remarks>
+        /// Defaults to <see cref="CosmosContainerMetadata.DefaultStatisticsTimeToLive"/>. A row
+        /// count is a measurement of something that keeps changing, so it expires; the capabilities
+        /// beside it do not, changing only when someone enables a preview on the account.
+        /// </remarks>
+        public const string StatisticsExpireSecondsOperand = "statisticsExpireSeconds";
+
+        /// <summary>
         /// The operand asking the service which indexes each statement used.
         /// </summary>
         /// <remarks>
@@ -148,13 +158,14 @@ namespace Apache.Calcite.Cosmos.Adapter
             var containers = GetStrings(operand, ContainersOperand);
             var indexMetrics = GetBoolean(operand, IndexMetricsOperand);
 
-            // Naming a database gives a schema whose tables are its containers. Omitting it gives the
             var lookupCache = ReadLookupCache(operand);
+            var statisticsTimeToLive = ReadStatisticsTimeToLive(operand);
 
+            // Naming a database gives a schema whose tables are its containers. Omitting it gives the
             // account: one subschema per database, which is how Cosmos nests and how Calcite nests, and
             // which needs one client rather than one per database.
             if (GetString(operand, DatabaseOperand) is not string database || database.Length == 0)
-                return CreateAccountSchema(client, containers, indexMetrics, lookupCache);
+                return CreateAccountSchema(client, containers, indexMetrics, lookupCache, statisticsTimeToLive);
 
             var db = client.GetDatabase(database);
 
@@ -162,9 +173,29 @@ namespace Apache.Calcite.Cosmos.Adapter
             // schema holds outlives this call. A container reference is a handle rather than a connection,
             // so binding one per table costs nothing.
             return new CosmosSchema(
-                ReadContainers(db, containers),
+                ReadContainers(db, containers, statisticsTimeToLive),
                 container => new CosmosQueryExecutor(db.GetContainer(container.Name), indexMetrics),
                 lookupCache is null ? null : _ => new CosmosLookupCache(lookupCache.Value.MaxRows, lookupCache.Value.ExpireAfterWrite));
+        }
+
+        /// <summary>
+        /// Reads how long a row count may be believed, or <c>null</c> for the default.
+        /// </summary>
+        /// <param name="operand">The model's operand map.</param>
+        /// <returns>The time to live, or <c>null</c>.</returns>
+        /// <exception cref="ArgumentException">The value is not a positive integer.</exception>
+        public static TimeSpan? ReadStatisticsTimeToLive(java.util.Map operand)
+        {
+            if (operand is null)
+                throw new ArgumentNullException(nameof(operand));
+
+            if (GetString(operand, StatisticsExpireSecondsOperand) is not string seconds || seconds.Length == 0)
+                return null;
+
+            if (int.TryParse(seconds, out var expire) == false || expire < 1)
+                throw new ArgumentException($"Operand '{StatisticsExpireSecondsOperand}' must be a positive integer; '{seconds}' is not.");
+
+            return TimeSpan.FromSeconds(expire);
         }
 
         /// <summary>
@@ -208,7 +239,7 @@ namespace Apache.Calcite.Cosmos.Adapter
         /// useful where they share container names. Omitting it, which is the ordinary case here,
         /// exposes every container of every database.
         /// </remarks>
-        static Schema CreateAccountSchema(CosmosClient client, IReadOnlyList<string> containers, bool indexMetrics, (int MaxRows, TimeSpan ExpireAfterWrite)? lookupCache)
+        static Schema CreateAccountSchema(CosmosClient client, IReadOnlyList<string> containers, bool indexMetrics, (int MaxRows, TimeSpan ExpireAfterWrite)? lookupCache, TimeSpan? statisticsTimeToLive = null)
         {
             var databases = new List<KeyValuePair<string, IReadOnlyList<CosmosContainerMetadata>>>();
 
@@ -219,7 +250,7 @@ namespace Apache.Calcite.Cosmos.Adapter
                     foreach (var properties in iterator.ReadNextAsync(CancellationToken.None).GetAwaiter().GetResult())
                     {
                         var database = client.GetDatabase(properties.Id);
-                        databases.Add(new(properties.Id, ReadContainers(database, containers)));
+                        databases.Add(new(properties.Id, ReadContainers(database, containers, statisticsTimeToLive)));
                     }
                 }
             }
@@ -360,14 +391,14 @@ namespace Apache.Calcite.Cosmos.Adapter
         /// Reads metadata for the named containers, or for every container in the database when
         /// none are named.
         /// </summary>
-        static IReadOnlyList<CosmosContainerMetadata> ReadContainers(Database database, IReadOnlyList<string> names)
+        static IReadOnlyList<CosmosContainerMetadata> ReadContainers(Database database, IReadOnlyList<string> names, TimeSpan? statisticsTimeToLive = null)
         {
             var containers = new List<CosmosContainerMetadata>();
 
             if (names.Count > 0)
             {
                 foreach (var container in names)
-                    containers.Add(CosmosContainerMetadataReader.ReadAsync(database.GetContainer(container), CancellationToken.None).GetAwaiter().GetResult());
+                    containers.Add(CosmosContainerMetadataReader.ReadAsync(database.GetContainer(container), statisticsTimeToLive, CancellationToken.None).GetAwaiter().GetResult());
 
                 return containers;
             }

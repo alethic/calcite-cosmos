@@ -99,12 +99,45 @@ below wearing a different hat.
 Per-partition storage is an Azure Monitor metric, not data plane. The count is reachable and the
 distribution is not, so a hot-partition estimate would have to come from outside the adapter.
 
-### Statistics refresh — *medium*
+### Nothing is remembered between connections — *medium, and it now costs more than it did*
 
-Fetched once per container, on first use, and never again: a schema that lives for the life of a
-process will plan against a row count from whenever it was first asked. A time-to-live, or an explicit
-refresh, is the missing piece. Drill's answer is a metastore that `ANALYZE TABLE COMPUTE STATISTICS`
-populates, which decouples the fetch from the query entirely and is worth considering over a TTL.
+`CosmosSchemaFactory.create` runs per model read, which in the ADO.NET path is per *connection*, so
+every connection builds fresh `CosmosContainerMetadata` and with it fresh lazy cells. Within a
+connection each fact is computed once; across connections nothing is shared, though the client can
+be. That was two round trips per container for statistics; the whole-partition delete capability
+adds a third for any connection that plans one, and a short-lived-connection application pays them
+all again each time.
+
+**The cache hangs off the schema**, which is where the lookup cache already hangs and for the same
+reason: no global static, no leak between accounts, and the lifetime is the caller's to choose. It
+does not help a host that rebuilds its schema per connection — but that is the honest shape, because
+the alternative is a process-wide cache keyed by `CosmosClient.Endpoint` that outlives every
+decision anyone made about it. ADO.NET pushes callers to recreate connections freely and pool them
+underneath; reusing the *schema* across those connections is the documented way to keep what it
+learnt, and the README should say so beside the client-factory guidance.
+
+Three facts, three lifetimes, and they are not the same:
+
+- **The container definition** — partition key paths, indexing policy. Changes only by a control
+  plane operation; cache for the life of the schema.
+- **The whole-partition delete capability** — a property of the account, changed only by a support
+  request. Same treatment.
+- **Statistics** — genuinely mutable, and sharing them across connections is what makes
+  *Statistics refresh* below load-bearing rather than theoretical: without a time to live, one
+  connection's stale row count would outlive the connection that fetched it.
+
+Worth verifying first: how a host reuses a schema through `Apache.Calcite.Data`, since the model
+path builds one per connection and the guidance is only actionable if there is a supported way to
+hand the same instance back.
+
+### An explicit statistics refresh — *medium*
+
+A row count now expires and is read again — five minutes by default, `statisticsExpireSeconds` to
+say otherwise — so a long-lived schema no longer plans for ever against the first number it saw.
+What a time to live cannot do is let a caller say *now*: after a bulk load, the useful moment to
+re-read is the one the caller knows about and the clock does not. Drill's answer is a metastore that
+an explicit `ANALYZE TABLE COMPUTE STATISTICS` populates, which decouples the fetch from the query
+altogether and is the shape worth copying.
 
 ### Statistics after pushdown — *large*
 

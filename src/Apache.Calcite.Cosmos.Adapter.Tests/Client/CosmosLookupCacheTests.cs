@@ -184,6 +184,12 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
             public System.Threading.Tasks.Task<bool> ReplaceItemAsync(byte[] document, string id, Microsoft.Azure.Cosmos.PartitionKey partitionKey, System.Threading.CancellationToken cancellationToken = default) =>
                 System.Threading.Tasks.Task.FromResult(true);
 
+            public System.Threading.Tasks.Task<bool> DeletePartitionAsync(Microsoft.Azure.Cosmos.PartitionKey partitionKey, System.Threading.CancellationToken cancellationToken = default) =>
+                System.Threading.Tasks.Task.FromResult(true);
+
+            public System.Threading.Tasks.Task<bool> SupportsPartitionDeleteAsync(System.Threading.CancellationToken cancellationToken = default) =>
+                System.Threading.Tasks.Task.FromResult(false);
+
         }
 
         static async IAsyncEnumerable<object?[]> OneRow()

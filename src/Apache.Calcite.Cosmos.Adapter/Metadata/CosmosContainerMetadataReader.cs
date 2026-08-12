@@ -26,7 +26,17 @@ namespace Apache.Calcite.Cosmos.Adapter.Metadata
         /// <param name="cancellationToken">Cancels the read.</param>
         /// <returns>The container metadata.</returns>
         /// <exception cref="ArgumentNullException"><paramref name="container"/> is <c>null</c>.</exception>
-        public static async Task<CosmosContainerMetadata> ReadAsync(Container container, CancellationToken cancellationToken = default)
+        public static async Task<CosmosContainerMetadata> ReadAsync(Container container, CancellationToken cancellationToken = default) =>
+            await ReadAsync(container, null, cancellationToken).ConfigureAwait(false);
+
+        /// <summary>
+        /// Reads a container's declared metadata, believing its row count for the given time.
+        /// </summary>
+        /// <param name="container">The container to read.</param>
+        /// <param name="statisticsTimeToLive">How long a fetched row count is believed, or <c>null</c> for the default.</param>
+        /// <param name="cancellationToken">Cancels the read.</param>
+        /// <returns>The container metadata.</returns>
+        public static async Task<CosmosContainerMetadata> ReadAsync(Container container, TimeSpan? statisticsTimeToLive, CancellationToken cancellationToken = default)
         {
             if (container is null)
                 throw new ArgumentNullException(nameof(container));
@@ -37,7 +47,13 @@ namespace Apache.Calcite.Cosmos.Adapter.Metadata
             // Attached rather than fetched. A schema exposes every container of a database, and at the
             // account level every container of every database, so reading the size of all of them to
             // plan against one is the wrong trade — and it is two more round trips each.
-            return metadata.WithStatisticsProvider(() => ReadStatisticsAsync(container, CancellationToken.None).GetAwaiter().GetResult());
+            //
+            // The whole-partition delete capability is attached the same way and for a sharper
+            // version of the same reason: it can only be learnt by attempting the operation, and a
+            // plan with no whole-partition DELETE in it must never pay for that question.
+            return metadata
+                .WithStatisticsProvider(() => ReadStatisticsAsync(container, CancellationToken.None).GetAwaiter().GetResult(), statisticsTimeToLive)
+                .WithPartitionKeyDeleteProbe(() => new Client.CosmosQueryExecutor(container).SupportsPartitionDeleteAsync(CancellationToken.None).GetAwaiter().GetResult());
         }
 
         /// <summary>

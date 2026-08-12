@@ -166,6 +166,72 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests
             new CosmosTable(new CosmosContainerMetadata("products")).getStatistic().getRowCount().Should().BeNull();
         }
 
+        /// <summary>
+        /// A clock the test moves by hand.
+        /// </summary>
+        /// <remarks>
+        /// Globally qualified throughout: <c>TimeProvider</c> carries a static <c>System</c>
+        /// property, which shadows the namespace of the same name inside anything deriving from it.
+        /// </remarks>
+        sealed class ManualClock : global::System.TimeProvider
+        {
+
+            public global::System.DateTimeOffset Now { get; set; } = new global::System.DateTimeOffset(2026, 1, 1, 0, 0, 0, global::System.TimeSpan.Zero);
+
+            public override global::System.DateTimeOffset GetUtcNow() => Now;
+
+        }
+
+        /// <remarks>
+        /// A row count measures something that keeps changing, so a schema living for the life of a
+        /// process must not plan for ever against the count it read first.
+        /// </remarks>
+        [TestMethod]
+        public void TheRowCountIsFetchedAgainOnceItHasExpired()
+        {
+            var clock = new ManualClock();
+            var fetches = 0;
+
+            var container = new CosmosContainerMetadata("products").WithStatisticsProvider(
+                () => { fetches++; return new CosmosContainerStatistics(fetches * 100, 1000, 1); },
+                System.TimeSpan.FromMinutes(5),
+                clock);
+
+            container.Statistics!.Value.DocumentCount.Should().Be(100);
+            container.Statistics!.Value.DocumentCount.Should().Be(100, "and is remembered within the policy");
+            fetches.Should().Be(1);
+
+            clock.Now += System.TimeSpan.FromMinutes(4);
+            container.Statistics!.Value.DocumentCount.Should().Be(100, "four minutes is within five");
+            fetches.Should().Be(1);
+
+            clock.Now += System.TimeSpan.FromMinutes(2);
+            container.Statistics!.Value.DocumentCount.Should().Be(200, "six minutes is beyond it");
+            fetches.Should().Be(2);
+        }
+
+        /// <remarks>
+        /// The capability beside it does not expire, and should not: it changes only when someone
+        /// enables a preview on the account, which no running process can observe happening.
+        /// </remarks>
+        [TestMethod]
+        public void TheCapabilityIsNotFetchedAgain()
+        {
+            var clock = new ManualClock();
+            var probes = 0;
+
+            var container = new CosmosContainerMetadata("products")
+                .WithStatisticsProvider(() => null, System.TimeSpan.FromMinutes(5), clock)
+                .WithPartitionKeyDeleteProbe(() => { probes++; return true; });
+
+            container.SupportsPartitionKeyDelete.Should().BeTrue();
+
+            clock.Now += System.TimeSpan.FromDays(1);
+            container.SupportsPartitionKeyDelete.Should().BeTrue();
+
+            probes.Should().Be(1, "a capability is asked once, however long the process runs");
+        }
+
         [TestMethod]
         public void AMeasuredRowCountIsReported()
         {
