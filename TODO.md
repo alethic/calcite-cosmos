@@ -199,11 +199,30 @@ the tier is one rule-and-writer step once that lands. The execution ladder above
 decomposition via a mutation operator, the diff and blind-patch optimizations) is recorded in
 `DESIGN.md` under *Updating*.
 
-### Whole-partition `DELETE` — *medium*
+### Whole-partition `DELETE` — *medium, and the gate is an Azure Support request*
 
-A predicate pinning the partition key and nothing else could be
-`DeleteAllItemsByPartitionKeyStreamAsync`, which is not a query at all — `SupportsDeletePushDown` in
-section 11. Today it is a scan and a delete per document.
+A predicate pinning exactly the complete partition key could be
+`DeleteAllItemsByPartitionKeyStreamAsync` — one request, no query at all — instead of today's scan
+and delete per document.
+
+**Measured twice, and the second measurement corrected the first.** The emulator answers 400. The
+capability is *not* a subscription preview registration, which `az feature` cannot see and which
+made it look portal-only: it is an account capability, set with
+`az cosmosdb update --capabilities DeleteAllItemsByPartitionKey`. Set on a fresh account and
+reported back by `az cosmosdb show`, the operation still answers 400, and the service says why:
+
+> Partition key delete feature is disabled for this account. Please contact Azure Support to enable
+> it.
+
+So the gate is a support request against a specific account, not a switch anyone can flip — which
+is what makes this worth leaving alone rather than building against an unreachable path. Two facts
+from the documentation for whenever it is reachable: hierarchical partition keys are **not**
+supported, so only a complete key qualifies, which the recovery condition already required; and an
+index-using `COUNT` issued *during* an ongoing delete may still count the documents being removed,
+which bears on whether the fast path can be silent.
+
+The design — a probed capability the rule consults, `COUNT(*)` first for the affected count — is
+recorded in `DESIGN.md` under *Deleting a whole partition*.
 
 ### Transactional batch — *medium*
 
@@ -262,16 +281,22 @@ whose encoding the service defines. Pushing a temporal function down means decla
 
 ### Clause-level
 
-- **Native `IN` and `BETWEEN`** — *small.* `expandSearch` turns both into comparison chains, which is
-  what makes them pushable. The reference calls `IN` index-friendly; whether the OR-chain is priced
-  the same is worth measuring before doing this for its own sake.
+- **Native `IN` and `BETWEEN` — closed by measurement, not built.** `expandSearch` turns both into
+  comparison chains, and the question was whether the native spelling is priced differently.
+  Measured on a real account over five hundred documents: `IN` and its OR-chain cost *identically*
+  at three, ten and fifty values — 6.06, 7.62 and 16.52 RU, matching to the hundredth — and
+  `BETWEEN` costs exactly what its two comparisons do (7.90 RU). Neither form used an index on an
+  unindexed path, so the reference's "index-friendly" is a property of the path rather than of the
+  spelling. Emitting the native form would be a change with no effect.
 - **`DISTINCT` with `ORDER BY` reaches only non-nullable keys** — *small, and it waits on declared
   columns.* The combination pushes as one statement now, but the null-placement rule refuses any
   nullable sort key — Calcite's ascending means nulls last and Cosmos sorts them first — and every
   promoted user column is nullable, so today it reaches `_ts`, `id` and `_etag` alone. A column
   that could be declared non-nullable would extend it to user paths; the rule itself is correct and
   should not move.
-- **`TOP`** — *small.* Emitted for a rank clause and nowhere else; `OFFSET`/`LIMIT` covers the rest.
+- **`TOP` — closed by the same measurement.** Emitted for a rank clause and nowhere else. `TOP 10`
+  and `OFFSET 0 LIMIT 10` cost the same 2.37 RU on a real account, so the spelling the adapter
+  already emits is the cheaper of nothing.
 
 ---
 
@@ -363,10 +388,12 @@ comes back as SQL's null does, and that `* 1` does not disturb a large integer.
   translator addition is a candidate. Probed and in: filters, sorts, the aggregate forms, `LIKE`,
   and the array traversal — the guess that the oracle could not evaluate an in-process unnest was
   wrong, and the corpus says so.
-- **Emulator gaps, asserted** — *small.* The emulator silently discards composite indexes, does not
-  implement full text search, reports a flat 1 RU for every request, and returns no index metrics.
-  All four are known and are why the corresponding tests report inconclusive there rather than
-  failing; none is *asserted*, so a future emulator that fixes one would go unnoticed.
+- **Emulator gaps, asserted — done for the two that were wrong; keep the shape.** A skip must be
+  earned by detecting the gap, never by asking which endpoint answered: the flat request charge and
+  the discarded composite index were both hard-coded to `IsEmulator`, so an emulator that fixed
+  either would have gone on skipping for ever. Both now measure the gap and report it, and the
+  index-metrics pair already did. Any future gap belongs in that shape. *(Retained here as the rule
+  rather than as a task.)*
 - **A malformed response's failure mode** — *small.* A lookup-join stub returning raw documents
   instead of the statement's projection once produced a null reference inside the join's result
   selector, and which access produced it was never established. Worth knowing whether a malformed
