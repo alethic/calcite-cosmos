@@ -25,21 +25,26 @@ rejecting the full text search Azure runs — so "the reference says" is not a m
 
 ## 0. Resuming
 
-**507 tests: 501 passing, 6 skipped**, on net8.0 and net10.0, against Apache.Calcite 2.0.0-pre.3.
+**534 tests: 528 passing, 6 skipped**, on net8.0 and net10.0, against Apache.Calcite 2.0.0-pre.3.
 The skips are things only a real account can answer; the suite runs against one when
 `COSMOS_TEST_ENDPOINT` and `COSMOS_TEST_KEY` name it, and reports inconclusive rather than passing
-where the emulator cannot. Several facts in this file and in `DESIGN.md` were settled that way —
-most recently the lookup-routing measurement — each time with an Azure account, used and deleted.
+where the emulator cannot — and each of them detects the gap it is skipping for, so an environment
+that closes one asserts rather than going quiet. Several facts in this file and in `DESIGN.md` were
+settled by measurement, each time with an Azure account, used and deleted.
 
-No PRs are open; `main` is where the work is and a new branch starts from it. **One decision is in
-flight rather than any code:** declared columns — a `columns` operand promoting caller-declared,
-typed document paths to real columns — is built and parked on the `declared-columns-parked` branch,
-awaiting the owner's call on whether the adapter should have it and in that shape. See *Where to
-start*.
+No PRs are open and nothing is parked; `main` is where the work is and a new branch starts from it.
 
-Reading, writing (`INSERT`, `DELETE`, and `UPDATE` of the map column as a whole-document replace),
-the lookup join, partial aggregates, and the diagnostics surface are complete and covered. What
-remains below is not started.
+Reading, writing (`INSERT`, `DELETE` including the whole-partition form, and `UPDATE` of the map
+column as a whole-document replace), the lookup join, partial aggregates, `DISTINCT`, the scalar
+functions and the diagnostics surface are complete and covered. What remains below is not started.
+
+**Declared columns were built and then dropped**, and the shape of the hole they left is worth
+knowing before anyone rebuilds them. A caller-declared, typed document path promoted to a real
+column — through a `columns` operand — would have given four things a type to work with: a
+patchable `UPDATE` target, an argument the nullable-aggregate rewrite could fire on, a declared
+temporal representation, and a non-nullable sort key for `DISTINCT` with `ORDER BY`. Every one of
+those items below still names that dependency, because the dependency is real; what is gone is one
+answer to it, not the question.
 
 ### Running the sample
 
@@ -61,12 +66,15 @@ carries both with the reasoning.
 
 ### Where to start
 
-1. **The declared-columns decision** (section 6) — not work but a call to make, and three items
-   queue behind it: the `UPDATE` patch tier (section 3), the nullable-aggregate rewrite (section 5),
-   and a temporal basis (section 4). The implementation is parked on `declared-columns-parked`; the
-   design is in `DESIGN.md` under *Declared columns* on that branch.
-2. **Whole-partition `DELETE`** (section 3) — the remaining medium item that is a straight extension
-   of recovery logic that already exists.
+1. **A metadata cache on the schema** (section 1) — the design is settled and the cost is real:
+   every connection re-reads a container's definition, and any connection planning a
+   whole-partition `DELETE` re-probes the account. One thing to verify before building it — whether
+   `Apache.Calcite.Data` offers a supported way to hand back the same schema instance.
+2. **An explicit statistics refresh** (section 1) — the time to live is in; what is missing is a way
+   for a caller to say *now*, which after a bulk load is the only moment that matters.
+3. **Typed columns, if they are wanted at all** (section 6) — four items name this dependency, and
+   nothing satisfies it. Whether the answer is a `columns` operand, computed properties, or
+   something else is open again.
 
 ---
 
@@ -190,39 +198,38 @@ constraint on where this can apply rather than a reason not to.
 Writes are item CRUD behind a `TableModify` — Cosmos SQL has no DML, and does not need to for the
 adapter to write. What each statement does and refuses is recorded in `DESIGN.md` under *Writing*.
 
-### `UPDATE`, the patch tier — *blocked on the declared-columns decision*
+### `UPDATE`, the patch tier — *blocked on there being a typed column to target*
 
 `SET "_MAP" = …` executes as a whole-document replace. What remains is the cheap tier: a targeted
 `SET` of a plain document property as `PatchItemAsync`, sending changed properties rather than the
-document. Its targets are declared columns — parked pending the decision in *Where to start* — and
-the tier is one rule-and-writer step once that lands. The execution ladder above it (static
+document. It has no targets: `SET` names a column, the map column is the whole document, and the
+promoted columns are `id`, the partition keys and the system properties — every one of them either
+immutable or not worth patching. So the tier is one rule-and-writer step *behind* something that
+gives a document path a column of its own; see section 6. The execution ladder above it (static
 decomposition via a mutation operator, the diff and blind-patch optimizations) is recorded in
 `DESIGN.md` under *Updating*.
 
-### Whole-partition `DELETE` — *medium, and the gate is an Azure Support request*
+### Whole-partition `DELETE` — *built, and unverified on the path it exists for*
 
-A predicate pinning exactly the complete partition key could be
-`DeleteAllItemsByPartitionKeyStreamAsync` — one request, no query at all — instead of today's scan
-and delete per document.
+A predicate pinning exactly the complete partition key plans as
+`DeleteAllItemsByPartitionKeyStreamAsync` — one request, no query — with a probed account
+capability deciding which way the rule goes, and `COUNT(*)` first for the affected count. The
+design is in `DESIGN.md` under *Deleting a whole partition*; the fallback is exercised, and the
+fast path is not, because no account this repository can reach will run it.
 
-**Measured twice, and the second measurement corrected the first.** The emulator answers 400. The
-capability is *not* a subscription preview registration, which `az feature` cannot see and which
-made it look portal-only: it is an account capability, set with
-`az cosmosdb update --capabilities DeleteAllItemsByPartitionKey`. Set on a fresh account and
-reported back by `az cosmosdb show`, the operation still answers 400, and the service says why:
+**The gate is a support request, not a switch.** The capability is an account capability —
+`az cosmosdb update --capabilities DeleteAllItemsByPartitionKey` — not a subscription preview
+registration, which is what made it look portal-only the first time it was measured. Set on a fresh
+account and reported back by `az cosmosdb show`, the operation still answers 400:
 
 > Partition key delete feature is disabled for this account. Please contact Azure Support to enable
 > it.
 
-So the gate is a support request against a specific account, not a switch anyone can flip — which
-is what makes this worth leaving alone rather than building against an unreachable path. Two facts
-from the documentation for whenever it is reachable: hierarchical partition keys are **not**
-supported, so only a complete key qualifies, which the recovery condition already required; and an
-index-using `COUNT` issued *during* an ongoing delete may still count the documents being removed,
-which bears on whether the fast path can be silent.
-
-The design — a probed capability the rule consults, `COUNT(*)` first for the affected count — is
-recorded in `DESIGN.md` under *Deleting a whole partition*.
+What remains, therefore, is a measurement on an account somebody has had enabled: that the fast
+path fires, what it costs against the per-document loop, and one documented hazard worth confirming
+— an index-using `COUNT` issued *during* an ongoing delete may still count the documents being
+removed, which decides whether the reported count can be trusted. Hierarchical partition keys are
+documented as unsupported, which the recovery condition already required.
 
 ### Transactional batch — *medium*
 
@@ -271,13 +278,14 @@ owns the client.
   `IS DISTINCT FROM`, expressible with the `??` operator once the null-versus-undefined semantics are
   measured.
 
-### Temporal — *large, and its prerequisite is the declared-columns decision*
+### Temporal — *large, and its prerequisite is a stated representation*
 
 Cosmos has `DateTimeAdd`, `DateTimeDiff`, `DateTimePart`, `DateTimeBin` and tick conversions; Calcite
 has `EXTRACT`, `TIMESTAMPADD`, `TIMESTAMPDIFF`. The mapping is mechanical and the representation is
 not: a date is an ISO string or an epoch number by application convention, and `_ts` is the only value
-whose encoding the service defines. Pushing a temporal function down means declaring what the column
-*is* — which is what a declared column would state.
+whose encoding the service defines. Pushing a temporal function down means knowing what the column
+*is*, and nothing in the row model says. `_ts` alone is reachable without answering that; everything
+else waits on section 6.
 
 ### Clause-level
 
@@ -288,12 +296,12 @@ whose encoding the service defines. Pushing a temporal function down means decla
   `BETWEEN` costs exactly what its two comparisons do (7.90 RU). Neither form used an index on an
   unindexed path, so the reference's "index-friendly" is a property of the path rather than of the
   spelling. Emitting the native form would be a change with no effect.
-- **`DISTINCT` with `ORDER BY` reaches only non-nullable keys** — *small, and it waits on declared
-  columns.* The combination pushes as one statement now, but the null-placement rule refuses any
-  nullable sort key — Calcite's ascending means nulls last and Cosmos sorts them first — and every
-  promoted user column is nullable, so today it reaches `_ts`, `id` and `_etag` alone. A column
-  that could be declared non-nullable would extend it to user paths; the rule itself is correct and
-  should not move.
+- **`DISTINCT` with `ORDER BY` reaches only non-nullable keys** — *small, and it waits on a column
+  that can be non-nullable.* The combination pushes as one statement now, but the null-placement
+  rule refuses any nullable sort key — Calcite's ascending means nulls last and Cosmos sorts them
+  first — and everything reachable within the map column is nullable, so today it reaches `_ts`,
+  `id` and `_etag` alone. A user path stated non-nullable would extend it; the rule itself is
+  correct and should not move.
 - **`TOP` — closed by the same measurement.** Emitted for a rank clause and nowhere else. `TOP 10`
   and `OFFSET 0 LIMIT 10` cost the same 2.37 RU on a real account, so the spelling the adapter
   already emits is the cheaper of nothing.
@@ -302,15 +310,16 @@ whose encoding the service defines. Pushing a temporal function down means decla
 
 ## 5. Planner
 
-### Nullable aggregates — *blocked on the declared-columns decision*
+### Nullable aggregates — *blocked on a column with a stated type*
 
 The null-semantics refusals are the biggest source of declined aggregates: `SUM(c.v)` over a nullable
 column is `undefined` at the service where SQL skips the null. The fix is rewriting the rendered
 argument so Cosmos skips it too — aggregates skip *undefined*, and arithmetic on a JSON null yields
-it, so `SUM(c.v * 1)` is the candidate for a column declared numeric. The rewrite is type-directed
-(`* 1` over a string silently drops it from `MIN`/`MAX`), and only declared columns give it a type to
-fire on. Measure on the emulator before building: that the null is skipped, that an all-null group
-comes back as SQL's null does, and that `* 1` does not disturb a large integer.
+it, so `SUM(c.v * 1)` is the candidate for a column known to be numeric. The rewrite is type-directed
+and cannot be applied blindly (`* 1` over a string silently drops it from `MIN`/`MAX`), and a path
+inside the map column is `ANY` — so there is nothing to fire on until section 6 has an answer.
+Measure on the emulator before building: that the null is skipped, that an all-null group comes back
+as SQL's null does, and that `* 1` does not disturb a large integer.
 
 ### Smaller rules
 
@@ -332,14 +341,17 @@ comes back as SQL's null does, and that `* 1` does not disturb a large integer.
 
 ## 6. Row model and types
 
-- **Declared columns — *built, and parked pending the owner's decision*.** A caller-declared, typed
-  document path promoted to a real column, via a `columns` operand — trusted the way a partition
-  key path is, never inferred. Three items converge on it: the `UPDATE` patch tier (section 3), the
-  nullable-aggregate rewrite (section 5), and a temporal basis (section 4). The implementation —
-  operand, metadata, row typing, the `CAST`-folding the typed columns forced, and tests — sits on
-  the `declared-columns-parked` branch, held there deliberately: it is a new public surface, and
-  whether the adapter should have it, and in this shape, is the owner's call. Take the branch, ask
-  for a different shape, or drop it; nothing else depends on it yet.
+- **A typed column over a document path — *large, and it is a question before it is work*.** Four
+  items converge here and none of them can move without it: the `UPDATE` patch tier (section 3), a
+  temporal basis (section 4), the nullable-aggregate rewrite and `DISTINCT` with `ORDER BY`
+  (sections 5 and 4). Each needs the same thing — a document path the planner can see the *type* of,
+  and in one case the nullability of — and the map column gives it `ANY`. A `columns` operand
+  taking caller-declared paths was built for this and dropped; it is not the only shape. **Computed
+  properties** (section 5) are the other candidate and a materially different one: the container
+  declares them, so the adapter would be reading metadata it already trusts rather than taking a
+  caller's word, and they are indexable — but the caller must create them on the container first,
+  and their type still is not declared anywhere the adapter can read. Whichever way, this is a new
+  public surface and wants a decision recorded in `DESIGN.md` before any code.
 - **Binary** — *small.* `BINARY`/`VARBINARY` read base64 from a JSON string. Unverified against the
   service, because nothing in the test data is binary.
 - **Temporal representation** — see *Temporal* above. The reading side handles ISO strings and epoch
@@ -439,8 +451,8 @@ project references.
 
 | Flink | Here |
 |---|---|
-| `SupportsTargetColumnWriting`, `SupportsRowLevelUpdate` | **Patch** — the `UPDATE` tier waiting on declared columns; see section 3. |
-| `SupportsDeletePushDown` | The whole-partition delete; see section 3. |
+| `SupportsTargetColumnWriting`, `SupportsRowLevelUpdate` | **Patch** — the `UPDATE` tier, waiting on a column a `SET` could target; see sections 3 and 6. |
+| `SupportsDeletePushDown` | **Done, and unverifiable** — the whole-partition delete plans and is gated on a probed account capability; see section 3. |
 | `SupportsTruncate` | `TRUNCATE TABLE` — per-partition deletes, or recreating the container, which is cheaper and has different semantics. Worth deciding deliberately rather than by default. |
 | `SupportsOverwrite` | Upsert, which is native (`UpsertItemStreamAsync`). |
 | `SupportsPartitioning` | Writes routed by partition key. Bulk mode already groups by partition, so this is mostly about telling the planner. |

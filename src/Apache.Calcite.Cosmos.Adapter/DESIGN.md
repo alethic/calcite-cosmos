@@ -896,12 +896,12 @@ That gives a ladder:
    named column is the document, replacing the document is the faithful reading. The read this
    requires is the scan the plan already shows — the same argument recorded for deleting — and
    where the predicate pins `id` and a complete partition key that scan is already a point read.
-2. **Patch for targeted `SET`s — waits on a decision.** A `SET` of a plain document property is
-   `PatchItemAsync`'s native input, far cheaper than a replace. But no such column exists yet: the
-   row model's columns are all identity, placement, service bookkeeping, or the document itself
-   (the enumeration below). *Declared columns* — caller-declared, typed paths promoted to real
-   columns — would be the targets; they are designed and parked on the `declared-columns-parked`
-   branch pending the owner's decision.
+2. **Patch for targeted `SET`s — waits on there being a target.** A `SET` of a plain document
+   property is `PatchItemAsync`'s native input, far cheaper than a replace. But no such column
+   exists: the row model's columns are all identity, placement, service bookkeeping, or the document
+   itself (the enumeration below), and a path *inside* the document has no column to be named by. A
+   `columns` operand promoting caller-declared, typed paths was built for this and dropped; that
+   the tier waits on some answer of that kind is the durable part, and which answer is open.
 3. **Static decomposition — future.** A mutation operator in the Cosmos table (`JSON_SET`-style,
    the way JSON-column databases spell copy-and-modify) would let a rule read patch operations
    straight off a `SET "_MAP" = JSON_SET(…)` expression at plan time.
