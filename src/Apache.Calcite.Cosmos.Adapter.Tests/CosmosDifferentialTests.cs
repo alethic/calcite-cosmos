@@ -407,6 +407,14 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests
             // ARRAY_SLICE takes exactly three arguments, so Cosmos's two-argument form has no SQL
             // spelling to compare against; and ARRAY_CONCAT's operand checker refuses a map value,
             // which is typed ANY, so the statement does not validate over this row model at all.
+
+            // DISTINCT, which the adapter now emits as the keyword rather than as a GROUP BY over
+            // every key. The seeded documents include a null category and an absent one, so this
+            // asks the question that matters: whether the service's dedup agrees with SQL's about
+            // null and undefined.
+            ("SELECT DISTINCT c.\"category\" FROM products AS c", false),
+            ("SELECT DISTINCT c.\"category\", c.\"id\" FROM products AS c", false),
+            ("SELECT DISTINCT c.\"_ts\" FROM products AS c ORDER BY c.\"_ts\"", true),
         ];
 
         [TestMethod]

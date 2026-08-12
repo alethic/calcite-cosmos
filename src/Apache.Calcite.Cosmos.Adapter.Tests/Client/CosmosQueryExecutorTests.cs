@@ -427,6 +427,10 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
                 ("distinct object", b => { b.Distinct = true; b.SelectProperty("a", "c.category"); }),
                 ("top value", b => { b.Top = 2; b.SelectValue("c.id"); }),
                 ("distinct top value", b => { b.Distinct = true; b.Top = 2; b.SelectValue("c.category"); }),
+                // The combination GROUP BY cannot have, and the reason DISTINCT is worth emitting
+                // at all rather than left to the aggregate that already renders one.
+                ("distinct with order by", b => { b.Distinct = true; b.SelectValue("c.category"); b.AddOrderBy("c.category", false); }),
+                ("distinct object with order by", b => { b.Distinct = true; b.SelectProperty("a", "c.category"); b.AddOrderBy("c.category", false); }),
                 ("where", b => b.Where = "c.category = \"bikes\""),
                 ("order by", b => b.AddOrderBy("c.id", false)),
                 ("order by descending", b => b.AddOrderBy("c.id", true)),

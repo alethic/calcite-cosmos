@@ -55,6 +55,15 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
             if (ReadsThroughASort(input))
                 return false;
 
+            // An aggregate over an aggregate, which binding now permits for the call-less case —
+            // a DISTINCT's output is paths, so a *sort* above one is sound. An aggregate above one
+            // is not: there is one SELECT per statement, so folding the outer in would clear the
+            // projection while leaving the DISTINCT behind, and count the rows of the container
+            // rather than the distinct values. That is the COUNT(DISTINCT) shape, whose outer half
+            // belongs outside the convention.
+            if (ReadsThroughAnAggregate(input))
+                return false;
+
             var groupKeys = groupSet.asList();
             for (var i = 0; i < groupKeys.size(); i++)
                 if (Resolves(fields, (java.lang.Integer)groupKeys.get(i)) == false)
@@ -101,6 +110,24 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
                 Filter filter => ReadsThroughASort(filter.getInput()),
                 Project project => ReadsThroughASort(project.getInput()),
                 Correlate correlate => ReadsThroughASort(correlate.getLeft()),
+                _ => false,
+            };
+        }
+
+        /// <summary>
+        /// Determines whether an aggregate lies on the path the input binds through.
+        /// </summary>
+        static bool ReadsThroughAnAggregate(RelNode? node)
+        {
+            if (node is org.apache.calcite.plan.volcano.RelSubset subset)
+                node = subset.getOriginal() ?? subset.getBest();
+
+            return node switch
+            {
+                Aggregate => true,
+                Filter filter => ReadsThroughAnAggregate(filter.getInput()),
+                Project project => ReadsThroughAnAggregate(project.getInput()),
+                Correlate correlate => ReadsThroughAnAggregate(correlate.getLeft()),
                 _ => false,
             };
         }
