@@ -1383,6 +1383,13 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Client
         [TestMethod]
         public async Task AMultiKeyOrderByNeedsACompositeIndex()
         {
+            // Two different reasons to report inconclusive, and this is the first: no service at
+            // all. Detecting the gap replaced an endpoint check, and must not also drop the
+            // reachability check that endpoint check was doing incidentally — a run with nothing to
+            // ask is not the same as a service that answers permissively, and CI has legs of both
+            // kinds.
+            Container();
+
             var database = _client!.GetDatabase(DatabaseName);
             var name = "no_composite_index";
 
