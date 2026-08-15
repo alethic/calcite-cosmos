@@ -488,6 +488,39 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
         }
 
         /// <summary>
+        /// Recognises <c>CAST(&lt;document value&gt; AS &lt;number&gt;)</c> and returns the value
+        /// underneath, for a caller that can use a bound on it.
+        /// </summary>
+        /// <remarks>
+        /// <b>Not for translation.</b> Nothing renders a numeric cast: Calcite converts the stored
+        /// value and the service compares it as it stands, so the two select different documents and
+        /// the operator is declined. What this is for is <see cref="Rel.Convert.CosmosFilterSplitRule"/>,
+        /// which pushes a restriction the predicate <em>implies</em> and rechecks the predicate itself
+        /// above — a bound on the raw value is such a restriction, and the cast is what says the value
+        /// is being read as a number at all.
+        /// </remarks>
+        internal static RexNode? TryNumericCastOperand(RexNode node)
+        {
+            if (node is not RexCall call)
+                return null;
+
+            var kind = KindOf(call);
+            if (kind != SqlKind.__Enum.CAST && kind != SqlKind.__Enum.SAFE_CAST)
+                return null;
+
+            if (call.getOperands().size() != 1)
+                return null;
+
+            var target = call.getType()?.getSqlTypeName();
+            if (target != SqlTypeName.TINYINT && target != SqlTypeName.SMALLINT && target != SqlTypeName.INTEGER && target != SqlTypeName.BIGINT &&
+                target != SqlTypeName.FLOAT && target != SqlTypeName.REAL && target != SqlTypeName.DOUBLE && target != SqlTypeName.DECIMAL)
+                return null;
+
+            var operand = Operand(call, 0);
+            return operand.getType()?.getSqlTypeName() == SqlTypeName.ANY ? operand : null;
+        }
+
+        /// <summary>
         /// Determines whether a string is one no JSON value other than that string renders as.
         /// </summary>
         /// <remarks>

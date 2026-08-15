@@ -8,6 +8,7 @@ using org.apache.calcite.rel;
 using org.apache.calcite.rel.core;
 using org.apache.calcite.rex;
 using org.apache.calcite.sql;
+using org.apache.calcite.sql.fun;
 
 namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
 {
@@ -166,8 +167,8 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
                 // replacement for the predicate, so the original is still rechecked above.
                 residual.Add(conjunct);
 
-                if (TryWeakenDisjunction(conjunct, translator, rexBuilder, CosmosImplementor.DefaultRootAlias) is RexNode weakened &&
-                    below.Contains(weakened.toString()) == false &&
+                if (TryWeakenConjunct(conjunct, translator, rexBuilder, CosmosImplementor.DefaultRootAlias) is RexNode weakened &&
+                    AlreadyBelow(weakened, below) == false &&
                     translator.TryTranslate(weakened, out _))
                     pushable.Add(weakened);
             }
@@ -268,6 +269,9 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
             if (ObservesAbsence(node))
                 return null;
 
+            if (TryBoundNumericCast(node, translator, rexBuilder, rootAlias) is RexNode bounded)
+                return bounded;
+
             var paths = new List<RexNode>();
             CollectPaths(node, translator, rootAlias, paths);
 
@@ -279,6 +283,156 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
                 terms.add(rexBuilder.makeCall(CosmosOperators.IsDefined, new[] { path }));
 
             return RexUtil.composeConjunction(rexBuilder, terms);
+        }
+
+        /// <summary>
+        /// Bounds the raw value a comparison through a numeric cast reads, or returns <c>null</c>.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <c>CAST(c."_MAP"['price'] AS INTEGER) &gt; 10</c> has no Cosmos form — Calcite converts the
+        /// stored value and the service compares it as it stands, so the two select different documents
+        /// — and it is therefore declined and the container read whole. It still <em>implies</em>
+        /// something the service can apply, and that is what is pushed:
+        /// </para>
+        /// <code>
+        /// IS_DEFINED(c.price) AND (NOT IS_NUMBER(c.price) OR c.price &gt; 9)
+        /// </code>
+        /// <para>
+        /// <b>Why it is implied.</b> Converting a number to a number moves it by less than one,
+        /// whichever way the conversion rounds — so a document whose converted value is greater than 10
+        /// has a raw value greater than 9, and one whose converted value equals 30 has a raw value
+        /// strictly between 29 and 31. The bound is therefore satisfied by every document the predicate
+        /// keeps, which is all a weakening has to be. It is loose on purpose: the exact window depends
+        /// on which way the conversion rounds and on the sign, and none of that has to be decided to
+        /// make the bound sound.
+        /// </para>
+        /// <para>
+        /// <b>Why the type test is inverted.</b> Calcite converts a stored <em>string</em> too —
+        /// measured, <c>= 30</c> matches a document storing <c>"30"</c> — so a filter that kept only
+        /// numbers would lose it. Anything that is not a number passes the test untouched and is
+        /// rechecked above, where Calcite decides it. In a container whose field really is numeric,
+        /// which is the case a typed view describes, that branch matches nothing and the service does
+        /// all the work.
+        /// </para>
+        /// <para>
+        /// <c>IS_DEFINED</c> is implied separately: a comparison against an absent property is unknown
+        /// in SQL, so no document without one is ever kept.
+        /// </para>
+        /// </remarks>
+        static RexNode? TryBoundNumericCast(RexNode node, CosmosRexTranslator translator, RexBuilder rexBuilder, string rootAlias)
+        {
+            if (node is not RexCall call || call.getOperands().size() != 2)
+                return null;
+
+            var kind = (SqlKind.__Enum)call.getKind().ordinal();
+            if (kind is not (SqlKind.__Enum.EQUALS or SqlKind.__Enum.GREATER_THAN or SqlKind.__Enum.GREATER_THAN_OR_EQUAL
+                or SqlKind.__Enum.LESS_THAN or SqlKind.__Enum.LESS_THAN_OR_EQUAL))
+                return null;
+
+            var left = (RexNode)call.getOperands().get(0);
+            var right = (RexNode)call.getOperands().get(1);
+
+            // The bound is on the side the cast is, and a comparison read the other way round is the
+            // mirrored operator.
+            if (CosmosRexTranslator.TryNumericCastOperand(left) is RexNode value)
+            {
+            }
+            else if (CosmosRexTranslator.TryNumericCastOperand(right) is RexNode mirrored)
+            {
+                value = mirrored;
+                (left, right) = (right, left);
+                kind = Mirror(kind);
+            }
+            else
+            {
+                return null;
+            }
+
+            if (TryConstantNumber(right) is not java.math.BigDecimal bound)
+                return null;
+
+            // Rooted at the container rather than at an array-traversal alias, and addressable at all.
+            if (translator.TryResolvePath(value, out var path) == false || path is null ||
+                string.Equals(path.Alias, rootAlias, StringComparison.Ordinal) == false)
+                return null;
+
+            var one = java.math.BigDecimal.ONE;
+            var terms = new java.util.ArrayList();
+
+            if (kind is SqlKind.__Enum.EQUALS or SqlKind.__Enum.GREATER_THAN or SqlKind.__Enum.GREATER_THAN_OR_EQUAL)
+                terms.add(rexBuilder.makeCall(SqlStdOperatorTable.GREATER_THAN, value, rexBuilder.makeExactLiteral(bound.subtract(one))));
+
+            if (kind is SqlKind.__Enum.EQUALS or SqlKind.__Enum.LESS_THAN or SqlKind.__Enum.LESS_THAN_OR_EQUAL)
+                terms.add(rexBuilder.makeCall(SqlStdOperatorTable.LESS_THAN, value, rexBuilder.makeExactLiteral(bound.add(one))));
+
+            if (terms.isEmpty())
+                return null;
+
+            var notNumber = rexBuilder.makeCall(SqlStdOperatorTable.NOT, rexBuilder.makeCall(CosmosOperators.IsNumber, new[] { value }));
+
+            var whole = new java.util.ArrayList();
+            whole.add(rexBuilder.makeCall(CosmosOperators.IsDefined, new[] { value }));
+            whole.add(RexUtil.composeDisjunction(rexBuilder, new java.util.ArrayList { notNumber, RexUtil.composeConjunction(rexBuilder, terms) }));
+
+            return RexUtil.composeConjunction(rexBuilder, whole);
+        }
+
+        /// <summary>
+        /// Reads the number a constant side of a comparison denotes, through any casts around it.
+        /// </summary>
+        /// <remarks>
+        /// The bound arrives wrapped as often as not — Calcite widens a literal to the type it is being
+        /// compared against, so <c>&lt;= 30.5</c> reaches here as <c>CAST(30.5:DECIMAL(3, 1)):DOUBLE</c>
+        /// — and a cast of a constant to a number is that constant. Any imprecision in the widening is
+        /// far inside the whole unit the bound is loosened by. A literal that is not a number, which is
+        /// what a string on this side would be, is refused: nothing is known about where converting it
+        /// lands.
+        /// </remarks>
+        static java.math.BigDecimal? TryConstantNumber(RexNode node)
+        {
+            while (node is RexCall call &&
+                   (SqlKind.__Enum)call.getKind().ordinal() is SqlKind.__Enum.CAST or SqlKind.__Enum.SAFE_CAST &&
+                   call.getOperands().size() == 1)
+                node = (RexNode)call.getOperands().get(0);
+
+            return node is RexLiteral literal ? literal.getValue() as java.math.BigDecimal : null;
+        }
+
+        /// <summary>
+        /// The operator a comparison becomes when its operands swap.
+        /// </summary>
+        static SqlKind.__Enum Mirror(SqlKind.__Enum kind) => kind switch
+        {
+            SqlKind.__Enum.GREATER_THAN => SqlKind.__Enum.LESS_THAN,
+            SqlKind.__Enum.GREATER_THAN_OR_EQUAL => SqlKind.__Enum.LESS_THAN_OR_EQUAL,
+            SqlKind.__Enum.LESS_THAN => SqlKind.__Enum.GREATER_THAN,
+            SqlKind.__Enum.LESS_THAN_OR_EQUAL => SqlKind.__Enum.GREATER_THAN_OR_EQUAL,
+            _ => kind,
+        };
+
+        /// <summary>
+        /// Returns something a conjunct implies and Cosmos can evaluate, or <c>null</c>.
+        /// </summary>
+        /// <remarks>
+        /// Only disjunctions were weakened before, which left the commonest untranslatable shape of all
+        /// — a single comparison the service has no form for — pushing nothing whatever. A conjunct is
+        /// positive by construction, which is the whole of the polarity argument, so the same weakening
+        /// applies to it directly.
+        /// <para>
+        /// A weakening identical to the conjunct is no weakening; it is refused rather than pushed,
+        /// which is what the disjunction form has always done for the same reason.
+        /// </para>
+        /// </remarks>
+        static RexNode? TryWeakenConjunct(RexNode conjunct, CosmosRexTranslator translator, RexBuilder rexBuilder, string rootAlias)
+        {
+            if (TryWeakenDisjunction(conjunct, translator, rexBuilder, rootAlias) is RexNode disjunctive)
+                return disjunctive;
+
+            if (TryWeaken(conjunct, translator, rexBuilder, rootAlias) is not RexNode weakened)
+                return null;
+
+            return weakened.toString() == conjunct.toString() ? null : weakened;
         }
 
         /// <summary>
@@ -332,6 +486,27 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
         /// weakening has been pushed the filter carrying it stays in the set.
         /// </para>
         /// </remarks>
+        /// <summary>
+        /// Determines whether a weakening is already applied below, conjunct by conjunct.
+        /// </summary>
+        /// <remarks>
+        /// Conjunct by conjunct because that is how a filter stores it. A weakening of more than one
+        /// term is pushed as a conjunction and the filter it lands in reports its conjuncts, never the
+        /// whole thing — so comparing the composed node against what is below never matched, and the
+        /// same weakening was pushed under itself for ever. Measured, as a stack overflow with
+        /// TryBindOutput recursing through the filters it had built.
+        /// </remarks>
+        static bool AlreadyBelow(RexNode weakened, HashSet<string> below)
+        {
+            var conjuncts = org.apache.calcite.plan.RelOptUtil.conjunctions(weakened);
+
+            for (var i = 0; i < conjuncts.size(); i++)
+                if (below.Contains(((RexNode)conjuncts.get(i)).toString()) == false)
+                    return false;
+
+            return true;
+        }
+
         static HashSet<string> AlreadyApplied(RelNode? node)
         {
             var applied = new HashSet<string>(StringComparer.Ordinal);
