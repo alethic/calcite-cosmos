@@ -453,6 +453,21 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests
             ("SELECT c.\"id\" FROM products AS c WHERE c.\"_MAP\"['price'] IS NOT NULL", false),
             ("SELECT c.\"id\" FROM products AS c WHERE c.\"category\" IS NULL", false),
             ("SELECT c.\"id\" FROM products AS c WHERE c.\"category\" = 'bikes' OR c.\"category\" = 'shoes'", false),
+
+            // Negation over a path that is null in one document and absent in another. The service's
+            // equality over a null is false where SQL's is unknown, and only the negation tells them
+            // apart -- in a positive position false and unknown both discard the row.
+            ("SELECT c.\"id\" FROM products AS c WHERE NOT (c.\"category\" = 'bikes')", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE c.\"category\" <> 'bikes'", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE NOT (c.\"category\" <> 'bikes')", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE NOT (c.\"_MAP\"['price'] > 50)", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE NOT (UPPER(CAST(c.\"category\" AS VARCHAR)) = 'BIKES')", false),
+
+            // The shapes the guard is deliberately not applied to, because applying it would be too
+            // strong. Here to say whether leaving them alone is right.
+            ("SELECT c.\"id\" FROM products AS c WHERE NOT (c.\"category\" = 'bikes' AND c.\"_MAP\"['price'] > 50)", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE NOT (c.\"category\" = 'bikes' OR c.\"_MAP\"['price'] > 50)", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE NOT (NOT (c.\"category\" = 'bikes'))", false),
             ("SELECT c.\"id\" FROM products AS c WHERE c.\"category\" IN ('bikes', 'shoes')", false),
             ("SELECT c.\"id\" FROM products AS c WHERE c.\"_MAP\"['price'] BETWEEN 10 AND 200", false),
             ("SELECT c.\"id\" FROM products AS c WHERE c.\"id\" = '3' AND c.\"category\" = 'shoes'", false),
@@ -464,8 +479,17 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests
             // Aggregates: the forms, and grouping by a key some documents lack.
             ("SELECT COUNT(*) FROM products", false),
             ("SELECT MIN(c.\"_ts\"), MAX(c.\"_ts\") FROM products AS c", false),
+
+            // Over _ts rather than a user path, and that is a limit rather than a choice. MIN, MAX,
+            // SUM and AVG over an ANY column have no implementation in the asynchronous convention,
+            // and the aggregate rule declines to push one -- so a statement naming any of them forms
+            // no plan in either mode and cannot be compared or even run. Measured, on all four.
+            // Nothing about pushdown; there is simply nothing to execute. Written down because the
+            // absence of these from a corpus about null and absent values otherwise reads as an
+            // oversight, and because the day the convention grows them is the day they belong here.
             ("SELECT SUM(c.\"_ts\") FROM products AS c", false),
             ("SELECT COUNT(DISTINCT c.\"category\") FROM products AS c", false),
+            ("SELECT c.\"category\", COUNT(*) FROM products AS c GROUP BY c.\"category\"", false),
             ("SELECT c.\"category\", COUNT(*) FROM products AS c GROUP BY ROLLUP(c.\"category\")", false),
             ("SELECT c.\"category\", COUNT(*) AS n FROM products AS c GROUP BY c.\"category\" HAVING c.\"category\" = 'bikes'", false),
             ("SELECT AVG(c.\"_ts\") FROM products AS c", false),
@@ -491,6 +515,16 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests
             // The array functions, and the index shift above all: the oracle counts from one and
             // the pushdown from zero, so an off-by-one in the translation shows here as different
             // elements rather than as an error.
+            ("SELECT ARRAY_SLICE(c.\"_MAP\"['tags'], 0, 1) FROM products AS c WHERE c.\"id\" = '1'", false),
+            ("SELECT ARRAY_SLICE(c.\"_MAP\"['tags'], 1, 1) FROM products AS c WHERE c.\"id\" = '1'", false),
+            ("SELECT ARRAY_SLICE(c.\"_MAP\"['tags'], 2, 1) FROM products AS c WHERE c.\"id\" = '1'", false),
+            ("SELECT ARRAY_SLICE(c.\"_MAP\"['tags'], 0, 2) FROM products AS c WHERE c.\"id\" = '1'", false),
+
+            // SUBSTRING carries the same adjustment ARRAY_SLICE carried wrongly, and SQL's origin
+            // really is one here. Covered so that the two are not assumed to be the same question.
+            ("SELECT SUBSTRING(CAST(c.\"_MAP\"['name'] AS VARCHAR) FROM 1 FOR 3) FROM products AS c", false),
+            ("SELECT SUBSTRING(CAST(c.\"_MAP\"['name'] AS VARCHAR) FROM 2 FOR 3) FROM products AS c", false),
+
             ("SELECT ARRAY_UNION(c.\"_MAP\"['tags'], c.\"_MAP\"['tags']) FROM products AS c WHERE c.\"id\" = '1'", false),
             ("SELECT ARRAY_INTERSECT(c.\"_MAP\"['tags'], c.\"_MAP\"['tags']) FROM products AS c WHERE c.\"id\" = '1'", false),
 
@@ -503,8 +537,108 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests
             // every key. The seeded documents include a null category and an absent one, so this
             // asks the question that matters: whether the service's dedup agrees with SQL's about
             // null and undefined.
+            ("SELECT DISTINCT c.\"category\" FROM products AS c", false),
             ("SELECT DISTINCT c.\"category\", c.\"id\" FROM products AS c", false),
             ("SELECT DISTINCT c.\"_ts\" FROM products AS c ORDER BY c.\"_ts\"", true),
+
+
+            // ── A sweep over the surfaces that carried no statement at all ─────────
+            //
+            // Every one of these reads a path that is null in one document and absent in another,
+            // because that is where this adapter has been wrong every time so far.
+
+            // Comparison and range, in both positions.
+            ("SELECT c.\"id\" FROM products AS c WHERE c.\"_MAP\"['price'] < 100", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE c.\"_MAP\"['price'] >= 120", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE NOT (c.\"_MAP\"['price'] BETWEEN 10 AND 200)", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE c.\"_MAP\"['price'] NOT IN (120, 340)", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE c.\"category\" NOT IN ('bikes', 'shoes')", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE NOT (c.\"category\" IN ('bikes', 'shoes'))", false),
+
+            // LIKE and its negation over a path some documents lack.
+            ("SELECT c.\"id\" FROM products AS c WHERE c.\"_MAP\"['name'] NOT LIKE 'S%'", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE NOT (c.\"_MAP\"['name'] LIKE '%Runner%')", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE c.\"_MAP\"['name'] LIKE '_prin_'", false),
+
+            // Arithmetic over a null and an absent operand, which SQL makes unknown.
+            ("SELECT c.\"id\" FROM products AS c WHERE c.\"_MAP\"['price'] + 1 > 100", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE NOT (c.\"_MAP\"['price'] + 1 > 100)", false),
+            ("SELECT c.\"_MAP\"['price'] + 1 FROM products AS c", false),
+
+            // Conjunction and disjunction mixing a known-true arm with an unknown one.
+            ("SELECT c.\"id\" FROM products AS c WHERE c.\"_MAP\"['price'] > 50 OR c.\"category\" = 'shoes'", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE c.\"_MAP\"['price'] > 50 AND c.\"category\" = 'shoes'", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE NOT (c.\"_MAP\"['price'] IS NULL)", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE NOT (c.\"_MAP\"['price'] IS NOT NULL)", false),
+
+            // Aggregates over a column that is null in one document, absent in another, and a
+            // string in none -- what SUM and AVG skip is not obviously the same on both sides.
+            ("SELECT COUNT(c.\"_MAP\"['price']) FROM products AS c", false),
+            ("SELECT COUNT(c.\"category\") FROM products AS c", false),
+            ("SELECT c.\"category\", COUNT(*) FROM products AS c WHERE c.\"_MAP\"['price'] IS NOT NULL GROUP BY c.\"category\"", false),
+            ("SELECT COUNT(DISTINCT c.\"_MAP\"['name']) FROM products AS c", false),
+
+            // Ordering, where the placement of a null and an absent value is the whole question.
+            ("SELECT c.\"id\", c.\"category\" FROM products AS c ORDER BY c.\"id\" DESC", true),
+            ("SELECT c.\"id\" FROM products AS c ORDER BY c.\"id\" FETCH NEXT 3 ROWS ONLY", true),
+            ("SELECT c.\"id\" FROM products AS c ORDER BY c.\"id\" OFFSET 6 ROWS", true),
+
+            // The string functions over a path some documents lack, which is where a service
+            // function returning undefined and SQL returning null could part company.
+            ("SELECT c.\"id\", UPPER(CAST(c.\"_MAP\"['name'] AS VARCHAR)) FROM products AS c", false),
+            ("SELECT c.\"id\", CHAR_LENGTH(CAST(c.\"_MAP\"['name'] AS VARCHAR)) FROM products AS c", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE CHAR_LENGTH(CAST(c.\"_MAP\"['name'] AS VARCHAR)) > 6", false),
+
+            // Nested and array-valued paths, read where they are absent.
+            ("SELECT c.\"id\", c.\"_MAP\"['metadata']['sku'] FROM products AS c", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE c.\"_MAP\"['metadata']['sku'] = 'B-2'", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE NOT (c.\"_MAP\"['metadata']['sku'] = 'B-2')", false),
+            ("SELECT c.\"id\", c.\"_MAP\"['tags'][0] FROM products AS c", false),
+            ("SELECT c.\"id\", c.\"_MAP\"['tags'][1] FROM products AS c", false),
+            ("SELECT c.\"id\", c.\"_MAP\"['tags'][2] FROM products AS c", false),
+            ("SELECT c.\"id\", c.\"_MAP\"['tags'][3] FROM products AS c", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE c.\"_MAP\"['tags'][1] = 'outdoor'", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE CARDINALITY(c.\"_MAP\"['tags']) = 2", false),
+
+            // CASE, whose arms are where an unknown condition goes somewhere visible.
+            ("SELECT c.\"id\", CASE WHEN c.\"category\" = 'bikes' THEN 1 ELSE 0 END FROM products AS c", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE (CASE WHEN c.\"category\" = 'bikes' THEN 1 ELSE 0 END) = 0", false),
+
+
+            // ── A second sweep: ordering, aggregation and row restriction over a path
+            //    that is null in one document and absent in another ─────────────────
+
+            // Ordering by a nullable user path, both directions and both null placements. Where the
+            // service's placement and Calcite's disagree the sort must decline, and declining is
+            // invisible from the rows unless they are compared.
+            ("SELECT c.\"id\", c.\"category\" FROM products AS c ORDER BY c.\"category\", c.\"id\"", true),
+            ("SELECT c.\"id\", c.\"category\" FROM products AS c ORDER BY c.\"category\" DESC, c.\"id\"", true),
+            ("SELECT c.\"id\", c.\"category\" FROM products AS c ORDER BY c.\"category\" NULLS FIRST, c.\"id\"", true),
+            ("SELECT c.\"id\", c.\"category\" FROM products AS c ORDER BY c.\"category\" NULLS LAST, c.\"id\"", true),
+            ("SELECT c.\"id\" FROM products AS c ORDER BY c.\"_MAP\"['price'], c.\"id\"", true),
+
+            // Row restriction combined with a predicate over a path some documents lack, where a
+            // wrongly pushed TOP takes the wrong rows rather than the wrong number of them.
+            ("SELECT c.\"id\" FROM products AS c WHERE c.\"_MAP\"['price'] IS NOT NULL ORDER BY c.\"id\" FETCH NEXT 2 ROWS ONLY", true),
+            ("SELECT c.\"id\" FROM products AS c WHERE NOT (c.\"category\" = 'bikes') ORDER BY c.\"id\" OFFSET 1 ROWS FETCH NEXT 2 ROWS ONLY", true),
+
+            // The aggregate forms over a path that is null in one document and absent in another.
+            // What SUM and AVG skip, and what COUNT counts, is the whole question.
+            ("SELECT COUNT(*), COUNT(c.\"_MAP\"['price']) FROM products AS c", false),
+            ("SELECT c.\"category\", COUNT(*) FROM products AS c GROUP BY c.\"category\" HAVING COUNT(*) > 1", false),
+
+            // Grouping by something other than the partition key, and by more than one thing.
+            ("SELECT c.\"_MAP\"['name'], COUNT(*) FROM products AS c GROUP BY c.\"_MAP\"['name']", false),
+            ("SELECT c.\"category\", c.\"_MAP\"['name'], COUNT(*) FROM products AS c GROUP BY c.\"category\", c.\"_MAP\"['name']", false),
+
+            // DISTINCT over a computed column and over more than one, where the normalised key and
+            // the plain one sit side by side.
+            ("SELECT DISTINCT c.\"category\", c.\"_MAP\"['name'] FROM products AS c", false),
+            ("SELECT DISTINCT c.\"_MAP\"['price'] FROM products AS c", false),
+
+            // The whole document, and a document with no user properties beyond the seeded ones.
+            ("SELECT c.\"_MAP\" FROM products AS c", false),
+            ("SELECT c.\"_MAP\"['metadata'] FROM products AS c", false),
 
             // Casts over document values, which is how a view gives a column a SQL type over this row
             // model. Read against the typed container, whose documents disagree with the declaration on
@@ -567,35 +701,20 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests
         /// </summary>
         /// <remarks>
         /// <para>
-        /// Recorded rather than removed. Every one of these was in the corpus and passing until the
-        /// oracle started withholding the pushdown rules — see <see cref="Run"/> — so deleting them
-        /// would take away the only evidence that the difference is there. Asserting that each still
-        /// differs keeps them working: a statement that starts agreeing fails
-        /// <see cref="EveryRecordedDivergenceStillDiverges"/> and is meant to move up into the corpus.
+        /// <b>Empty, and that is the point of keeping it.</b> Repairing the oracle put five statements
+        /// here — negation over a null-valued property, grouping and dedup over one, and an
+        /// <c>ARRAY_SLICE</c> origin adjustment that was never needed — and each has since been fixed
+        /// and promoted into the corpus. What remains is the mechanism.
         /// </para>
         /// <para>
-        /// None of these is a decision. They are open defects with a witness.
+        /// A statement belongs here only while it is an open defect with a witness, never as a
+        /// decision. Asserting that each still differs is what keeps that true: one that starts
+        /// agreeing fails <see cref="EveryRecordedDivergenceStillDiverges"/> and is meant to move up
+        /// into the corpus rather than sit here looking settled.
         /// </para>
         /// </remarks>
         static readonly (string Sql, bool Ordered, string Reason)[] Divergences =
         [
-            // Null and undefined, which Cosmos distinguishes and SQL does not. The seeded documents
-            // carry both — one with a null category, one with none — and each of these is a place the
-            // difference becomes a row rather than a nicety.
-            ("SELECT c.\"id\" FROM products AS c WHERE NOT (c.\"category\" = 'bikes')", false,
-                "The service reads `NOT (c.category = @p)` as true where category is null; SQL reads the equality as unknown and the negation as unknown, and keeps neither. The pushed form returns the null-category document the plan discards."),
-            ("SELECT c.\"category\", COUNT(*) FROM products AS c GROUP BY c.\"category\"", false,
-                "The service groups a null-valued property and an absent one separately, giving two groups of one; SQL has a single NULL and gives one group of two."),
-            ("SELECT DISTINCT c.\"category\" FROM products AS c", false,
-                "The same difference through DISTINCT: two nulls survive the service's dedup where SQL keeps one."),
-
-            // A translation the corpus was written to check and could not, because the oracle it was
-            // checked against was the pushdown itself.
-            ("SELECT ARRAY_SLICE(c.\"_MAP\"['tags'], 1, 1) FROM products AS c WHERE c.\"id\" = '1'", false,
-                "ARRAY_SLICE is emitted as `start - 1` on the premise that Calcite's origin is one. Measured, it is zero — the same as Cosmos's — so the adjustment moves the window one element too far left."),
-            ("SELECT ARRAY_SLICE(c.\"_MAP\"['tags'], 2, 1) FROM products AS c WHERE c.\"id\" = '1'", false,
-                "The same shift at the end of the array, where it returns an element instead of nothing."),
-
         ];
 
         /// <summary>

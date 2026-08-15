@@ -121,11 +121,17 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Sql
                 .Should().Be("(c.name = @p0)");
         }
 
+        /// <remarks>
+        /// Guarded, where the equality beside it is not, and the asymmetry is the service's rather than
+        /// a choice: its <c>!=</c> over a null is true where SQL's is unknown, and a row SQL discards
+        /// would be kept. Its <c>=</c> over a null is already false, which is what SQL's unknown does
+        /// here. See <c>CosmosRexTranslator.WriteComparison</c>.
+        /// </remarks>
         [TestMethod]
-        public void NotEqualsUsesCosmosSpelling()
+        public void NotEqualsUsesCosmosSpellingAndGuardsAgainstNull()
         {
             Translate(Call(SqlStdOperatorTable.NOT_EQUALS, Ref(0, SqlTypeName.VARCHAR), Str("abc")))
-                .Should().Be("(c.name != @p0)");
+                .Should().Be("(IS_DEFINED(c.name) AND NOT IS_NULL(c.name) AND (c.name != @p0))");
         }
 
         [TestMethod]
@@ -145,11 +151,51 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Sql
                 .Should().Be("(c.price * @p0)");
         }
 
+        /// <remarks>
+        /// Under the negation the equality has to be <em>true</em> over a null, so that the <c>NOT</c>
+        /// above makes it false and the row is discarded -- which is what SQL's unknown does in either
+        /// position. The service's equality over a null is false, so <c>NOT</c> alone would have kept
+        /// exactly the row SQL discards; measured, it did.
+        /// </remarks>
         [TestMethod]
-        public void NotRenders()
+        public void NotOverAComparisonGuardsInTheOppositeDirection()
         {
             var inner = Call(SqlStdOperatorTable.EQUALS, Ref(0, SqlTypeName.VARCHAR), Str("x"));
-            Translate(Call(SqlStdOperatorTable.NOT, inner)).Should().Be("(NOT (c.name = @p0))");
+
+            Translate(Call(SqlStdOperatorTable.NOT, inner))
+                .Should().Be("(NOT ((c.name = @p0) OR IS_NULL(c.name) OR NOT IS_DEFINED(c.name)))");
+        }
+
+        /// <remarks>
+        /// Two negations return the position to where it started, so the comparison is written plainly
+        /// again. A guard applied to every negation rather than to the position made this keep both the
+        /// null-valued document and the absent one, and the corpus said so.
+        /// </remarks>
+        [TestMethod]
+        public void ADoubleNegationWritesTheComparisonPlainly()
+        {
+            var inner = Call(SqlStdOperatorTable.EQUALS, Ref(0, SqlTypeName.VARCHAR), Str("x"));
+            var once = Call(SqlStdOperatorTable.NOT, inner);
+
+            Translate(Call(SqlStdOperatorTable.NOT, once)).Should().Be("(NOT (NOT (c.name = @p0)))");
+        }
+
+        /// <remarks>
+        /// A conjunction under a negation has both arms written negated, which is what lets
+        /// <c>NOT (x = 1 AND y = 2)</c> keep its row where <c>x</c> is null and <c>y</c> is not 2 --
+        /// unknown AND false is false, and its negation is true. Guarding the negation as a whole
+        /// would have discarded it.
+        /// </remarks>
+        [TestMethod]
+        public void NegationReachesThroughAConjunctionToBothArms()
+        {
+            var a = Call(SqlStdOperatorTable.EQUALS, Ref(0, SqlTypeName.VARCHAR), Str("x"));
+            var b = Call(SqlStdOperatorTable.EQUALS, Ref(1, SqlTypeName.INTEGER), Num(2));
+
+            var sql = Translate(Call(SqlStdOperatorTable.NOT, Call(SqlStdOperatorTable.AND, a, b)));
+
+            sql.Should().Contain("IS_NULL(c.name)");
+            sql.Should().Contain("IS_NULL(c.price)");
         }
 
         /// <remarks>
@@ -259,14 +305,26 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Sql
         }
 
         /// <remarks>
-        /// The index origin is a translation detail, not a difference in meaning — Calcite counts
-        /// from one and Cosmos from zero, so the start is shifted exactly as <c>SUBSTRING</c>'s is.
+        /// Both count from zero, so nothing is shifted. This was emitted as <c>start - 1</c> on the
+        /// premise that Calcite's origin is one, the way SQL's <c>SUBSTRING</c> is — measured against
+        /// the differential corpus, it is not, and the adjustment returned the wrong element.
         /// </remarks>
         [TestMethod]
-        public void ArraySliceShiftsTheStartToCosmosOrigin()
+        public void ArraySliceSharesCosmosOriginAndIsNotShifted()
         {
             Translate(Call(SqlLibraryOperators.ARRAY_SLICE, Ref(2, SqlTypeName.ANY), Num(1), Num(2)))
-                .Should().Be("ARRAY_SLICE(c, (@p0 - 1), @p1)");
+                .Should().Be("ARRAY_SLICE(c, @p0, @p1)");
+        }
+
+        /// <remarks>
+        /// SQL's <c>SUBSTRING</c> really does count from one, so its adjustment stays. Pinned beside
+        /// the slice so the two are not taken for the same question again.
+        /// </remarks>
+        [TestMethod]
+        public void SubstringIsStillShifted()
+        {
+            Translate(Call(SqlStdOperatorTable.SUBSTRING, Ref(0, SqlTypeName.VARCHAR), Num(1), Num(3)))
+                .Should().Be("SUBSTRING(c.name, (@p0 - 1), @p1)");
         }
 
         [TestMethod]
@@ -342,10 +400,27 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Sql
         }
 
         [TestMethod]
-        public void ItemWithIntegerAccessorIndexesTheArray()
+        public void ItemWithIntegerAccessorIndexesTheArrayFromTheServiceOrigin()
         {
-            Translate(Call(SqlStdOperatorTable.ITEM, Ref(2, SqlTypeName.ANY), Num(0)))
+            // SQL subscripts from one and Cosmos from zero. Passed through unchanged this read one
+            // element early, and the differential corpus had no subscript in it to say so.
+            Translate(Call(SqlStdOperatorTable.ITEM, Ref(2, SqlTypeName.ANY), Num(1)))
                 .Should().Be("c[0]");
+
+            Translate(Call(SqlStdOperatorTable.ITEM, Ref(2, SqlTypeName.ANY), Num(3)))
+                .Should().Be("c[2]");
+        }
+
+        /// <remarks>
+        /// A subscript below one names no element in SQL. Shifting it produces a negative subscript
+        /// whose reading by the service has not been measured, so the operator is refused and Calcite
+        /// answers it.
+        /// </remarks>
+        [TestMethod]
+        public void ItemWithASubscriptBelowOneIsDeclined()
+        {
+            CanTranslate(Translator(), Call(SqlStdOperatorTable.ITEM, Ref(2, SqlTypeName.ANY), Num(0))).Should().BeFalse();
+            CanTranslate(Translator(), Call(SqlStdOperatorTable.ITEM, Ref(2, SqlTypeName.ANY), Num(-1))).Should().BeFalse();
         }
 
         // The translator also refuses ITEM whose base is not a path, since appending a segment

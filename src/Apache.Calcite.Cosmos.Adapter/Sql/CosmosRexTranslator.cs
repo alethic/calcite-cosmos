@@ -296,22 +296,22 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
             switch (KindOf(call))
             {
                 case SqlKind.__Enum.EQUALS:
-                    WriteEquals(builder, call);
+                    WriteComparison(builder, call, "=");
                     break;
                 case SqlKind.__Enum.NOT_EQUALS:
-                    WriteBinary(builder, call, "!=");
+                    WriteComparison(builder, call, "!=");
                     break;
                 case SqlKind.__Enum.LESS_THAN:
-                    WriteBinary(builder, call, "<");
+                    WriteComparison(builder, call, "<");
                     break;
                 case SqlKind.__Enum.LESS_THAN_OR_EQUAL:
-                    WriteBinary(builder, call, "<=");
+                    WriteComparison(builder, call, "<=");
                     break;
                 case SqlKind.__Enum.GREATER_THAN:
-                    WriteBinary(builder, call, ">");
+                    WriteComparison(builder, call, ">");
                     break;
                 case SqlKind.__Enum.GREATER_THAN_OR_EQUAL:
-                    WriteBinary(builder, call, ">=");
+                    WriteComparison(builder, call, ">=");
                     break;
                 case SqlKind.__Enum.AND:
                     WriteChain(builder, call, "AND");
@@ -335,10 +335,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
                     WriteBinary(builder, call, "%");
                     break;
                 case SqlKind.__Enum.NOT:
-                    RequireOperandCount(call, 1);
-                    builder.Append("(NOT ");
-                    Write(builder, Operand(call, 0));
-                    builder.Append(')');
+                    WriteNot(builder, call);
                     break;
                 case SqlKind.__Enum.MINUS_PREFIX:
                     RequireOperandCount(call, 1);
@@ -395,30 +392,6 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
             builder.Append(' ').Append(op).Append(' ');
             Write(builder, right);
             builder.Append(')');
-        }
-
-        /// <summary>
-        /// Writes an equality, dropping a cast to text where doing so cannot change which documents
-        /// match.
-        /// </summary>
-        /// <remarks>
-        /// See <see cref="TryTextCastOperand"/>. Equality only, and only against a literal: the
-        /// argument that the two forms select the same documents is about this shape and does not
-        /// carry to another one.
-        /// </remarks>
-        void WriteEquals(StringBuilder builder, RexCall call)
-        {
-            RequireOperandCount(call, 2);
-
-            var left = Operand(call, 0);
-            var right = Operand(call, 1);
-
-            if (TryTextCastOperand(left, right) is RexNode unwrappedLeft)
-                WriteBinary(builder, unwrappedLeft, right, "=");
-            else if (TryTextCastOperand(right, left) is RexNode unwrappedRight)
-                WriteBinary(builder, left, unwrappedRight, "=");
-            else
-                WriteBinary(builder, left, right, "=");
         }
 
         /// <summary>
@@ -604,6 +577,169 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
         /// value, whereas SQL has only <c>NULL</c>. Both Cosmos states must therefore be tested,
         /// or a filter on a property that is simply missing from a document would not match.
         /// </remarks>
+        /// <summary>
+        /// Whether an odd number of <c>NOT</c>s encloses what is being written.
+        /// </summary>
+        /// <remarks>
+        /// See <see cref="WriteComparison"/>. The boolean connectives pass it through -- negating a
+        /// conjunction negates the position of both its arms -- and everything else clears it, because
+        /// the position of a value is not the position of a predicate.
+        /// </remarks>
+        bool _negated;
+
+        /// <summary>
+        /// Writes <c>NOT</c>, flipping the position its operand is written in.
+        /// </summary>
+        void WriteNot(StringBuilder builder, RexCall call)
+        {
+            RequireOperandCount(call, 1);
+
+            var saved = _negated;
+            _negated = saved == false;
+
+            builder.Append("(NOT ");
+            Write(builder, Operand(call, 0));
+            builder.Append(')');
+
+            _negated = saved;
+        }
+
+        /// <summary>
+        /// Writes a comparison, restoring what SQL says about one against <c>NULL</c>.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// SQL's comparison against <c>NULL</c> is unknown, and a row is kept only where the predicate
+        /// is true -- so an unknown discards the row in a positive position, and, because negating an
+        /// unknown leaves it unknown, discards it in a negated position too. The service is two-valued
+        /// over null and disagrees in both directions. Measured against a container carrying a
+        /// null-valued property:
+        /// </para>
+        /// <list type="bullet">
+        /// <item><description><c>c.category = 'bikes'</c> over a null is <b>false</b>, which discards
+        /// the row -- the same as SQL, so nothing is needed.</description></item>
+        /// <item><description><c>c.category != 'bikes'</c> over a null is <b>true</b>, which keeps a
+        /// row SQL discards.</description></item>
+        /// <item><description>Under a <c>NOT</c> the two swap: the false becomes true and keeps a row
+        /// SQL discards, and the true becomes false and is right.</description></item>
+        /// </list>
+        /// <para>
+        /// So a guard is needed in exactly one of the two positions per operator, and which one depends
+        /// on both. In a positive position the comparison has to be false over a null; in a negated one
+        /// it has to be true, so that the <c>NOT</c> above makes it false.
+        /// </para>
+        /// <para>
+        /// Written that way it composes, which is why the position is tracked rather than the negation
+        /// being guarded as a whole. A conjunction under a negation has both arms written negated, and
+        /// <c>NOT (x = 1 AND y = 2)</c> with <c>x</c> null and <c>y</c> not 2 keeps its row -- unknown
+        /// AND false is false, and its negation is true. A guard wrapped around the negation would have
+        /// discarded that row, and a guard applied only under <c>NOT</c> made a double negation wrong.
+        /// Both were measured before this shape was arrived at.
+        /// </para>
+        /// <para>
+        /// An absent property needs nothing in either position. The service's comparison on one is
+        /// undefined, <c>NOT undefined</c> is undefined, and a <c>WHERE</c> keeps neither -- which is
+        /// what SQL says about it too. The guard names it anyway, because a term that is already
+        /// unreachable costs nothing and reads as deliberate.
+        /// </para>
+        /// </remarks>
+        void WriteComparison(StringBuilder builder, RexCall call, string op)
+        {
+            RequireOperandCount(call, 2);
+
+            var negated = _negated;
+            var notEquals = KindOf(call) == SqlKind.__Enum.NOT_EQUALS;
+
+            // Operands are values, and a value has no position. Cleared so that a comparison nested
+            // inside one is not written as though the NOT above applied to it.
+            _negated = false;
+
+            try
+            {
+                // The one operator already true over a null needs the guard in the position the others
+                // do not.
+                if (negated == notEquals)
+                {
+                    WriteComparand(builder, call, op);
+                    return;
+                }
+
+                var paths = new List<string>();
+                CollectGuardPaths(call, paths);
+
+                if (paths.Count == 0)
+                {
+                    WriteComparand(builder, call, op);
+                    return;
+                }
+
+                builder.Append('(');
+
+                if (negated)
+                {
+                    // True over a null, so that the NOT above discards the row.
+                    WriteComparand(builder, call, op);
+
+                    foreach (var path in paths)
+                        builder.Append(" OR IS_NULL(").Append(path).Append(") OR NOT IS_DEFINED(").Append(path).Append(')');
+                }
+                else
+                {
+                    // False over a null, which discards the row here.
+                    foreach (var path in paths)
+                        builder.Append("IS_DEFINED(").Append(path).Append(") AND NOT IS_NULL(").Append(path).Append(") AND ");
+
+                    WriteComparand(builder, call, op);
+                }
+
+                builder.Append(')');
+            }
+            finally
+            {
+                _negated = negated;
+            }
+        }
+
+        /// <summary>
+        /// Writes the comparison itself, taking the one cast an equality against text may drop.
+        /// </summary>
+        void WriteComparand(StringBuilder builder, RexCall call, string op)
+        {
+            var left = Operand(call, 0);
+            var right = Operand(call, 1);
+
+            if (KindOf(call) == SqlKind.__Enum.EQUALS)
+            {
+                if (TryTextCastOperand(left, right) is RexNode unwrappedLeft)
+                    left = unwrappedLeft;
+                else if (TryTextCastOperand(right, left) is RexNode unwrappedRight)
+                    right = unwrappedRight;
+            }
+
+            WriteBinary(builder, left, right, op);
+        }
+
+        /// <summary>
+        /// Collects the rendered paths an expression reads, the largest that resolves winning.
+        /// </summary>
+        void CollectGuardPaths(RexNode node, List<string> paths)
+        {
+            if (TryResolvePath(node, out var path) && path is not null)
+            {
+                var text = path.ToString();
+                if (paths.Contains(text) == false)
+                    paths.Add(text);
+
+                return;
+            }
+
+            if (node is not RexCall call)
+                return;
+
+            for (var i = 0; i < call.getOperands().size(); i++)
+                CollectGuardPaths(Operand(call, i), paths);
+        }
+
         void WriteIsNull(StringBuilder builder, RexCall call, bool negated)
         {
             RequireOperandCount(call, 1);
@@ -693,25 +829,42 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
             else if (TryGetArrayIndex(value, out var index))
                 CosmosSql.WriteIndexAccess(builder, index);
             else
-                throw new CosmosTranslationException("ITEM accessor must be a string property name or a non-negative array index.");
+                throw new CosmosTranslationException("ITEM accessor must be a string property name or an array subscript of one or more.");
         }
 
         /// <summary>
-        /// Recognizes an array subscript, which may arrive as any of several numeric types
-        /// depending on how the literal was built.
+        /// Recognizes an array subscript and converts it to the service's origin.
         /// </summary>
+        /// <remarks>
+        /// <para>
+        /// SQL subscripts an array from one and Cosmos from zero, so the subscript is emitted as
+        /// <c>index - 1</c>. It was passed through unchanged, which read one element early:
+        /// <c>c."_MAP"['tags'][0]</c> returned the first element where SQL returns nothing, and every
+        /// subscript after it named its predecessor. Measured against the differential corpus, which
+        /// carried no subscript at all until one was looked for.
+        /// </para>
+        /// <para>
+        /// A subscript below one names no element in SQL. Rather than emit the negative subscript that
+        /// shifting it produces — which the service may or may not read as counting from the end, and
+        /// which has not been measured — it is refused, and Calcite answers the whole operator.
+        /// </para>
+        /// <para>
+        /// The value may arrive as any of several numeric types depending on how the literal was
+        /// built, and a non-integral one is not a subscript at all.
+        /// </para>
+        /// </remarks>
         static bool TryGetArrayIndex(object? value, out int index)
         {
             switch (value)
             {
-                case long l when l >= 0 && l <= int.MaxValue:
-                    index = (int)l;
+                case long l when l >= 1 && l <= int.MaxValue:
+                    index = (int)l - 1;
                     return true;
-                case int i when i >= 0:
-                    index = i;
+                case int i when i >= 1:
+                    index = i - 1;
                     return true;
-                case decimal m when m >= 0 && m <= int.MaxValue && decimal.Truncate(m) == m:
-                    index = (int)m;
+                case decimal m when m >= 1 && m <= int.MaxValue && decimal.Truncate(m) == m:
+                    index = (int)m - 1;
                     return true;
                 default:
                     index = 0;
@@ -941,15 +1094,20 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
         }
 
         /// <summary>
-        /// Writes <c>ARRAY_SLICE</c>, adjusting for the differing origin.
+        /// Writes <c>ARRAY_SLICE</c>, which needs no adjustment.
         /// </summary>
         /// <remarks>
-        /// Both take <c>(array, start, length)</c> and differ only in where counting begins —
-        /// Calcite's is one-based, Cosmos's zero-based — which is a translation detail rather than
-        /// a difference in meaning, and is emitted as <c>start - 1</c> exactly as
-        /// <see cref="WriteSubstring"/> does. The shift is checked rather than reasoned: the
-        /// differential corpus slices the same array both ways, so an off-by-one shows as different
-        /// elements rather than as an error.
+        /// Both take <c>(array, start, length)</c> and both count from zero, so the operands are
+        /// written through unchanged. This was emitted as <c>start - 1</c> on the premise that
+        /// Calcite's origin is one, the way SQL's <c>SUBSTRING</c> is — measured, it is not, and the
+        /// adjustment moved the window one element to the left. Over <c>["outdoor", "steel"]</c>,
+        /// <c>ARRAY_SLICE(tags, 1, 1)</c> is <c>["steel"]</c> and the shifted form returned
+        /// <c>["outdoor"]</c>, and <c>ARRAY_SLICE(tags, 2, 1)</c> is empty where the shifted form
+        /// returned an element.
+        /// <para>
+        /// The differential corpus carries both of those, which is what said so. It carried them
+        /// before this was written, and could not observe them while its oracle was inert.
+        /// </para>
         /// <para>
         /// The two-argument form is accepted because Cosmos accepts it — the rest of the array —
         /// though the library's counterpart takes exactly three, so no SQL statement produces it
@@ -964,9 +1122,8 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
 
             builder.Append("ARRAY_SLICE(");
             Write(builder, Operand(call, 0));
-            builder.Append(", (");
+            builder.Append(", ");
             Write(builder, Operand(call, 1));
-            builder.Append(" - 1)");
 
             if (operands.size() == 3)
             {

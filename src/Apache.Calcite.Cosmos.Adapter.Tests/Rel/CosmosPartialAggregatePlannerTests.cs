@@ -1,4 +1,4 @@
-using Apache.Calcite.Cosmos.Adapter.Metadata;
+﻿using Apache.Calcite.Cosmos.Adapter.Metadata;
 using Apache.Calcite.Cosmos.Adapter.Rel;
 
 using Apache.Calcite.Extensions.Adapter.AsyncEnumerable;
@@ -115,7 +115,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             pushed.Should().NotBeNull("the finest grouping should be pushed");
             pushed!.getGroupType().Should().Be(org.apache.calcite.rel.core.Aggregate.Group.SIMPLE);
 
-            Render(pushed).Should().Be("SELECT c.category AS \"category\", COUNT(1) AS \"n\" FROM products c GROUP BY c.category");
+            Render(pushed).Should().Be("SELECT (IS_DEFINED(c.category) ? c.category : null) AS \"category\", COUNT(1) AS \"n\" FROM products c GROUP BY (IS_DEFINED(c.category) ? c.category : null)");
 
             var text = org.apache.calcite.plan.RelOptUtil.toString(plan);
             text.Should().Contain("groups=[[{0}, {}]]", "the grouping sets are finished above");
@@ -137,7 +137,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             pushed.Should().NotBeNull();
             pushed!.getAggCallList().size().Should().Be(2);
 
-            Render(pushed).Should().Be("SELECT c.category AS \"category\", SUM(c._ts) AS \"s\", MAX(c._ts) AS \"m\" FROM products c GROUP BY c.category");
+            Render(pushed).Should().Be("SELECT (IS_DEFINED(c.category) ? c.category : null) AS \"category\", SUM(c._ts) AS \"s\", MAX(c._ts) AS \"m\" FROM products c GROUP BY (IS_DEFINED(c.category) ? c.category : null)");
 
             plan.getConvention().Should().Be(ClrAsyncEnumerableConvention.Instance);
         }
@@ -180,7 +180,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
 
             // COUNT(1) rather than COUNT(c._ts): Calcite rewrites a COUNT of a non-nullable column
             // to COUNT(*) before any rule sees it.
-            Render(pushed!).Should().Contain("SUM(c._ts)").And.Contain("COUNT(1)").And.Contain("GROUP BY c.category");
+            Render(pushed!).Should().Contain("SUM(c._ts)").And.Contain("COUNT(1)").And.Contain("GROUP BY (IS_DEFINED(c.category) ? c.category : null)");
 
             plan.getConvention().Should().Be(ClrAsyncEnumerableConvention.Instance);
         }
@@ -225,7 +225,11 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
 
             // DISTINCT rather than GROUP BY: a call-less aggregate is a distinct, and emitting it
             // as one keeps the statement able to carry an ORDER BY. The dedup is identical.
-            Render(pushed).Should().Be("SELECT DISTINCT VALUE { \"category\": c.category } FROM products c");
+            //
+            // The key is normalised for the reason a grouped one is -- SQL has one null where the
+            // service keeps an absent property apart from a present-and-null one, and a count of
+            // distinct categories counted the two separately. See CosmosAggregate.GroupingKey.
+            Render(pushed).Should().Be("SELECT DISTINCT VALUE { \"category\": (IS_DEFINED(c.category) ? c.category : null) } FROM products c");
 
             // The finishing count lives outside the Cosmos convention.
             plan.getConvention().Should().Be(ClrAsyncEnumerableConvention.Instance);
