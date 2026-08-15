@@ -1,4 +1,4 @@
-﻿# Apache.Calcite.Cosmos.Adapter — Design
+# Apache.Calcite.Cosmos.Adapter — Design
 
 `Apache.Calcite.Cosmos.Adapter` exposes Azure Cosmos DB containers to Apache Calcite as
 relational schemas, and pushes as much of the relational plan as possible down to Cosmos by
@@ -979,17 +979,32 @@ twice — once with the full Cosmos rule set, once with only the way-out convert
 scan is read whole and Calcite evaluates everything in process — and both plans execute against the
 same live container. Equal rows or a defect; there is no third outcome to hide in.
 
-- **The oracle is the adapter's own minimal mode, not a second engine.** Withholding every rule but
-  `CosmosToClrAsyncEnumerableConverterRule` is expressible with the rule-registration seam the
-  planner tests already use, costs no new surface, and the in-process side exercises the same row
-  builder — so a mismatch indicts the pushdown, not the plumbing around it.
+- **The oracle is the adapter's own minimal mode, not a second engine.** The in-process side
+  exercises the same row builder, so a mismatch indicts the pushdown, not the plumbing around it.
+- **The rules have to be excluded, not merely left unregistered — measured.** A convention registers
+  its own rules: `Convention.register` is called by a Volcano planner the first time it sees a node
+  carrying one, and a scan arrives already in the Cosmos convention. Building the planner with only
+  the way out therefore withheld nothing, and every statement in the corpus was compared against
+  itself. It passed for as long as it existed and measured nothing at all. Removing the rules again
+  does not work either: the planner queues a rule's matches when the root is registered, so by the
+  first moment the rules provably exist their matches are already waiting. `setRuleDescExclusionFilter`
+  is read when a match fires rather than when it is queued, and is set before either.
+
+  What the repaired oracle found on its first run is recorded in `CosmosDifferentialTests.Divergences`:
+  `NOT` over a null-valued property, `GROUP BY` and `DISTINCT` over a path that is null in one
+  document and absent in another, and an `ARRAY_SLICE` origin adjustment that the corpus was written
+  to catch and could not. None of them is new; they were merely unobservable.
 - **Rows are compared canonically, as multisets unless the statement orders.** Values are reduced
   to a canonical text — numbers through double, documents with sorted keys — because the two sides
   may box a computed value differently while meaning the same thing, and a map's entry order means
   nothing.
-- **Known, recorded divergences are excluded by name.** Out-of-domain arithmetic is pushed
-  deliberately and diverges deliberately; the corpus states each exclusion beside the reason, so an
-  exclusion reads as a decision rather than a blind spot.
+- **Known divergences are recorded and asserted, not excluded.** A statement the pushdown answers
+  differently moves into `Divergences` with what makes it differ, and a second test requires that it
+  still differs — so a divergence that closes fails the suite and is meant to be promoted back into
+  the corpus. Out-of-domain arithmetic is pushed deliberately and diverges deliberately; the rest are
+  open defects with a witness. A statement with no oracle at all — the array traversal, whose
+  unpushed form has no implementation in the asynchronous convention — is listed separately with the
+  reason, and is at least required to run.
 - **The corpus leans into the semantics that have bitten**: null against absent, `NOT` over both,
   grouping by a key some documents lack, `LIKE`'s shapes, and the aggregate forms. It needs the
   emulator and reports inconclusive without one, like every test that needs a service.
