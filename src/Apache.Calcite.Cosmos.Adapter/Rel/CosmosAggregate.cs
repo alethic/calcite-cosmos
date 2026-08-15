@@ -1,6 +1,7 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 
+using Apache.Calcite.Cosmos.Adapter.Metadata;
 using Apache.Calcite.Cosmos.Adapter.Sql;
 
 using com.google.common.collect;
@@ -229,9 +230,9 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
                 if (index < 0 || index >= fields.Count || fields[index] is null)
                     throw new CosmosTranslationException("A grouping key does not resolve to a document path.");
 
-                var path = fields[index]!.ToString();
-                implementor.Query.AddGroupBy(path);
-                implementor.Query.SelectProperty((string)names.get(output++), path);
+                var key = GroupingKey(fields[index]!);
+                implementor.Query.AddGroupBy(key);
+                implementor.Query.SelectProperty((string)names.get(output++), key);
             }
 
             var calls = getAggCallList();
@@ -284,12 +285,58 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel
                     throw new CosmosTranslationException("A grouping key does not resolve to a document path.");
 
                 var path = fields[index]!;
-                implementor.Query.SelectProperty((string)names.get(i), path.ToString());
-                projected[i] = path;
+                implementor.Query.SelectProperty((string)names.get(i), GroupingKey(path));
+
+                // Bound to the path only where the projected value is that path. A normalised key is a
+                // computed column: the service will not order by a select-list alias, and the path
+                // underneath sorts an absent property somewhere the projected null does not.
+                projected[i] = IsAlwaysPresent(path) ? path : null;
             }
 
             implementor.Query.Distinct = true;
             implementor.Fields = projected;
+        }
+
+        /// <summary>
+        /// The expression a grouping key is grouped and projected by.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// SQL has one <c>NULL</c>; the service distinguishes an absent property from a
+        /// present-and-null one and groups them apart. Over a container holding one of each, grouping
+        /// by that property returned two groups of one where SQL returns one group of two — measured,
+        /// and the same difference reached <c>DISTINCT</c>, which is the same statement without the
+        /// calls.
+        /// </para>
+        /// <para>
+        /// The two are brought together by grouping on the value the property has when it is there and
+        /// on <c>null</c> when it is not, which is exactly SQL's reading of both. The projection uses
+        /// the same expression, so the group's own key reads back as one null rather than as two
+        /// different absences.
+        /// </para>
+        /// <para>
+        /// <b>Only where it is needed.</b> A path the service guarantees — <c>id</c>, <c>_ts</c>,
+        /// <c>_etag</c> — is never absent, so normalising it would buy nothing and cost the plain path
+        /// form that an index is defined on. Those are grouped as they were.
+        /// </para>
+        /// </remarks>
+        static string GroupingKey(CosmosPath path)
+        {
+            var text = path.ToString();
+
+            return IsAlwaysPresent(path) ? text : $"(IS_DEFINED({text}) ? {text} : null)";
+        }
+
+        /// <summary>
+        /// Determines whether the service guarantees a path is present on every document.
+        /// </summary>
+        static bool IsAlwaysPresent(CosmosPath path)
+        {
+            var policy = path.ToPolicyPath();
+
+            return string.Equals(policy, "/" + CosmosContainerMetadata.IdPropertyName, StringComparison.Ordinal)
+                || string.Equals(policy, "/" + CosmosContainerMetadata.TimestampPropertyName, StringComparison.Ordinal)
+                || string.Equals(policy, "/_etag", StringComparison.Ordinal);
         }
 
         string Render(AggregateCall call, IReadOnlyList<CosmosPath?> fields)

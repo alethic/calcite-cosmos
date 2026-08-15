@@ -674,6 +674,23 @@ incorrect plan, not a slow one.
   which is strictly better than collapsing both to SQL `NULL`. Predicates distinguishing them
   translate to `IS_DEFINED`. Promoted columns *do* lose the distinction; that is the price of
   promotion and applies only to paths whose presence is guaranteed anyway.
+
+  **Where a statement has to answer as SQL does, the distinction is spent rather than kept**, and
+  the two places that came to are worth naming because both were shipping wrong answers:
+
+  - **A comparison against a null.** SQL's is unknown, and a row is kept only where the predicate is
+    true — so an unknown discards the row in a positive position and, since negating an unknown
+    leaves it unknown, in a negated one too. The service is two-valued here: its `=` over a null is
+    false, which matches; its `!=` is true, which does not; and under a `NOT` the two swap. So the
+    position is tracked and a guard emitted in whichever one needs it — see
+    `CosmosRexTranslator.WriteComparison`. Tracking the position rather than guarding the negation is
+    what makes it compose: `NOT (x = 1 AND y = 2)` keeps its row where `x` is null and `y` is not 2,
+    and a guard around the whole negation discarded it.
+  - **A grouping key.** The service groups an absent property apart from a present-and-null one, and
+    SQL has one `NULL`. The key is therefore grouped and projected as `IS_DEFINED(p) ? p : null`,
+    which is SQL's reading of both — except for `id`, `_ts` and `_etag`, which the service guarantees
+    are present, where normalising would buy nothing and cost the plain path form an index is defined
+    on. See `CosmosAggregate.GroupingKey`.
 - **Heterogeneous types per path.** The same path may be a string in one item and a number in
   the next. `ANY` absorbs this; a promoted column does not, which is a second reason promotion
   is restricted to declared paths.
@@ -1078,10 +1095,11 @@ same live container. Equal rows or a defect; there is no third outcome to hide i
   first moment the rules provably exist their matches are already waiting. `setRuleDescExclusionFilter`
   is read when a match fires rather than when it is queued, and is set before either.
 
-  What the repaired oracle found on its first run is recorded in `CosmosDifferentialTests.Divergences`:
-  `NOT` over a null-valued property, `GROUP BY` and `DISTINCT` over a path that is null in one
-  document and absent in another, and an `ARRAY_SLICE` origin adjustment that the corpus was written
-  to catch and could not. None of them is new; they were merely unobservable.
+  What the repaired oracle found on its first run was five defects, none of them new and none of them
+  observable before: `NOT` over a null-valued property, `GROUP BY` and `DISTINCT` over a path that is
+  null in one document and absent in another, and an `ARRAY_SLICE` origin adjustment the corpus was
+  written to catch and could not. All five are fixed and their statements are in the corpus.
+  `Divergences` is empty, which is the state it should be found in.
 - **Rows are compared canonically, as multisets unless the statement orders.** Values are reduced
   to a canonical text — numbers through double, documents with sorted keys — because the two sides
   may box a computed value differently while meaning the same thing, and a map's entry order means
@@ -1089,10 +1107,9 @@ same live container. Equal rows or a defect; there is no third outcome to hide i
 - **Known divergences are recorded and asserted, not excluded.** A statement the pushdown answers
   differently moves into `Divergences` with what makes it differ, and a second test requires that it
   still differs — so a divergence that closes fails the suite and is meant to be promoted back into
-  the corpus. Out-of-domain arithmetic is pushed deliberately and diverges deliberately; the rest are
-  open defects with a witness. A statement with no oracle at all — the array traversal, whose
-  unpushed form has no implementation in the asynchronous convention — is listed separately with the
-  reason, and is at least required to run.
+  the corpus rather than sit there looking settled. Nothing belongs there as a decision. A statement
+  with no oracle at all — the array traversal, whose unpushed form has no implementation in the
+  asynchronous convention — is listed separately with the reason, and is at least required to run.
 - **The corpus leans into the semantics that have bitten**: null against absent, `NOT` over both,
   grouping by a key some documents lack, `LIKE`'s shapes, and the aggregate forms. It needs the
   emulator and reports inconclusive without one, like every test that needs a service.

@@ -453,6 +453,21 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests
             ("SELECT c.\"id\" FROM products AS c WHERE c.\"_MAP\"['price'] IS NOT NULL", false),
             ("SELECT c.\"id\" FROM products AS c WHERE c.\"category\" IS NULL", false),
             ("SELECT c.\"id\" FROM products AS c WHERE c.\"category\" = 'bikes' OR c.\"category\" = 'shoes'", false),
+
+            // Negation over a path that is null in one document and absent in another. The service's
+            // equality over a null is false where SQL's is unknown, and only the negation tells them
+            // apart -- in a positive position false and unknown both discard the row.
+            ("SELECT c.\"id\" FROM products AS c WHERE NOT (c.\"category\" = 'bikes')", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE c.\"category\" <> 'bikes'", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE NOT (c.\"category\" <> 'bikes')", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE NOT (c.\"_MAP\"['price'] > 50)", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE NOT (UPPER(CAST(c.\"category\" AS VARCHAR)) = 'BIKES')", false),
+
+            // The shapes the guard is deliberately not applied to, because applying it would be too
+            // strong. Here to say whether leaving them alone is right.
+            ("SELECT c.\"id\" FROM products AS c WHERE NOT (c.\"category\" = 'bikes' AND c.\"_MAP\"['price'] > 50)", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE NOT (c.\"category\" = 'bikes' OR c.\"_MAP\"['price'] > 50)", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE NOT (NOT (c.\"category\" = 'bikes'))", false),
             ("SELECT c.\"id\" FROM products AS c WHERE c.\"category\" IN ('bikes', 'shoes')", false),
             ("SELECT c.\"id\" FROM products AS c WHERE c.\"_MAP\"['price'] BETWEEN 10 AND 200", false),
             ("SELECT c.\"id\" FROM products AS c WHERE c.\"id\" = '3' AND c.\"category\" = 'shoes'", false),
@@ -466,6 +481,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests
             ("SELECT MIN(c.\"_ts\"), MAX(c.\"_ts\") FROM products AS c", false),
             ("SELECT SUM(c.\"_ts\") FROM products AS c", false),
             ("SELECT COUNT(DISTINCT c.\"category\") FROM products AS c", false),
+            ("SELECT c.\"category\", COUNT(*) FROM products AS c GROUP BY c.\"category\"", false),
             ("SELECT c.\"category\", COUNT(*) FROM products AS c GROUP BY ROLLUP(c.\"category\")", false),
             ("SELECT c.\"category\", COUNT(*) AS n FROM products AS c GROUP BY c.\"category\" HAVING c.\"category\" = 'bikes'", false),
             ("SELECT AVG(c.\"_ts\") FROM products AS c", false),
@@ -491,6 +507,16 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests
             // The array functions, and the index shift above all: the oracle counts from one and
             // the pushdown from zero, so an off-by-one in the translation shows here as different
             // elements rather than as an error.
+            ("SELECT ARRAY_SLICE(c.\"_MAP\"['tags'], 0, 1) FROM products AS c WHERE c.\"id\" = '1'", false),
+            ("SELECT ARRAY_SLICE(c.\"_MAP\"['tags'], 1, 1) FROM products AS c WHERE c.\"id\" = '1'", false),
+            ("SELECT ARRAY_SLICE(c.\"_MAP\"['tags'], 2, 1) FROM products AS c WHERE c.\"id\" = '1'", false),
+            ("SELECT ARRAY_SLICE(c.\"_MAP\"['tags'], 0, 2) FROM products AS c WHERE c.\"id\" = '1'", false),
+
+            // SUBSTRING carries the same adjustment ARRAY_SLICE carried wrongly, and SQL's origin
+            // really is one here. Covered so that the two are not assumed to be the same question.
+            ("SELECT SUBSTRING(CAST(c.\"_MAP\"['name'] AS VARCHAR) FROM 1 FOR 3) FROM products AS c", false),
+            ("SELECT SUBSTRING(CAST(c.\"_MAP\"['name'] AS VARCHAR) FROM 2 FOR 3) FROM products AS c", false),
+
             ("SELECT ARRAY_UNION(c.\"_MAP\"['tags'], c.\"_MAP\"['tags']) FROM products AS c WHERE c.\"id\" = '1'", false),
             ("SELECT ARRAY_INTERSECT(c.\"_MAP\"['tags'], c.\"_MAP\"['tags']) FROM products AS c WHERE c.\"id\" = '1'", false),
 
@@ -503,6 +529,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests
             // every key. The seeded documents include a null category and an absent one, so this
             // asks the question that matters: whether the service's dedup agrees with SQL's about
             // null and undefined.
+            ("SELECT DISTINCT c.\"category\" FROM products AS c", false),
             ("SELECT DISTINCT c.\"category\", c.\"id\" FROM products AS c", false),
             ("SELECT DISTINCT c.\"_ts\" FROM products AS c ORDER BY c.\"_ts\"", true),
 
@@ -567,35 +594,20 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests
         /// </summary>
         /// <remarks>
         /// <para>
-        /// Recorded rather than removed. Every one of these was in the corpus and passing until the
-        /// oracle started withholding the pushdown rules — see <see cref="Run"/> — so deleting them
-        /// would take away the only evidence that the difference is there. Asserting that each still
-        /// differs keeps them working: a statement that starts agreeing fails
-        /// <see cref="EveryRecordedDivergenceStillDiverges"/> and is meant to move up into the corpus.
+        /// <b>Empty, and that is the point of keeping it.</b> Repairing the oracle put five statements
+        /// here — negation over a null-valued property, grouping and dedup over one, and an
+        /// <c>ARRAY_SLICE</c> origin adjustment that was never needed — and each has since been fixed
+        /// and promoted into the corpus. What remains is the mechanism.
         /// </para>
         /// <para>
-        /// None of these is a decision. They are open defects with a witness.
+        /// A statement belongs here only while it is an open defect with a witness, never as a
+        /// decision. Asserting that each still differs is what keeps that true: one that starts
+        /// agreeing fails <see cref="EveryRecordedDivergenceStillDiverges"/> and is meant to move up
+        /// into the corpus rather than sit here looking settled.
         /// </para>
         /// </remarks>
         static readonly (string Sql, bool Ordered, string Reason)[] Divergences =
         [
-            // Null and undefined, which Cosmos distinguishes and SQL does not. The seeded documents
-            // carry both — one with a null category, one with none — and each of these is a place the
-            // difference becomes a row rather than a nicety.
-            ("SELECT c.\"id\" FROM products AS c WHERE NOT (c.\"category\" = 'bikes')", false,
-                "The service reads `NOT (c.category = @p)` as true where category is null; SQL reads the equality as unknown and the negation as unknown, and keeps neither. The pushed form returns the null-category document the plan discards."),
-            ("SELECT c.\"category\", COUNT(*) FROM products AS c GROUP BY c.\"category\"", false,
-                "The service groups a null-valued property and an absent one separately, giving two groups of one; SQL has a single NULL and gives one group of two."),
-            ("SELECT DISTINCT c.\"category\" FROM products AS c", false,
-                "The same difference through DISTINCT: two nulls survive the service's dedup where SQL keeps one."),
-
-            // A translation the corpus was written to check and could not, because the oracle it was
-            // checked against was the pushdown itself.
-            ("SELECT ARRAY_SLICE(c.\"_MAP\"['tags'], 1, 1) FROM products AS c WHERE c.\"id\" = '1'", false,
-                "ARRAY_SLICE is emitted as `start - 1` on the premise that Calcite's origin is one. Measured, it is zero — the same as Cosmos's — so the adjustment moves the window one element too far left."),
-            ("SELECT ARRAY_SLICE(c.\"_MAP\"['tags'], 2, 1) FROM products AS c WHERE c.\"id\" = '1'", false,
-                "The same shift at the end of the array, where it returns an element instead of nothing."),
-
         ];
 
         /// <summary>

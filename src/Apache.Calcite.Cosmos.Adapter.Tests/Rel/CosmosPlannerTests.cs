@@ -476,7 +476,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             var best = PlanToCosmos("SELECT c.\"category\", COUNT(*) FROM products AS c GROUP BY c.\"category\"");
 
             Plan(best).Should().Contain("CosmosAggregate");
-            Render(best).Should().Contain("GROUP BY c.category");
+            Render(best).Should().Contain("GROUP BY (IS_DEFINED(c.category) ? c.category : null)");
             Render(best).Should().Contain("COUNT(1)");
         }
 
@@ -493,13 +493,20 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             Render(best).Should().Contain("MAX(c._ts)");
         }
 
+        /// <remarks>
+        /// The key is grouped and projected as the value the property has when it is there and as
+        /// <c>null</c> when it is not, because SQL has one null where the service keeps an absent
+        /// property apart from a present-and-null one. See <c>CosmosAggregate.GroupingKey</c>. The
+        /// <c>WHERE</c> beside it still names the plain path, and so does the partition key it pins:
+        /// nothing about a predicate needs the two brought together.
+        /// </remarks>
         [TestMethod]
         public void GroupByRendersTheWholeStatement()
         {
             var sql = Render(PlanToCosmos("SELECT c.\"category\", COUNT(*) AS n FROM products AS c GROUP BY c.\"category\""));
 
             // Flat rather than an object constructor: Cosmos rejects an aggregate inside one.
-            sql.Should().Be("SELECT c.category AS \"category\", COUNT(1) AS \"n\" FROM products c GROUP BY c.category");
+            sql.Should().Be("SELECT (IS_DEFINED(c.category) ? c.category : null) AS \"category\", COUNT(1) AS \"n\" FROM products c GROUP BY (IS_DEFINED(c.category) ? c.category : null)");
         }
 
         /// <remarks>
@@ -514,7 +521,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             var query = Query(PlanToCosmos(
                 "SELECT c.\"category\", COUNT(*) AS n FROM products AS c GROUP BY c.\"category\" HAVING c.\"category\" = 'bikes'"));
 
-            query.Sql.Should().Be("SELECT c.category AS \"category\", COUNT(1) AS \"n\" FROM products c WHERE (c.category = @p0) GROUP BY c.category");
+            query.Sql.Should().Be("SELECT (IS_DEFINED(c.category) ? c.category : null) AS \"category\", COUNT(1) AS \"n\" FROM products c WHERE (c.category = @p0) GROUP BY (IS_DEFINED(c.category) ? c.category : null)");
             query.PartitionKeyValues.Should().Equal("bikes");
         }
 
