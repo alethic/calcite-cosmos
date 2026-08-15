@@ -138,6 +138,60 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             return implementor.Build();
         }
 
+        // ── Through a view's cast to text ─────────────────────────────────────────
+
+        /// <summary>
+        /// The whole point of the exercise, end to end: a view exposing the partition key as text runs
+        /// against one partition rather than every one.
+        /// </summary>
+        /// <remarks>
+        /// The predicate is in the statement as well. Routing chooses which partitions are visited and
+        /// filters nothing, so the rows are decided by the same comparison either way — which is why
+        /// this is a cost change and not a behaviour change.
+        /// </remarks>
+        [TestMethod]
+        public void ACastToTextOverThePartitionKeyConfinesExecution()
+        {
+            var query = Query(PlanToCosmos("SELECT c.\"id\" FROM products AS c WHERE CAST(c.\"category\" AS VARCHAR) = 'bikes'"));
+
+            query.PartitionKeyValues.Should().Equal("bikes");
+            query.Sql.Should().Contain("WHERE (c.category = @p0)");
+        }
+
+        [TestMethod]
+        public void ACastToTextOverAnOrdinaryPathPushesAsAComparison()
+        {
+            Render(PlanToCosmos("SELECT c.\"id\" FROM products AS c WHERE CAST(c.\"_MAP\"['label'] AS VARCHAR) = 'bikes'"))
+                .Should().Contain("WHERE (c.label = @p0)");
+        }
+
+        /// <remarks>
+        /// Text a stored number renders as, so a document Calcite matches could be in another partition
+        /// — and the comparison itself would select differently at the service. Neither the predicate
+        /// nor the routing is taken, which is the container read whole, exactly as before.
+        /// </remarks>
+        [TestMethod]
+        public void ACastAgainstTextANumberRendersAsIsNotTaken()
+        {
+            // No plan wholly in the convention exists, which is this harness's way of saying the filter
+            // declined: it stays above, and Calcite applies it to the whole container.
+            var plan = () => PlanToCosmos("SELECT c.\"id\" FROM products AS c WHERE CAST(c.\"category\" AS VARCHAR) = '30'");
+
+            plan.Should().Throw<java.lang.RuntimeException>();
+        }
+
+        /// <remarks>
+        /// A cast to a number converts, and no Cosmos comparison reproduces that — so it is declined
+        /// and Calcite answers it over the whole container. Slower, and the rows SQL says.
+        /// </remarks>
+        [TestMethod]
+        public void ACastToANumberIsNotTaken()
+        {
+            var plan = () => PlanToCosmos("SELECT c.\"id\" FROM products AS c WHERE CAST(c.\"_MAP\"['price'] AS INTEGER) = 30");
+
+            plan.Should().Throw<java.lang.RuntimeException>();
+        }
+
         // ── Partition key recovery ────────────────────────────────────────────────
 
         /// <remarks>

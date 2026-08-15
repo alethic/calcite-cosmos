@@ -398,6 +398,88 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Sql
             expression.Should().Contain("c.price");
         }
 
+        // ── Equality against text, through a cast ─────────────────────────────────
+
+        RexNode Any(int index) => _rex.makeInputRef(_types.createTypeWithNullability(_types.createSqlType(SqlTypeName.ANY), true), index);
+
+        RexNode Cast(RexNode operand, SqlTypeName type) => _rex.makeAbstractCast(_types.createSqlType(type), operand, false);
+
+        RexNode EqText(RexNode left, string text) => Call(SqlStdOperatorTable.EQUALS, left, Str(text));
+
+        /// <summary>
+        /// The one shape in which a cast over a document value is dropped.
+        /// </summary>
+        /// <remarks>
+        /// A view can only give a column a SQL type by wrapping the document access in a cast, and a
+        /// cast is otherwise opaque — so a predicate over a typed view column reads the container
+        /// whole. This shape is exempt because the two forms select the same documents: Calcite renders
+        /// the stored value as text and compares, a stored string renders as itself, and no other JSON
+        /// value renders as text this restrictive.
+        /// </remarks>
+        [TestMethod]
+        public void EqualityAgainstTextDropsTheCast()
+        {
+            Translate(EqText(Cast(Any(0), SqlTypeName.VARCHAR), "bikes")).Should().Be("(c.name = @p0)");
+        }
+
+        [TestMethod]
+        public void TheCastIsDroppedWhicheverSideItIsOn()
+        {
+            Translate(Call(SqlStdOperatorTable.EQUALS, Str("bikes"), Cast(Any(0), SqlTypeName.VARCHAR)))
+                .Should().Be("(@p0 = c.name)");
+        }
+
+        /// <summary>
+        /// Text some other JSON value renders as, which is where dropping the cast would lose rows.
+        /// </summary>
+        /// <remarks>
+        /// Measured, not supposed. Against the differential container, <c>= '30'</c> matches the
+        /// document storing the <em>number</em> 30 and <c>= 'true'</c> the one storing the boolean, and
+        /// the service's comparison matches neither. Each of these is a row that would have gone
+        /// missing.
+        /// </remarks>
+        [TestMethod]
+        public void EqualityAgainstAmbiguousTextKeepsTheCast()
+        {
+            foreach (var text in new[] { "30", "-4", "30.7", "1e3", " 30 ", "true", "TRUE", "false", "null", "[bikes]", "{\"v\":1}", "\"bikes\"" })
+                CanTranslate(Translator(), EqText(Cast(Any(0), SqlTypeName.VARCHAR), text))
+                    .Should().BeFalse("'{0}' is text some other value renders as", text);
+        }
+
+        /// <remarks>
+        /// The argument is about equality against a constant and does not carry to another operator, so
+        /// nothing else looks through a cast.
+        /// </remarks>
+        [TestMethod]
+        public void OnlyEqualityDropsTheCast()
+        {
+            CanTranslate(Translator(), Call(SqlStdOperatorTable.GREATER_THAN, Cast(Any(0), SqlTypeName.VARCHAR), Str("bikes"))).Should().BeFalse();
+            CanTranslate(Translator(), Call(SqlStdOperatorTable.NOT_EQUALS, Cast(Any(0), SqlTypeName.VARCHAR), Str("bikes"))).Should().BeFalse();
+            CanTranslate(Translator(), Call(SqlStdOperatorTable.UPPER, Cast(Any(0), SqlTypeName.VARCHAR))).Should().BeFalse();
+            CanTranslate(Translator(), Cast(Any(0), SqlTypeName.VARCHAR)).Should().BeFalse();
+        }
+
+        /// <remarks>
+        /// A cast to a number converts rather than renders — Calcite turns both <c>"30"</c> and
+        /// <c>30.7</c> into 30 and the service compares neither as 30 — so there is no equivalent form
+        /// and the operator is declined.
+        /// </remarks>
+        [TestMethod]
+        public void EqualityThroughANumericCastKeepsTheCast()
+        {
+            CanTranslate(Translator(), Call(SqlStdOperatorTable.EQUALS, Cast(Any(1), SqlTypeName.INTEGER), Num(30))).Should().BeFalse();
+        }
+
+        /// <remarks>
+        /// Dropping a cast reinterprets an untyped document value; it does not convert one that already
+        /// has a type. Over the <c>VARCHAR</c> ordinal the cast is Calcite's own conversion and stays.
+        /// </remarks>
+        [TestMethod]
+        public void EqualityThroughACastOverATypedColumnKeepsTheCast()
+        {
+            CanTranslate(Translator(), EqText(Cast(Ref(0, SqlTypeName.VARCHAR), SqlTypeName.VARCHAR), "bikes")).Should().BeFalse();
+        }
+
     }
 
 }

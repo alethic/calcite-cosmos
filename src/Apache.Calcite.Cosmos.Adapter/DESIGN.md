@@ -416,6 +416,44 @@ worth naming:
 | `x MEMBER OF a` | `ARRAY_CONTAINS(a, x)` | the operands swap |
 | `TRIM`/`LTRIM`/`RTRIM` | same | Calcite carries `[flag, chars, string]`; the flag picks the function, and only trimming spaces is translated |
 
+#### Casts over document values
+
+The row model types every document path `ANY`, so a view can only give a column a SQL type by
+wrapping the access in a cast — `CAST(p."_MAP"['price'] AS INTEGER)`. A cast is opaque to translation,
+which means every operator over a typed view column declines and the container is read whole. That is
+worth fixing, and almost every way of fixing it is wrong.
+
+**A cast is not a no-op, and dropping one is not a shortcut.** Calcite's cast over an `ANY` value
+converts: measured against a container seeded to disagree with itself, `CAST(price AS INTEGER) = 30`
+matches the document storing `"30"` and the one storing `30.7` as well as the one storing `30`. The
+service compares the stored value as it stands and matches only the last. So dropping the cast loses
+rows, and there is no cost argument that makes that acceptable. Numeric casts are declined.
+
+**One shape is exempt, and it is an equivalence rather than a trade.** `CAST(x AS VARCHAR) = 'text'`
+selects exactly the documents whose stored value is the string `'text'`, provided no other JSON value
+renders as `'text'`: a string renders as itself, a number as digits, a boolean as `true` or `false`,
+an array or object with a bracket. `c.x = 'text'` selects exactly the same documents at the service,
+including for absent and null, which match under neither. So the cast is dropped there and only there
+— see `CosmosRexTranslator.TryTextCastOperand`.
+
+The literal is what carries the argument, so the literal is what is checked. Anything that parses as a
+number, `true`, `false`, `null`, and anything opening with a bracket or a quote are refused, because a
+non-string value could have rendered as them. This is not caution for its own sake: in the differential
+container, `= '30'` matches the document storing the *number* 30 and `= 'true'` the one storing the
+boolean, and both would have gone missing.
+
+**What it recovers.** A view exposing the partition key as text routes to one partition again, which is
+the largest cost lever there is and the one that was being lost in silence. Recovered for routing only:
+`TryExtractPrefix` admits the cast form and `TryExtract` does not, so the point read and the
+whole-partition delete — each of which replaces the predicate with an operation that applies none —
+keep the cast opaque. Routing narrows which partitions are visited and filters nothing, so the rows are
+decided by the same comparison either way.
+
+**What is still declined.** Numeric comparisons, sorting by a cast column, joining on one, and
+projecting one. Each needs either a Cosmos expression that reproduces Calcite's conversion, or a reader
+that knows what type a path was declared to have — the schema-level `columns` binding. Neither is
+something the translator can decide on its own.
+
 `COALESCE` and `NULLIF` need no entry — the validator expands both to `CASE` before a `RexCall`
 exists. Several plausible additions are deliberately absent: `LOG(x, base)` and `SQUARE` are not in
 Calcite's standard table, so nothing can produce them; `CBRT` is, and Cosmos has no counterpart. The
