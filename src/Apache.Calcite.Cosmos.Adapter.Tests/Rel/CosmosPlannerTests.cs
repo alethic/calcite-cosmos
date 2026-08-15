@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Linq;
 
 using Apache.Calcite.Cosmos.Adapter.Metadata;
 using Apache.Calcite.Cosmos.Adapter.Rel;
@@ -190,6 +191,148 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             var plan = () => PlanToCosmos("SELECT c.\"id\" FROM products AS c WHERE CAST(c.\"_MAP\"['price'] AS INTEGER) = 30");
 
             plan.Should().Throw<java.lang.RuntimeException>();
+        }
+
+        // ── A bound on what a numeric cast reads ──────────────────────────────────
+
+        /// <summary>
+        /// A comparison through a cast to a number has no Cosmos form, and still says something the
+        /// service can apply.
+        /// </summary>
+        /// <remarks>
+        /// Converting a number to a number moves it by less than one, so a document whose converted
+        /// value is 30 has a raw value strictly between 29 and 31. The predicate itself stays above and
+        /// decides the rows; this only decides which documents cross the wire.
+        /// </remarks>
+        [TestMethod]
+        public void AComparisonThroughANumericCastPushesABoundOnTheRawValue()
+        {
+            var query = Query(FindCosmos(PlanToAsync(
+                "SELECT * FROM products AS c WHERE CAST(c.\"_MAP\"['price'] AS INTEGER) = 30")));
+
+            query.Sql.Should().Contain("IS_DEFINED(c.price)");
+            query.Sql.Should().Contain("(NOT IS_NUMBER(c.price))");
+            query.Sql.Should().Contain("(c.price > @p0)");
+            query.Sql.Should().Contain("(c.price < @p1)");
+
+            query.Parameters.Select(p => p.Value?.ToString()).Should().Equal("29", "31");
+        }
+
+        /// <summary>
+        /// The type test lets non-numbers through rather than filtering to numbers.
+        /// </summary>
+        /// <remarks>
+        /// This is the whole soundness of it, and the direction is the opposite of the obvious one.
+        /// Calcite's cast converts a stored <em>string</em> too — measured, <c>= 30</c> keeps a document
+        /// storing <c>"30"</c> — so a filter that kept only numbers would lose it. Anything that is not
+        /// a number passes untouched and is decided above.
+        /// </remarks>
+        [TestMethod]
+        public void TheTypeTestAdmitsNonNumbersRatherThanExcludingThem()
+        {
+            var sql = Query(FindCosmos(PlanToAsync(
+                "SELECT * FROM products AS c WHERE CAST(c.\"_MAP\"['price'] AS INTEGER) = 30"))).Sql;
+
+            sql.Should().Contain("(NOT IS_NUMBER(c.price)) OR");
+            sql.Should().NotContain("IS_NUMBER(c.price) AND");
+        }
+
+        [TestMethod]
+        public void AnInequalityPushesTheBoundOnOneSideOnly()
+        {
+            var query = Query(FindCosmos(PlanToAsync(
+                "SELECT * FROM products AS c WHERE CAST(c.\"_MAP\"['price'] AS INTEGER) > 10")));
+
+            query.Sql.Should().Contain("(c.price > @p0)");
+            query.Sql.Should().NotContain("@p1");
+            query.Parameters.Select(p => p.Value?.ToString()).Should().Equal("9");
+        }
+
+        /// <remarks>
+        /// The bound is on the side the cast is, so a comparison written the other way round is the
+        /// mirrored operator over the same bound.
+        /// </remarks>
+        [TestMethod]
+        public void TheBoundIsTheSameWithTheOperandsTheOtherWayRound()
+        {
+            var query = Query(FindCosmos(PlanToAsync(
+                "SELECT * FROM products AS c WHERE 10 < CAST(c.\"_MAP\"['price'] AS INTEGER)")));
+
+            query.Sql.Should().Contain("(c.price > @p0)");
+            query.Parameters.Select(p => p.Value?.ToString()).Should().Equal("9");
+        }
+
+        /// <remarks>
+        /// Calcite widens a literal to the type it is compared against, so the bound arrives wrapped in
+        /// a cast of its own. A cast of a constant to a number is that constant.
+        /// </remarks>
+        [TestMethod]
+        public void ABoundWrappedInItsOwnCastIsStillRead()
+        {
+            var query = Query(FindCosmos(PlanToAsync(
+                "SELECT * FROM products AS c WHERE CAST(c.\"_MAP\"['price'] AS DOUBLE) <= 30.5")));
+
+            query.Sql.Should().Contain("(c.price < @p0)");
+            query.Parameters.Select(p => p.Value?.ToString()).Should().Equal("31.5");
+        }
+
+        /// <summary>
+        /// At the limit the conversion saturates to, the bound on that side is not stated.
+        /// </summary>
+        /// <remarks>
+        /// A stored value far past what the target can hold converts to the limit — measured,
+        /// <c>toInt(1e30)</c> is <c>2147483647</c> — so <c>= 2147483647</c> is true of a document
+        /// storing <c>1e30</c>, and a window around the limit would exclude exactly that document. It
+        /// did, and the differential corpus caught it as a lost row. Only equality is affected: the
+        /// inequalities already admit everything past the limit.
+        /// </remarks>
+        [TestMethod]
+        public void AComparisonAtTheSaturationLimitDoesNotBoundThatSide()
+        {
+            var query = Query(FindCosmos(PlanToAsync(
+                "SELECT * FROM products AS c WHERE CAST(c.\"_MAP\"['price'] AS INTEGER) = 2147483647")));
+
+            query.Sql.Should().Contain("(c.price > @p0)");
+            query.Sql.Should().NotContain("@p1");
+            query.Parameters.Select(p => p.Value?.ToString()).Should().Equal("2147483646");
+        }
+
+        /// <summary>
+        /// The targets whose conversion does not stay within one of the stored value state no bound.
+        /// </summary>
+        /// <remarks>
+        /// Each was measured against Calcite's own runtime, and measuring is what ruled them out.
+        /// <c>SMALLINT</c> and <c>TINYINT</c> wrap rather than saturate — <c>toShort(1e30)</c> is
+        /// <c>-1</c> and <c>toByte(1e30)</c> is <c>255</c>, which bear no relation to the stored value.
+        /// <c>FLOAT</c> and <c>REAL</c> round to float precision, and <c>float(1e30)</c> is 1.5e22 away
+        /// from <c>1e30</c>. <c>DECIMAL</c> raises where the value does not fit its declared precision,
+        /// and excluding the document would turn a failing query into a passing one.
+        /// </remarks>
+        [TestMethod]
+        public void ATargetThatWrapsOrRoundsOrRaisesStatesNoBound()
+        {
+            foreach (var type in new[] { "SMALLINT", "TINYINT", "REAL", "FLOAT", "DECIMAL(10, 2)" })
+            {
+                var sql = Query(FindCosmos(PlanToAsync(
+                    $"SELECT * FROM products AS c WHERE CAST(c.\"_MAP\"['price'] AS {type}) = 30"))).Sql;
+
+                sql.Should().Contain("IS_DEFINED(c.price)", "a comparison still implies the path is defined");
+                sql.Should().NotContain("IS_NUMBER", "no bound is sound for {0}", type);
+            }
+        }
+
+        /// <remarks>
+        /// Nothing is known about where converting to a date lands, so there is no bound to state — and
+        /// the definedness the comparison implies is still worth pushing.
+        /// </remarks>
+        [TestMethod]
+        public void ACastWithNoBoundToStateStillPushesDefinedness()
+        {
+            var sql = Query(FindCosmos(PlanToAsync(
+                "SELECT * FROM products AS c WHERE CAST(c.\"_MAP\"['when'] AS DATE) = DATE '2020-01-01'"))).Sql;
+
+            sql.Should().Contain("IS_DEFINED(c.when)");
+            sql.Should().NotContain("IS_NUMBER");
         }
 
         // ── Partition key recovery ────────────────────────────────────────────────
@@ -668,17 +811,20 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
         }
 
         /// <remarks>
-        /// The pushed half is the renderable conjunct alone, and the partition key it pins is still
-        /// recovered from it.
+        /// The pushed half carries the renderable conjunct and whatever the other one implies, never
+        /// the other one itself. <c>INITCAP</c> has no Cosmos form, so it stays above and is rechecked;
+        /// that it is a comparison at all says the path it reads is defined, and that much the service
+        /// can apply. The partition key is still recovered from the conjunct that pins it.
         /// </remarks>
         [TestMethod]
-        public void ThePushedHalfCarriesOnlyTheRenderableConjunct()
+        public void ThePushedHalfCarriesTheRenderableConjunctAndWhatTheOtherImplies()
         {
             var best = PlanToAsync("SELECT * FROM products AS c WHERE c.\"category\" = 'bikes' AND INITCAP(c.\"id\") = 'X'");
             var cosmos = FindCosmos(best);
 
             var query = Query(cosmos);
-            query.Sql.Should().Contain("WHERE (c.category = @p0)");
+            query.Sql.Should().Contain("(c.category = @p0)");
+            query.Sql.Should().Contain("IS_DEFINED(c.id)");
             query.Sql.Should().NotContain("INITCAP");
             query.PartitionKeyValues.Should().Equal("bikes");
         }

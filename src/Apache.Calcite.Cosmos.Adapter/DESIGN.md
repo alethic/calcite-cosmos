@@ -449,10 +449,60 @@ whole-partition delete — each of which replaces the predicate with an operatio
 keep the cast opaque. Routing narrows which partitions are visited and filters nothing, so the rows are
 decided by the same comparison either way.
 
-**What is still declined.** Numeric comparisons, sorting by a cast column, joining on one, and
-projecting one. Each needs either a Cosmos expression that reproduces Calcite's conversion, or a reader
-that knows what type a path was declared to have — the schema-level `columns` binding. Neither is
-something the translator can decide on its own.
+**A numeric comparison states a bound even though it has no form.** `CAST(price AS INTEGER) > 10`
+cannot be translated, and it still *implies* something the service can apply. Converting a number to a
+number moves it by less than one — for the targets where that holds, which is fewer than it looks — so
+every document the predicate keeps has a raw value greater than 9. `CosmosFilterSplitRule` pushes that and rechecks the predicate
+above:
+
+```sql
+IS_DEFINED(c.price) AND (NOT IS_NUMBER(c.price) OR c.price > 9)
+```
+
+**The type test admits rather than excludes, and that is the whole of it.** Calcite converts a stored
+string too — measured, `= 30` keeps a document storing `"30"` — so filtering to numbers would lose it.
+Anything that is not a number passes untouched and is decided above. In a container whose field really
+is numeric, which is what a typed view asserts, that branch matches nothing and the service does all the
+work; in one that is not, the query is slower and the rows are the same. The bound is deliberately loose
+— a whole unit either side — because the exact window depends on rounding direction and sign, and none
+of that has to be decided to make the bound sound.
+
+**Which targets, and why not the others.** Measured against Calcite's own runtime, because the premise
+is a claim about it and nothing else:
+
+| target | `1e30` converts to | bound |
+| --- | --- | --- |
+| `INTEGER`, `BIGINT` | saturates at the limit — `2147483647` | yes, except at the limit itself |
+| `DOUBLE` | identity | yes |
+| `SMALLINT`, `TINYINT` | **wraps** — `-1` and `255` | no: unrelated to the stored value |
+| `FLOAT`, `REAL` | rounds to float precision, 1.5e22 away | no: further than a unit |
+| `DECIMAL` | raises, where it does not fit the precision | no: excluding the document would turn a failing query into a passing one |
+
+Saturation is the row that had to be found rather than reasoned about. `CAST(x AS INTEGER) =
+2147483647` is true of a document storing `1e30`, so a window around the limit excludes exactly the
+document that matches — and the corpus caught it as a lost row before the bound stopped stating that
+side. Only equality is affected; the inequalities already admit everything past the limit.
+
+`CAST` and `SAFE_CAST` are treated alike, and the difference between them is why the sieve has to admit
+rather than exclude: a value that will not convert raises under one and yields null under the other,
+and the bound never excludes a value that is not a number, so whichever it is still happens.
+
+Opening this up meant weakening a plain conjunct at all. Only disjunctions were weakened before, which
+left the commonest untranslatable shape — a single comparison with no Cosmos form — pushing nothing
+whatever, not even the definedness it implies. A conjunct is positive by construction, which is the
+whole of the polarity argument, so the same weakening applies directly.
+
+**The general shape.** Where the two engines agree on part of the value space and not the rest, a type
+test names the part they agree on, and the predicate is pushed there and left alone elsewhere. That is
+what makes a JSON store with no schema addressable at all: `IS_NUMBER`, `IS_STRING`, `IS_BOOL`,
+`IS_ARRAY`, `IS_OBJECT`, `IS_DEFINED` and `IS_NULL` are each a way of carving out a region where a SQL
+operator means what it says. Every use has to be either implied by the predicate — pushed alongside it,
+the predicate rechecked above — or equivalent to it, and the differential corpus is what tells the two
+apart. There is more here than the two cases taken so far.
+
+**What is still declined.** Sorting by a cast column, joining on one, and projecting one. Each needs a
+reader that knows what type a path was declared to have — the schema-level `columns` binding — because
+each carries the value rather than comparing it, and no filter helps with that.
 
 `COALESCE` and `NULLIF` need no entry — the validator expands both to `CASE` before a `RexCall`
 exists. Several plausible additions are deliberately absent: `LOG(x, base)` and `SQUARE` are not in
