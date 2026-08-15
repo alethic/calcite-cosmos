@@ -829,25 +829,42 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
             else if (TryGetArrayIndex(value, out var index))
                 CosmosSql.WriteIndexAccess(builder, index);
             else
-                throw new CosmosTranslationException("ITEM accessor must be a string property name or a non-negative array index.");
+                throw new CosmosTranslationException("ITEM accessor must be a string property name or an array subscript of one or more.");
         }
 
         /// <summary>
-        /// Recognizes an array subscript, which may arrive as any of several numeric types
-        /// depending on how the literal was built.
+        /// Recognizes an array subscript and converts it to the service's origin.
         /// </summary>
+        /// <remarks>
+        /// <para>
+        /// SQL subscripts an array from one and Cosmos from zero, so the subscript is emitted as
+        /// <c>index - 1</c>. It was passed through unchanged, which read one element early:
+        /// <c>c."_MAP"['tags'][0]</c> returned the first element where SQL returns nothing, and every
+        /// subscript after it named its predecessor. Measured against the differential corpus, which
+        /// carried no subscript at all until one was looked for.
+        /// </para>
+        /// <para>
+        /// A subscript below one names no element in SQL. Rather than emit the negative subscript that
+        /// shifting it produces — which the service may or may not read as counting from the end, and
+        /// which has not been measured — it is refused, and Calcite answers the whole operator.
+        /// </para>
+        /// <para>
+        /// The value may arrive as any of several numeric types depending on how the literal was
+        /// built, and a non-integral one is not a subscript at all.
+        /// </para>
+        /// </remarks>
         static bool TryGetArrayIndex(object? value, out int index)
         {
             switch (value)
             {
-                case long l when l >= 0 && l <= int.MaxValue:
-                    index = (int)l;
+                case long l when l >= 1 && l <= int.MaxValue:
+                    index = (int)l - 1;
                     return true;
-                case int i when i >= 0:
-                    index = i;
+                case int i when i >= 1:
+                    index = i - 1;
                     return true;
-                case decimal m when m >= 0 && m <= int.MaxValue && decimal.Truncate(m) == m:
-                    index = (int)m;
+                case decimal m when m >= 1 && m <= int.MaxValue && decimal.Truncate(m) == m:
+                    index = (int)m - 1;
                     return true;
                 default:
                     index = 0;

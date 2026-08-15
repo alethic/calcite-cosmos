@@ -1100,6 +1100,14 @@ same live container. Equal rows or a defect; there is no third outcome to hide i
   null in one document and absent in another, and an `ARRAY_SLICE` origin adjustment the corpus was
   written to catch and could not. All five are fixed and their statements are in the corpus.
   `Divergences` is empty, which is the state it should be found in.
+
+  Widening the corpus afterwards found a sixth the same way: an **array subscript** was passed to the
+  service unchanged, and SQL counts from one where Cosmos counts from zero — so `tags[0]` returned the
+  first element where SQL returns nothing, and every subscript after it named its predecessor. There
+  had never been a statement in the corpus that subscripted an array. The two origin bugs were
+  independent of each other and neither implied the other, which is the argument for sweeping rather
+  than reasoning: a second sweep over ordering, aggregation and row restriction found nothing, and
+  that is worth as much as the six.
 - **Rows are compared canonically, as multisets unless the statement orders.** Values are reduced
   to a canonical text — numbers through double, documents with sorted keys — because the two sides
   may box a computed value differently while meaning the same thing, and a map's entry order means

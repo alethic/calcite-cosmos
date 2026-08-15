@@ -479,6 +479,14 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests
             // Aggregates: the forms, and grouping by a key some documents lack.
             ("SELECT COUNT(*) FROM products", false),
             ("SELECT MIN(c.\"_ts\"), MAX(c.\"_ts\") FROM products AS c", false),
+
+            // Over _ts rather than a user path, and that is a limit rather than a choice. MIN, MAX,
+            // SUM and AVG over an ANY column have no implementation in the asynchronous convention,
+            // and the aggregate rule declines to push one -- so a statement naming any of them forms
+            // no plan in either mode and cannot be compared or even run. Measured, on all four.
+            // Nothing about pushdown; there is simply nothing to execute. Written down because the
+            // absence of these from a corpus about null and absent values otherwise reads as an
+            // oversight, and because the day the convention grows them is the day they belong here.
             ("SELECT SUM(c.\"_ts\") FROM products AS c", false),
             ("SELECT COUNT(DISTINCT c.\"category\") FROM products AS c", false),
             ("SELECT c.\"category\", COUNT(*) FROM products AS c GROUP BY c.\"category\"", false),
@@ -532,6 +540,105 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests
             ("SELECT DISTINCT c.\"category\" FROM products AS c", false),
             ("SELECT DISTINCT c.\"category\", c.\"id\" FROM products AS c", false),
             ("SELECT DISTINCT c.\"_ts\" FROM products AS c ORDER BY c.\"_ts\"", true),
+
+
+            // ── A sweep over the surfaces that carried no statement at all ─────────
+            //
+            // Every one of these reads a path that is null in one document and absent in another,
+            // because that is where this adapter has been wrong every time so far.
+
+            // Comparison and range, in both positions.
+            ("SELECT c.\"id\" FROM products AS c WHERE c.\"_MAP\"['price'] < 100", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE c.\"_MAP\"['price'] >= 120", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE NOT (c.\"_MAP\"['price'] BETWEEN 10 AND 200)", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE c.\"_MAP\"['price'] NOT IN (120, 340)", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE c.\"category\" NOT IN ('bikes', 'shoes')", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE NOT (c.\"category\" IN ('bikes', 'shoes'))", false),
+
+            // LIKE and its negation over a path some documents lack.
+            ("SELECT c.\"id\" FROM products AS c WHERE c.\"_MAP\"['name'] NOT LIKE 'S%'", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE NOT (c.\"_MAP\"['name'] LIKE '%Runner%')", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE c.\"_MAP\"['name'] LIKE '_prin_'", false),
+
+            // Arithmetic over a null and an absent operand, which SQL makes unknown.
+            ("SELECT c.\"id\" FROM products AS c WHERE c.\"_MAP\"['price'] + 1 > 100", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE NOT (c.\"_MAP\"['price'] + 1 > 100)", false),
+            ("SELECT c.\"_MAP\"['price'] + 1 FROM products AS c", false),
+
+            // Conjunction and disjunction mixing a known-true arm with an unknown one.
+            ("SELECT c.\"id\" FROM products AS c WHERE c.\"_MAP\"['price'] > 50 OR c.\"category\" = 'shoes'", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE c.\"_MAP\"['price'] > 50 AND c.\"category\" = 'shoes'", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE NOT (c.\"_MAP\"['price'] IS NULL)", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE NOT (c.\"_MAP\"['price'] IS NOT NULL)", false),
+
+            // Aggregates over a column that is null in one document, absent in another, and a
+            // string in none -- what SUM and AVG skip is not obviously the same on both sides.
+            ("SELECT COUNT(c.\"_MAP\"['price']) FROM products AS c", false),
+            ("SELECT COUNT(c.\"category\") FROM products AS c", false),
+            ("SELECT c.\"category\", COUNT(*) FROM products AS c WHERE c.\"_MAP\"['price'] IS NOT NULL GROUP BY c.\"category\"", false),
+            ("SELECT COUNT(DISTINCT c.\"_MAP\"['name']) FROM products AS c", false),
+
+            // Ordering, where the placement of a null and an absent value is the whole question.
+            ("SELECT c.\"id\", c.\"category\" FROM products AS c ORDER BY c.\"id\" DESC", true),
+            ("SELECT c.\"id\" FROM products AS c ORDER BY c.\"id\" FETCH NEXT 3 ROWS ONLY", true),
+            ("SELECT c.\"id\" FROM products AS c ORDER BY c.\"id\" OFFSET 6 ROWS", true),
+
+            // The string functions over a path some documents lack, which is where a service
+            // function returning undefined and SQL returning null could part company.
+            ("SELECT c.\"id\", UPPER(CAST(c.\"_MAP\"['name'] AS VARCHAR)) FROM products AS c", false),
+            ("SELECT c.\"id\", CHAR_LENGTH(CAST(c.\"_MAP\"['name'] AS VARCHAR)) FROM products AS c", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE CHAR_LENGTH(CAST(c.\"_MAP\"['name'] AS VARCHAR)) > 6", false),
+
+            // Nested and array-valued paths, read where they are absent.
+            ("SELECT c.\"id\", c.\"_MAP\"['metadata']['sku'] FROM products AS c", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE c.\"_MAP\"['metadata']['sku'] = 'B-2'", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE NOT (c.\"_MAP\"['metadata']['sku'] = 'B-2')", false),
+            ("SELECT c.\"id\", c.\"_MAP\"['tags'][0] FROM products AS c", false),
+            ("SELECT c.\"id\", c.\"_MAP\"['tags'][1] FROM products AS c", false),
+            ("SELECT c.\"id\", c.\"_MAP\"['tags'][2] FROM products AS c", false),
+            ("SELECT c.\"id\", c.\"_MAP\"['tags'][3] FROM products AS c", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE c.\"_MAP\"['tags'][1] = 'outdoor'", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE CARDINALITY(c.\"_MAP\"['tags']) = 2", false),
+
+            // CASE, whose arms are where an unknown condition goes somewhere visible.
+            ("SELECT c.\"id\", CASE WHEN c.\"category\" = 'bikes' THEN 1 ELSE 0 END FROM products AS c", false),
+            ("SELECT c.\"id\" FROM products AS c WHERE (CASE WHEN c.\"category\" = 'bikes' THEN 1 ELSE 0 END) = 0", false),
+
+
+            // ── A second sweep: ordering, aggregation and row restriction over a path
+            //    that is null in one document and absent in another ─────────────────
+
+            // Ordering by a nullable user path, both directions and both null placements. Where the
+            // service's placement and Calcite's disagree the sort must decline, and declining is
+            // invisible from the rows unless they are compared.
+            ("SELECT c.\"id\", c.\"category\" FROM products AS c ORDER BY c.\"category\", c.\"id\"", true),
+            ("SELECT c.\"id\", c.\"category\" FROM products AS c ORDER BY c.\"category\" DESC, c.\"id\"", true),
+            ("SELECT c.\"id\", c.\"category\" FROM products AS c ORDER BY c.\"category\" NULLS FIRST, c.\"id\"", true),
+            ("SELECT c.\"id\", c.\"category\" FROM products AS c ORDER BY c.\"category\" NULLS LAST, c.\"id\"", true),
+            ("SELECT c.\"id\" FROM products AS c ORDER BY c.\"_MAP\"['price'], c.\"id\"", true),
+
+            // Row restriction combined with a predicate over a path some documents lack, where a
+            // wrongly pushed TOP takes the wrong rows rather than the wrong number of them.
+            ("SELECT c.\"id\" FROM products AS c WHERE c.\"_MAP\"['price'] IS NOT NULL ORDER BY c.\"id\" FETCH NEXT 2 ROWS ONLY", true),
+            ("SELECT c.\"id\" FROM products AS c WHERE NOT (c.\"category\" = 'bikes') ORDER BY c.\"id\" OFFSET 1 ROWS FETCH NEXT 2 ROWS ONLY", true),
+
+            // The aggregate forms over a path that is null in one document and absent in another.
+            // What SUM and AVG skip, and what COUNT counts, is the whole question.
+            ("SELECT COUNT(*), COUNT(c.\"_MAP\"['price']) FROM products AS c", false),
+            ("SELECT c.\"category\", COUNT(*) FROM products AS c GROUP BY c.\"category\" HAVING COUNT(*) > 1", false),
+
+            // Grouping by something other than the partition key, and by more than one thing.
+            ("SELECT c.\"_MAP\"['name'], COUNT(*) FROM products AS c GROUP BY c.\"_MAP\"['name']", false),
+            ("SELECT c.\"category\", c.\"_MAP\"['name'], COUNT(*) FROM products AS c GROUP BY c.\"category\", c.\"_MAP\"['name']", false),
+
+            // DISTINCT over a computed column and over more than one, where the normalised key and
+            // the plain one sit side by side.
+            ("SELECT DISTINCT c.\"category\", c.\"_MAP\"['name'] FROM products AS c", false),
+            ("SELECT DISTINCT c.\"_MAP\"['price'] FROM products AS c", false),
+
+            // The whole document, and a document with no user properties beyond the seeded ones.
+            ("SELECT c.\"_MAP\" FROM products AS c", false),
+            ("SELECT c.\"_MAP\"['metadata'] FROM products AS c", false),
 
             // Casts over document values, which is how a view gives a column a SQL type over this row
             // model. Read against the typed container, whose documents disagree with the declaration on

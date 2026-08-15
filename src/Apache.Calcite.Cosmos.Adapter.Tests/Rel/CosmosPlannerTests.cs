@@ -894,7 +894,9 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
         [TestMethod]
         public void ArrayIndexingIsPartOfThePath()
         {
-            var best = PlanToCosmos("SELECT c.\"_MAP\"['tags'][0] AS \"first\" FROM products AS c");
+            // Subscripted from one in SQL and from zero at the service, so the first element is
+            // [1] here and c.tags[0] there.
+            var best = PlanToCosmos("SELECT c.\"_MAP\"['tags'][1] AS \"first\" FROM products AS c");
 
             Render(best).Should().Be("SELECT VALUE { \"first\": c.tags[0] } FROM products c");
         }

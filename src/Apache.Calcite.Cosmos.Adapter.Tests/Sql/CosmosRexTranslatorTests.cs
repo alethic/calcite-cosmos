@@ -400,10 +400,27 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Sql
         }
 
         [TestMethod]
-        public void ItemWithIntegerAccessorIndexesTheArray()
+        public void ItemWithIntegerAccessorIndexesTheArrayFromTheServiceOrigin()
         {
-            Translate(Call(SqlStdOperatorTable.ITEM, Ref(2, SqlTypeName.ANY), Num(0)))
+            // SQL subscripts from one and Cosmos from zero. Passed through unchanged this read one
+            // element early, and the differential corpus had no subscript in it to say so.
+            Translate(Call(SqlStdOperatorTable.ITEM, Ref(2, SqlTypeName.ANY), Num(1)))
                 .Should().Be("c[0]");
+
+            Translate(Call(SqlStdOperatorTable.ITEM, Ref(2, SqlTypeName.ANY), Num(3)))
+                .Should().Be("c[2]");
+        }
+
+        /// <remarks>
+        /// A subscript below one names no element in SQL. Shifting it produces a negative subscript
+        /// whose reading by the service has not been measured, so the operator is refused and Calcite
+        /// answers it.
+        /// </remarks>
+        [TestMethod]
+        public void ItemWithASubscriptBelowOneIsDeclined()
+        {
+            CanTranslate(Translator(), Call(SqlStdOperatorTable.ITEM, Ref(2, SqlTypeName.ANY), Num(0))).Should().BeFalse();
+            CanTranslate(Translator(), Call(SqlStdOperatorTable.ITEM, Ref(2, SqlTypeName.ANY), Num(-1))).Should().BeFalse();
         }
 
         // The translator also refuses ITEM whose base is not a path, since appending a segment
