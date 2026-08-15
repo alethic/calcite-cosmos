@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 
 using Apache.Calcite.Cosmos.Adapter.Sql;
@@ -54,8 +54,12 @@ namespace Apache.Calcite.Cosmos.Adapter.Metadata
             if (container.PartitionKeyPaths.Count == 0)
                 return false;
 
+            // Conservative: this answers for a complete key, and the point read and the whole-partition
+            // delete are built on it. Each replaces the predicate with an operation that applies none,
+            // so a key recovered through anything but a plain path would have to be exact in a stronger
+            // sense than routing needs. TryExtractPrefix, which only routes, is where that is admitted.
             var pinned = new Dictionary<string, object?>(StringComparer.Ordinal);
-            Collect(condition, fields, rootAlias, pinned);
+            Collect(condition, fields, rootAlias, pinned, throughText: false);
 
             var resolved = new object?[container.PartitionKeyPaths.Count];
 
@@ -105,7 +109,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Metadata
                 return false;
 
             var pinned = new Dictionary<string, object?>(StringComparer.Ordinal);
-            Collect(condition, fields, rootAlias, pinned);
+            Collect(condition, fields, rootAlias, pinned, throughText: true);
 
             var prefix = new List<object?>();
 
@@ -163,7 +167,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Metadata
                 return false;
 
             var pinned = new Dictionary<string, object?>(StringComparer.Ordinal);
-            Collect(condition, fields, rootAlias, pinned);
+            Collect(condition, fields, rootAlias, pinned, throughText: false);
 
             // Cosmos types id as a string. Anything else pinned to it is a predicate that matches
             // nothing, and is not something to turn into a read.
@@ -240,7 +244,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Metadata
                     // something else entirely — is a shape this recovery does not answer for. A lone
                     // id equality is TryExtractPointRead's question, asked first by the caller.
                     var pinned = new Dictionary<string, object?>(StringComparer.Ordinal);
-                    Collect(call, fields, rootAlias, pinned);
+                    Collect(call, fields, rootAlias, pinned, throughText: false);
 
                     if (pinned.Count == 1 && accounted.Contains(System.Linq.Enumerable.First(pinned.Keys)))
                         continue;
@@ -288,7 +292,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Metadata
                     return false;
 
                 var pinned = new Dictionary<string, object?>(StringComparer.Ordinal);
-                Collect(branch, fields, rootAlias, pinned);
+                Collect(branch, fields, rootAlias, pinned, throughText: false);
 
                 // Cosmos types id as a string; a branch pinning anything else, or anything more,
                 // makes the disjunction a predicate rather than a set of documents.
@@ -387,7 +391,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Metadata
                 return false;
 
             var pinned = new Dictionary<string, object?>(StringComparer.Ordinal);
-            Collect(call, fields, rootAlias, pinned);
+            Collect(call, fields, rootAlias, pinned, throughText: false);
 
             // Exactly one path, and one this read accounts for. A conjunct pinning something else is
             // a predicate the read would ignore.
@@ -400,8 +404,14 @@ namespace Apache.Calcite.Cosmos.Adapter.Metadata
         /// <remarks>
         /// Only <c>AND</c> is descended into. Under a disjunction an equality does not constrain
         /// the whole predicate, so treating it as pinning would be wrong.
+        /// <para>
+        /// <paramref name="throughText"/> admits the one cast shape that selects the same documents
+        /// with the cast dropped — see <see cref="CosmosRexTranslator.TryTextCastOperand"/>. It is set
+        /// where the recovery only <em>routes</em> a query whose predicate is still applied, and clear
+        /// where the recovery replaces the predicate with an operation that applies none.
+        /// </para>
         /// </remarks>
-        static void Collect(RexNode node, IReadOnlyList<CosmosPath?> fields, string rootAlias, Dictionary<string, object?> pinned)
+        static void Collect(RexNode node, IReadOnlyList<CosmosPath?> fields, string rootAlias, Dictionary<string, object?> pinned, bool throughText)
         {
             if (node is not RexCall call)
                 return;
@@ -411,7 +421,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Metadata
             if (kind == SqlKind.__Enum.AND)
             {
                 for (var i = 0; i < call.getOperands().size(); i++)
-                    Collect((RexNode)call.getOperands().get(i), fields, rootAlias, pinned);
+                    Collect((RexNode)call.getOperands().get(i), fields, rootAlias, pinned, throughText);
 
                 return;
             }
@@ -422,20 +432,27 @@ namespace Apache.Calcite.Cosmos.Adapter.Metadata
             var left = (RexNode)call.getOperands().get(0);
             var right = (RexNode)call.getOperands().get(1);
 
-            if (TryPin(left, right, fields, rootAlias, pinned))
+            if (TryPin(left, right, fields, rootAlias, pinned, throughText))
                 return;
 
-            TryPin(right, left, fields, rootAlias, pinned);
+            TryPin(right, left, fields, rootAlias, pinned, throughText);
         }
 
         /// <summary>
         /// Records <paramref name="pathNode"/> as pinned when it is a container-rooted path and
         /// <paramref name="valueNode"/> is a constant.
         /// </summary>
-        static bool TryPin(RexNode pathNode, RexNode valueNode, IReadOnlyList<CosmosPath?> fields, string rootAlias, Dictionary<string, object?> pinned)
+        static bool TryPin(RexNode pathNode, RexNode valueNode, IReadOnlyList<CosmosPath?> fields, string rootAlias, Dictionary<string, object?> pinned, bool throughText)
         {
             if (valueNode is not RexLiteral literal)
                 return false;
+
+            // A view exposes the partition key with a SQL type, which over this row model means a cast,
+            // and the path underneath is the one the container is partitioned on. Only the shape that
+            // selects the same documents either way is unwrapped, and only where the predicate survives
+            // to be applied.
+            if (throughText && CosmosRexTranslator.TryTextCastOperand(pathNode, valueNode) is RexNode unwrapped)
+                pathNode = unwrapped;
 
             // Resolution reuses the translator so that the accepted path forms are the same ones
             // the emitted statement would address. Parameters are discarded; only the shape matters.

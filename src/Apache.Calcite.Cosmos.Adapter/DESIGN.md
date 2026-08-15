@@ -1,4 +1,4 @@
-﻿# Apache.Calcite.Cosmos.Adapter — Design
+# Apache.Calcite.Cosmos.Adapter — Design
 
 `Apache.Calcite.Cosmos.Adapter` exposes Azure Cosmos DB containers to Apache Calcite as
 relational schemas, and pushes as much of the relational plan as possible down to Cosmos by
@@ -415,6 +415,44 @@ worth naming:
 | `CARDINALITY` | `ARRAY_LENGTH` | SQL counts a collection *or a map*, Cosmos only an array, so the map case is declined rather than answered wrongly — and `_MAP` is a map |
 | `x MEMBER OF a` | `ARRAY_CONTAINS(a, x)` | the operands swap |
 | `TRIM`/`LTRIM`/`RTRIM` | same | Calcite carries `[flag, chars, string]`; the flag picks the function, and only trimming spaces is translated |
+
+#### Casts over document values
+
+The row model types every document path `ANY`, so a view can only give a column a SQL type by
+wrapping the access in a cast — `CAST(p."_MAP"['price'] AS INTEGER)`. A cast is opaque to translation,
+which means every operator over a typed view column declines and the container is read whole. That is
+worth fixing, and almost every way of fixing it is wrong.
+
+**A cast is not a no-op, and dropping one is not a shortcut.** Calcite's cast over an `ANY` value
+converts: measured against a container seeded to disagree with itself, `CAST(price AS INTEGER) = 30`
+matches the document storing `"30"` and the one storing `30.7` as well as the one storing `30`. The
+service compares the stored value as it stands and matches only the last. So dropping the cast loses
+rows, and there is no cost argument that makes that acceptable. Numeric casts are declined.
+
+**One shape is exempt, and it is an equivalence rather than a trade.** `CAST(x AS VARCHAR) = 'text'`
+selects exactly the documents whose stored value is the string `'text'`, provided no other JSON value
+renders as `'text'`: a string renders as itself, a number as digits, a boolean as `true` or `false`,
+an array or object with a bracket. `c.x = 'text'` selects exactly the same documents at the service,
+including for absent and null, which match under neither. So the cast is dropped there and only there
+— see `CosmosRexTranslator.TryTextCastOperand`.
+
+The literal is what carries the argument, so the literal is what is checked. Anything that parses as a
+number, `true`, `false`, `null`, and anything opening with a bracket or a quote are refused, because a
+non-string value could have rendered as them. This is not caution for its own sake: in the differential
+container, `= '30'` matches the document storing the *number* 30 and `= 'true'` the one storing the
+boolean, and both would have gone missing.
+
+**What it recovers.** A view exposing the partition key as text routes to one partition again, which is
+the largest cost lever there is and the one that was being lost in silence. Recovered for routing only:
+`TryExtractPrefix` admits the cast form and `TryExtract` does not, so the point read and the
+whole-partition delete — each of which replaces the predicate with an operation that applies none —
+keep the cast opaque. Routing narrows which partitions are visited and filters nothing, so the rows are
+decided by the same comparison either way.
+
+**What is still declined.** Numeric comparisons, sorting by a cast column, joining on one, and
+projecting one. Each needs either a Cosmos expression that reproduces Calcite's conversion, or a reader
+that knows what type a path was declared to have — the schema-level `columns` binding. Neither is
+something the translator can decide on its own.
 
 `COALESCE` and `NULLIF` need no entry — the validator expands both to `CASE` before a `RexCall`
 exists. Several plausible additions are deliberately absent: `LOG(x, base)` and `SQUARE` are not in
@@ -979,17 +1017,32 @@ twice — once with the full Cosmos rule set, once with only the way-out convert
 scan is read whole and Calcite evaluates everything in process — and both plans execute against the
 same live container. Equal rows or a defect; there is no third outcome to hide in.
 
-- **The oracle is the adapter's own minimal mode, not a second engine.** Withholding every rule but
-  `CosmosToClrAsyncEnumerableConverterRule` is expressible with the rule-registration seam the
-  planner tests already use, costs no new surface, and the in-process side exercises the same row
-  builder — so a mismatch indicts the pushdown, not the plumbing around it.
+- **The oracle is the adapter's own minimal mode, not a second engine.** The in-process side
+  exercises the same row builder, so a mismatch indicts the pushdown, not the plumbing around it.
+- **The rules have to be excluded, not merely left unregistered — measured.** A convention registers
+  its own rules: `Convention.register` is called by a Volcano planner the first time it sees a node
+  carrying one, and a scan arrives already in the Cosmos convention. Building the planner with only
+  the way out therefore withheld nothing, and every statement in the corpus was compared against
+  itself. It passed for as long as it existed and measured nothing at all. Removing the rules again
+  does not work either: the planner queues a rule's matches when the root is registered, so by the
+  first moment the rules provably exist their matches are already waiting. `setRuleDescExclusionFilter`
+  is read when a match fires rather than when it is queued, and is set before either.
+
+  What the repaired oracle found on its first run is recorded in `CosmosDifferentialTests.Divergences`:
+  `NOT` over a null-valued property, `GROUP BY` and `DISTINCT` over a path that is null in one
+  document and absent in another, and an `ARRAY_SLICE` origin adjustment that the corpus was written
+  to catch and could not. None of them is new; they were merely unobservable.
 - **Rows are compared canonically, as multisets unless the statement orders.** Values are reduced
   to a canonical text — numbers through double, documents with sorted keys — because the two sides
   may box a computed value differently while meaning the same thing, and a map's entry order means
   nothing.
-- **Known, recorded divergences are excluded by name.** Out-of-domain arithmetic is pushed
-  deliberately and diverges deliberately; the corpus states each exclusion beside the reason, so an
-  exclusion reads as a decision rather than a blind spot.
+- **Known divergences are recorded and asserted, not excluded.** A statement the pushdown answers
+  differently moves into `Divergences` with what makes it differ, and a second test requires that it
+  still differs — so a divergence that closes fails the suite and is meant to be promoted back into
+  the corpus. Out-of-domain arithmetic is pushed deliberately and diverges deliberately; the rest are
+  open defects with a witness. A statement with no oracle at all — the array traversal, whose
+  unpushed form has no implementation in the asynchronous convention — is listed separately with the
+  reason, and is at least required to run.
 - **The corpus leans into the semantics that have bitten**: null against absent, `NOT` over both,
   grouping by a key some documents lack, `LIKE`'s shapes, and the aggregate forms. It needs the
   emulator and reports inconclusive without one, like every test that needs a service.

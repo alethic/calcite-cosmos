@@ -296,7 +296,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
             switch (KindOf(call))
             {
                 case SqlKind.__Enum.EQUALS:
-                    WriteBinary(builder, call, "=");
+                    WriteEquals(builder, call);
                     break;
                 case SqlKind.__Enum.NOT_EQUALS:
                     WriteBinary(builder, call, "!=");
@@ -385,12 +385,132 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
         void WriteBinary(StringBuilder builder, RexCall call, string op)
         {
             RequireOperandCount(call, 2);
+            WriteBinary(builder, Operand(call, 0), Operand(call, 1), op);
+        }
 
+        void WriteBinary(StringBuilder builder, RexNode left, RexNode right, string op)
+        {
             builder.Append('(');
-            Write(builder, Operand(call, 0));
+            Write(builder, left);
             builder.Append(' ').Append(op).Append(' ');
-            Write(builder, Operand(call, 1));
+            Write(builder, right);
             builder.Append(')');
+        }
+
+        /// <summary>
+        /// Writes an equality, dropping a cast to text where doing so cannot change which documents
+        /// match.
+        /// </summary>
+        /// <remarks>
+        /// See <see cref="TryTextCastOperand"/>. Equality only, and only against a literal: the
+        /// argument that the two forms select the same documents is about this shape and does not
+        /// carry to another one.
+        /// </remarks>
+        void WriteEquals(StringBuilder builder, RexCall call)
+        {
+            RequireOperandCount(call, 2);
+
+            var left = Operand(call, 0);
+            var right = Operand(call, 1);
+
+            if (TryTextCastOperand(left, right) is RexNode unwrappedLeft)
+                WriteBinary(builder, unwrappedLeft, right, "=");
+            else if (TryTextCastOperand(right, left) is RexNode unwrappedRight)
+                WriteBinary(builder, left, unwrappedRight, "=");
+            else
+                WriteBinary(builder, left, right, "=");
+        }
+
+        /// <summary>
+        /// Recognises <c>CAST(&lt;document value&gt; AS VARCHAR) = &lt;text&gt;</c> in the one form
+        /// where the cast can be dropped, and returns the value underneath.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// A view over a container can only give a column a SQL type by wrapping the document access
+        /// in a cast, because the row model types every path <c>ANY</c>. Dropping a cast in general
+        /// changes which documents match — Calcite converts the stored value and the service compares
+        /// it as it stands — so it is not done. This shape is the exception, and it is an
+        /// <em>equivalence</em> rather than an approximation.
+        /// </para>
+        /// <para>
+        /// <b>The argument.</b> Calcite renders the stored value as text and compares. A stored string
+        /// renders as itself, so it matches exactly when it equals the literal. Every other JSON value
+        /// renders as something recognisable — a number as digits, a boolean as <c>true</c> or
+        /// <c>false</c>, an array or object with a bracket — so where the literal is none of those, no
+        /// non-string value can render as it, and the documents Calcite matches are exactly the
+        /// documents storing that string. <c>c.path = 'text'</c> selects exactly those at the service.
+        /// Absent and null match under neither: SQL's comparison is unknown and the service's is not
+        /// true.
+        /// </para>
+        /// <para>
+        /// <b>What the conditions are for.</b> The operand must be typed <c>ANY</c>, so the cast is
+        /// reinterpreting an untyped document value rather than converting a value that already has a
+        /// type. The literal must be text — a numeric literal is a different comparison — and must be
+        /// text <see cref="IsUnambiguousText"/> admits, which is where the argument above is enforced
+        /// rather than assumed. A cast carrying a format is refused by arity.
+        /// </para>
+        /// </remarks>
+        internal static RexNode? TryTextCastOperand(RexNode node, RexNode other)
+        {
+            if (node is not RexCall call)
+                return null;
+
+            var kind = KindOf(call);
+            if (kind != SqlKind.__Enum.CAST && kind != SqlKind.__Enum.SAFE_CAST)
+                return null;
+
+            if (call.getOperands().size() != 1)
+                return null;
+
+            var target = call.getType()?.getSqlTypeName();
+            if (target != SqlTypeName.VARCHAR && target != SqlTypeName.CHAR)
+                return null;
+
+            var operand = Operand(call, 0);
+            if (operand.getType()?.getSqlTypeName() != SqlTypeName.ANY)
+                return null;
+
+            if (other is not RexLiteral literal)
+                return null;
+
+            object? value;
+            try
+            {
+                value = GetLiteralValue(literal);
+            }
+            catch (CosmosTranslationException)
+            {
+                return null;
+            }
+
+            return value is string text && IsUnambiguousText(text) ? operand : null;
+        }
+
+        /// <summary>
+        /// Determines whether a string is one no JSON value other than that string renders as.
+        /// </summary>
+        /// <remarks>
+        /// Conservative on purpose, and each refusal is a value that could have come from somewhere
+        /// else: anything that parses as a number, because a stored number renders as digits and which
+        /// spelling Calcite produces is not something this decides; <c>true</c>, <c>false</c> and
+        /// <c>null</c>; and anything opening with a bracket or a quote, which is how an array or an
+        /// object would arrive. The empty string is refused as well, having nothing to distinguish.
+        /// </remarks>
+        internal static bool IsUnambiguousText(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+                return false;
+
+            if (double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out _))
+                return false;
+
+            if (string.Equals(value, "true", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(value, "false", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(value, "null", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            return value[0] is not ('[' or '{' or '"');
         }
 
         void WriteChain(StringBuilder builder, RexCall call, string op)

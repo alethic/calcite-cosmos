@@ -65,6 +65,77 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Metadata
             values.Should().Equal("bikes");
         }
 
+        // ── Through a cast to text ────────────────────────────────────────────────
+
+        RexNode TextCast(RexNode operand) => _rex.makeAbstractCast(_types.createSqlType(SqlTypeName.VARCHAR), operand, false);
+
+        static bool ExtractPrefix(RexNode condition, CosmosContainerMetadata container, out IReadOnlyList<object?> values) =>
+            CosmosPartitionKeyExtractor.TryExtractPrefix(condition, Fields, container, "c", out values, out _);
+
+        /// <summary>
+        /// A view exposing the partition key gives it a SQL type, which over this row model means a
+        /// cast — and losing single-partition execution to that is the largest cost there is to lose
+        /// silently.
+        /// </summary>
+        /// <remarks>
+        /// Recovered only for routing, and only for the equality against text that selects the same
+        /// documents either way. Routing narrows which partitions are visited and filters nothing; the
+        /// predicate is still in the statement.
+        /// </remarks>
+        [TestMethod]
+        public void APartitionKeyReachedThroughACastToTextIsRoutedOn()
+        {
+            ExtractPrefix(Eq(TextCast(Ref(1)), Str("bikes")), Container("/category"), out var values).Should().BeTrue();
+            values.Should().Equal("bikes");
+        }
+
+        /// <remarks>
+        /// Text a number renders as. A document storing the number 30 matches the predicate and lives in
+        /// a different logical partition than one storing the string, so routing on it would skip the
+        /// partition holding a matching document. Measured against the differential container, where
+        /// exactly that document exists.
+        /// </remarks>
+        [TestMethod]
+        public void APartitionKeyReachedThroughACastAgainstAmbiguousTextIsNotRoutedOn()
+        {
+            ExtractPrefix(Eq(TextCast(Ref(1)), Str("30")), Container("/category"), out _).Should().BeFalse();
+        }
+
+        /// <remarks>
+        /// A cast to a number is not dropped anywhere, and least of all here.
+        /// </remarks>
+        [TestMethod]
+        public void APartitionKeyReachedThroughANumericCastIsNotRoutedOn()
+        {
+            var cast = _rex.makeAbstractCast(_types.createSqlType(SqlTypeName.INTEGER), Ref(1), false);
+
+            ExtractPrefix(Eq(cast, _rex.makeExactLiteral(new java.math.BigDecimal(30))), Container("/category"), out _).Should().BeFalse();
+        }
+
+        /// <summary>
+        /// The operations that replace the predicate rather than route it keep the cast opaque.
+        /// </summary>
+        /// <remarks>
+        /// A point read and a whole-partition delete apply no predicate of their own — the read returns
+        /// whatever is at the key, the delete removes everything in the partition — so each needs its
+        /// conjuncts accounted for in a stronger sense than routing does. Nothing about the cast form is
+        /// known to fail there; it is simply not the place to find out, and a delete least of all.
+        /// </remarks>
+        [TestMethod]
+        public void ACastToTextIsNotUsedWhereThePredicateWouldBeReplaced()
+        {
+            var condition = Eq(TextCast(Ref(1)), Str("bikes"));
+
+            Extract(condition, Container("/category"), out _).Should().BeFalse();
+
+            CosmosPartitionKeyExtractor.TryExtractWholePartition(condition, Fields, Container("/category"), "c", out _)
+                .Should().BeFalse();
+
+            CosmosPartitionKeyExtractor.TryExtractPointRead(
+                And(condition, Eq(Ref(3), Str("x"))), Fields, Container("/category"), "c", out _, out _)
+                .Should().BeFalse();
+        }
+
         [TestMethod]
         public void OperandOrderDoesNotMatter()
         {
