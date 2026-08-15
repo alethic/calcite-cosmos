@@ -335,10 +335,12 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
 
             // The bound is on the side the cast is, and a comparison read the other way round is the
             // mirrored operator.
-            if (CosmosRexTranslator.TryNumericCastOperand(left) is RexNode value)
+            (java.math.BigDecimal Min, java.math.BigDecimal Max)? saturates;
+
+            if (CosmosRexTranslator.TryNumericCastOperand(left, out saturates) is RexNode value)
             {
             }
-            else if (CosmosRexTranslator.TryNumericCastOperand(right) is RexNode mirrored)
+            else if (CosmosRexTranslator.TryNumericCastOperand(right, out saturates) is RexNode mirrored)
             {
                 value = mirrored;
                 (left, right) = (right, left);
@@ -360,11 +362,21 @@ namespace Apache.Calcite.Cosmos.Adapter.Rel.Convert
             var one = java.math.BigDecimal.ONE;
             var terms = new java.util.ArrayList();
 
+            // Where the conversion saturates, a comparison against the limit matches every stored value
+            // beyond it, however far beyond. `CAST(x AS INTEGER) = 2147483647` is true of a document
+            // storing 1e30 — measured, and measured as a lost row before this was here — so the bound
+            // on that side is not stated at all. Only equality is affected: the inequalities already
+            // admit everything past the limit.
+            var openBelow = saturates is not null && bound.compareTo(saturates.Value.Min) <= 0;
+            var openAbove = saturates is not null && bound.compareTo(saturates.Value.Max) >= 0;
+
             if (kind is SqlKind.__Enum.EQUALS or SqlKind.__Enum.GREATER_THAN or SqlKind.__Enum.GREATER_THAN_OR_EQUAL)
-                terms.add(rexBuilder.makeCall(SqlStdOperatorTable.GREATER_THAN, value, rexBuilder.makeExactLiteral(bound.subtract(one))));
+                if (kind != SqlKind.__Enum.EQUALS || openBelow == false)
+                    terms.add(rexBuilder.makeCall(SqlStdOperatorTable.GREATER_THAN, value, rexBuilder.makeExactLiteral(bound.subtract(one))));
 
             if (kind is SqlKind.__Enum.EQUALS or SqlKind.__Enum.LESS_THAN or SqlKind.__Enum.LESS_THAN_OR_EQUAL)
-                terms.add(rexBuilder.makeCall(SqlStdOperatorTable.LESS_THAN, value, rexBuilder.makeExactLiteral(bound.add(one))));
+                if (kind != SqlKind.__Enum.EQUALS || openAbove == false)
+                    terms.add(rexBuilder.makeCall(SqlStdOperatorTable.LESS_THAN, value, rexBuilder.makeExactLiteral(bound.add(one))));
 
             if (terms.isEmpty())
                 return null;

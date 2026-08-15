@@ -488,8 +488,8 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
         }
 
         /// <summary>
-        /// Recognises <c>CAST(&lt;document value&gt; AS &lt;number&gt;)</c> and returns the value
-        /// underneath, for a caller that can use a bound on it.
+        /// Recognises <c>CAST(&lt;document value&gt; AS &lt;number&gt;)</c> whose conversion stays within
+        /// one of the stored value, and returns the value underneath.
         /// </summary>
         /// <remarks>
         /// <b>Not for translation.</b> Nothing renders a numeric cast: Calcite converts the stored
@@ -499,8 +499,19 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
         /// above — a bound on the raw value is such a restriction, and the cast is what says the value
         /// is being read as a number at all.
         /// </remarks>
-        internal static RexNode? TryNumericCastOperand(RexNode node)
+        internal static RexNode? TryNumericCastOperand(RexNode node) => TryNumericCastOperand(node, out _);
+
+        /// <inheritdoc cref="TryNumericCastOperand(RexNode)" />
+        /// <param name="node">The expression to inspect.</param>
+        /// <param name="saturates">
+        /// On success, the range the conversion saturates to, or <c>null</c> where it does not
+        /// saturate. A comparison against one of these two values matches every stored value beyond it,
+        /// which a bound must not exclude.
+        /// </param>
+        internal static RexNode? TryNumericCastOperand(RexNode node, out (java.math.BigDecimal Min, java.math.BigDecimal Max)? saturates)
         {
+            saturates = null;
+
             if (node is not RexCall call)
                 return null;
 
@@ -511,13 +522,33 @@ namespace Apache.Calcite.Cosmos.Adapter.Sql
             if (call.getOperands().size() != 1)
                 return null;
 
+            // The targets whose conversion is known to land within one of the stored value, which is
+            // what a caller can state a bound from. Measured against Calcite's own runtime, and four
+            // plausible members are absent because measuring them is what ruled them out:
+            //
+            //   INTEGER, BIGINT  truncate toward zero and saturate at the limits -- within one, except
+            //                    at the limits, which the caller handles.
+            //   DOUBLE           identity for a stored number.
+            //   SMALLINT, TINYINT  do not saturate, they wrap: toShort(1e30) is -1 and toByte(1e30) is
+            //                    255, which bear no relation to the stored value at all.
+            //   FLOAT, REAL      round to float precision: float(1e30) differs from 1e30 by 1.5e22.
+            //   DECIMAL          throws where the value does not fit the declared precision, and a
+            //                    bound that excluded the document would turn a failing query into a
+            //                    passing one.
             var target = call.getType()?.getSqlTypeName();
-            if (target != SqlTypeName.TINYINT && target != SqlTypeName.SMALLINT && target != SqlTypeName.INTEGER && target != SqlTypeName.BIGINT &&
-                target != SqlTypeName.FLOAT && target != SqlTypeName.REAL && target != SqlTypeName.DOUBLE && target != SqlTypeName.DECIMAL)
+            if (target != SqlTypeName.INTEGER && target != SqlTypeName.BIGINT && target != SqlTypeName.DOUBLE)
                 return null;
 
             var operand = Operand(call, 0);
-            return operand.getType()?.getSqlTypeName() == SqlTypeName.ANY ? operand : null;
+            if (operand.getType()?.getSqlTypeName() != SqlTypeName.ANY)
+                return null;
+
+            if (target == SqlTypeName.INTEGER)
+                saturates = (new java.math.BigDecimal(int.MinValue), new java.math.BigDecimal(int.MaxValue));
+            else if (target == SqlTypeName.BIGINT)
+                saturates = (new java.math.BigDecimal(long.MinValue), new java.math.BigDecimal(long.MaxValue));
+
+            return operand;
         }
 
         /// <summary>

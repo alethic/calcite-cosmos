@@ -122,6 +122,7 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests
             """{"id":"6","category":"b","name":"Other","price":7,"label":null}""",
             """{"id":"7","category":"b","name":"NoLabel","price":8}""",
             """{"id":"8","category":"30","name":"NumericLookingKey","price":9,"label":"shoes"}""",
+            """{"id":"9","category":"a","name":"Huge","price":9,"label":"huge","big":1e30}""",
         ];
 
         static CosmosClient? _client;
@@ -519,6 +520,20 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests
             ("SELECT c.\"id\" FROM typed AS c WHERE CAST(c.\"_MAP\"['price'] AS INTEGER) = 30", false),
             ("SELECT c.\"id\" FROM typed AS c WHERE CAST(c.\"_MAP\"['price'] AS INTEGER) > 10", false),
             ("SELECT c.\"id\" FROM typed AS c WHERE CAST(c.\"_MAP\"['price'] AS INTEGER) > 0 ORDER BY c.\"id\"", true),
+            // Saturation. A stored value far past what the target can hold converts to the limit, so a
+            // comparison against the limit is true of it — and a bound around the limit would exclude
+            // exactly that document. Measured as a lost row before the bound stopped stating that side.
+            ("SELECT c.\"id\" FROM typed AS c WHERE CAST(c.\"_MAP\"['big'] AS INTEGER) = 2147483647", false),
+            ("SELECT c.\"id\" FROM typed AS c WHERE CAST(c.\"_MAP\"['big'] AS BIGINT) = 9223372036854775807", false),
+            ("SELECT c.\"id\" FROM typed AS c WHERE CAST(c.\"_MAP\"['big'] AS INTEGER) > 5", false),
+
+            // The spellings differ in what they do with a value that will not convert -- CAST raises,
+            // SAFE_CAST yields null -- and the bound must not change which happens, because it never
+            // excludes a value that is not a number.
+            ("SELECT c.\"id\" FROM typed AS c WHERE SAFE_CAST(c.\"_MAP\"['price'] AS INTEGER) = 30", false),
+            ("SELECT c.\"id\" FROM typed AS c WHERE SAFE_CAST(c.\"_MAP\"['price'] AS INTEGER) > 10", false),
+            ("SELECT c.\"id\" FROM typed AS c WHERE SAFE_CAST(c.\"_MAP\"['big'] AS INTEGER) = 2147483647", false),
+            ("SELECT c.\"id\" FROM typed AS c WHERE SAFE_CAST(c.\"_MAP\"['label'] AS VARCHAR) = 'bikes'", false),
             ("SELECT c.\"id\" FROM typed AS c WHERE CAST(c.\"_MAP\"['price'] AS INTEGER) IS NULL", false),
             ("SELECT c.\"id\" FROM typed AS c WHERE CAST(c.\"_MAP\"['price'] AS DOUBLE) = 30.7", false),
             ("SELECT c.\"id\" FROM typed AS c WHERE CAST(c.\"_MAP\"['name'] AS VARCHAR) = 'Stringy'", false),

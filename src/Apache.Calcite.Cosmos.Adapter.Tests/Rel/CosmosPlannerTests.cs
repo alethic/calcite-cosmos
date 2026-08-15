@@ -276,6 +276,51 @@ namespace Apache.Calcite.Cosmos.Adapter.Tests.Rel
             query.Parameters.Select(p => p.Value?.ToString()).Should().Equal("31.5");
         }
 
+        /// <summary>
+        /// At the limit the conversion saturates to, the bound on that side is not stated.
+        /// </summary>
+        /// <remarks>
+        /// A stored value far past what the target can hold converts to the limit — measured,
+        /// <c>toInt(1e30)</c> is <c>2147483647</c> — so <c>= 2147483647</c> is true of a document
+        /// storing <c>1e30</c>, and a window around the limit would exclude exactly that document. It
+        /// did, and the differential corpus caught it as a lost row. Only equality is affected: the
+        /// inequalities already admit everything past the limit.
+        /// </remarks>
+        [TestMethod]
+        public void AComparisonAtTheSaturationLimitDoesNotBoundThatSide()
+        {
+            var query = Query(FindCosmos(PlanToAsync(
+                "SELECT * FROM products AS c WHERE CAST(c.\"_MAP\"['price'] AS INTEGER) = 2147483647")));
+
+            query.Sql.Should().Contain("(c.price > @p0)");
+            query.Sql.Should().NotContain("@p1");
+            query.Parameters.Select(p => p.Value?.ToString()).Should().Equal("2147483646");
+        }
+
+        /// <summary>
+        /// The targets whose conversion does not stay within one of the stored value state no bound.
+        /// </summary>
+        /// <remarks>
+        /// Each was measured against Calcite's own runtime, and measuring is what ruled them out.
+        /// <c>SMALLINT</c> and <c>TINYINT</c> wrap rather than saturate — <c>toShort(1e30)</c> is
+        /// <c>-1</c> and <c>toByte(1e30)</c> is <c>255</c>, which bear no relation to the stored value.
+        /// <c>FLOAT</c> and <c>REAL</c> round to float precision, and <c>float(1e30)</c> is 1.5e22 away
+        /// from <c>1e30</c>. <c>DECIMAL</c> raises where the value does not fit its declared precision,
+        /// and excluding the document would turn a failing query into a passing one.
+        /// </remarks>
+        [TestMethod]
+        public void ATargetThatWrapsOrRoundsOrRaisesStatesNoBound()
+        {
+            foreach (var type in new[] { "SMALLINT", "TINYINT", "REAL", "FLOAT", "DECIMAL(10, 2)" })
+            {
+                var sql = Query(FindCosmos(PlanToAsync(
+                    $"SELECT * FROM products AS c WHERE CAST(c.\"_MAP\"['price'] AS {type}) = 30"))).Sql;
+
+                sql.Should().Contain("IS_DEFINED(c.price)", "a comparison still implies the path is defined");
+                sql.Should().NotContain("IS_NUMBER", "no bound is sound for {0}", type);
+            }
+        }
+
         /// <remarks>
         /// Nothing is known about where converting to a date lands, so there is no bound to state — and
         /// the definedness the comparison implies is still worth pushing.
